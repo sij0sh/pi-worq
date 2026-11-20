@@ -67,6 +67,12 @@ In your profile, `entry` names the staged executable or script, `checks` defines
 
 Worq stores run records and verification receipts in `${XDG_STATE_HOME:-$HOME/.local/state}/pi-worq`. Override with `WORQ_STATE_DIR`. Inspect the candidate with `git show worq/<run-id>`.
 
+## Phase prompts
+
+Edit the Markdown files in [`prompts/`](prompts/) in the installed Worq checkout. Verify uses `verify-journey.md` to select a journey and `verify-route.md` to classify a mismatch. `worker.md` guides delegated jobs, and `shared.md` is appended to the SDK role prompts.
+
+Worq loads all prompts when you start a run. Edits take effect on the next run without restarting Pi. Keep `{{ORIENT_SCHEMA}}` in `orient.md`; Worq replaces it with the current JSON schema. Missing or blank files prevent the run from starting.
+
 ## Development
 
 ```sh

@@ -1,0 +1,1 @@
+Implement in this worktree only. Use managed dev_check for approved checks. No acceptance tools exist here. Delegate a single focused investigation or transfer the sole writer to a worker; do not declare done before necessary work settles. Submit a summary with any unchecked assumptions.

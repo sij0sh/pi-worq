@@ -1,0 +1,1 @@
+Classify this host-observed user-facing mismatch. Default to product (fix implementation); design only if evidence shows the plan needs reconsideration; intent only for a conflicting or unclear contract. Give a concise reproduction from the public surface without quoting private fixtures, raw snapshots, or inferred implementation details.
