@@ -1,98 +1,74 @@
 import { chmod, mkdir, rm } from "node:fs/promises";
-import { createServer, type Server } from "node:net";
+import { createServer } from "node:net";
 import { join } from "node:path";
-import { Type, type Static } from "typebox";
-import { Block, obj, parse, text } from "./contracts.ts";
-import type { Run } from "./controller.ts";
+import { Type, type Static, type TSchema } from "typebox";
+import { Block, errorText, literals, obj, parse, text } from "./contracts.ts";
+import type { Worq } from "./worq.ts";
 
-const ref = Type.String({ pattern: "^[a-z]\\d{1,6}$" });
-const message = text(4000);
-/** Manager operations. Pi tools, /worq subcommands and the `worq` CLI all go through `dispatch`. */
-export const Ops = {
-  status: obj({}),
-  agents: obj({}),
-  log: obj({ agent: ref, lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 60 })), since: Type.Optional(Type.Integer({ minimum: 0 })) }),
-  send: obj({ agent: ref, text: message, mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")])) }),
-  interrupt: obj({ agent: ref, text: message }),
-  reply: obj({ id: ref, text: message }),
-  review: obj({ id: ref, decision: Type.Union([Type.Literal("approve"), Type.Literal("revise"), Type.Literal("escalate")]), text: Type.Optional(message) }),
-  escalate: obj({ id: ref, note: Type.Optional(text(600)) }),
-  stop: obj({}),
-};
-export type Op = keyof typeof Ops;
-export interface Host {
-  run(): Run | undefined;
-  report(run: Run): string;
+const ref = Type.String({ pattern: "^@?[0-9a-fA-F]{4}$", description: "Agent ref from worq_spawn or worq_list" });
+/** One schema for the Pi tools, /worq subcommands and the worq CLI. */
+export function ops(kinds: string[]) {
+  return {
+    spawn: obj({
+      kind: literals(kinds as [string, ...string[]]),
+      task: Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver. Include @<ref> to attach another agent's plan." }),
+    }),
+    list: obj({ ref: Type.Optional(ref) }),
+    send: obj({ ref, text: text(6000) }),
+    cancel: obj({ ref: Type.Union([ref, Type.Literal("all")]) }),
+    /** CLI only: activity after a sequence number. */
+    log: obj({ ref, since: Type.Optional(Type.Integer({ minimum: 0 })) }),
+  } satisfies Record<string, TSchema>;
 }
+export type Ops = ReturnType<typeof ops>;
+export type Op = keyof Ops;
 
-function agentsText(run: Run) {
-  const bus = run.bus;
-  const agents = bus?.agentsView() ?? [];
-  const pending = bus?.pendingView() ?? [];
-  return [
-    agents.length ? "Agents:" : "No agents yet.",
-    ...agents.map((a) => `${a.id} · ${a.role} · ${a.state} · ${a.turns} turns${a.sealed ? " · sealed" : ""}${a.last ? `\n    ${a.last}` : ""}`),
-    ...(pending.length ? ["Open:", ...pending.map((p) => `${p.id} · ${p.kind === "ask" ? `${p.agent} asks` : `${p.gate} review`}: ${p.body.replace(/\s+/g, " ").slice(0, 200)}`)] : []),
-  ].join("\n");
-}
-
-export async function dispatch(host: Host, op: string, raw: unknown): Promise<{ text: string; data?: unknown }> {
-  if (!(op in Ops)) throw new Block("op", `Unknown operation ${op}`);
+export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown): Promise<{ text: string; data?: unknown }> {
+  if (!(op in table)) throw new Block("op", `Unknown operation ${op}`);
   const key = op as Op;
-  const args = parse(Ops[key], raw ?? {}, op) as Static<(typeof Ops)[Op]> & Record<string, never>;
-  const run = host.run();
-  if (!run) throw new Block("no-run", "No Worq run in this session");
-  const bus = run.bus;
-  if (key === "status") return { text: `${host.report(run)}\n\n${agentsText(run)}`, data: { reports: run.view.reports } };
-  if (key === "stop") {
-    void run.stop();
-    return { text: "Stopping the run" };
-  }
-  if (!bus) throw new Block("not-ready", "The run has not opened its manager channel yet");
+  const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
-    case "agents": return { text: agentsText(run), data: { agents: bus.agentsView(), pending: bus.pendingView() } };
-    case "log": {
-      const { agent, lines, since } = args as Static<typeof Ops.log>;
-      const entries = bus.log(agent, lines ?? 20, since ?? 0);
-      return { text: entries.map((e) => e.line).join("\n") || "(no activity)", data: entries };
+    case "spawn": {
+      const { kind, task } = args as Static<Ops["spawn"]>;
+      const agent = await worq.spawn(kind, task);
+      const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => `@${a.ref}`).join(", ")} attached` : "";
+      return { text: `Spawned ${kind} agent ${agent.ref}${attached}. It runs in the background; its review digest or questions arrive as [worq ${agent.ref}] messages.`, data: { ref: agent.ref } };
     }
-    case "send": { const { agent, text, mode } = args as Static<typeof Ops.send>; return { text: bus.send(agent, text, mode) }; }
-    case "interrupt": { const { agent, text } = args as Static<typeof Ops.interrupt>; return { text: await bus.interrupt(agent, text) }; }
-    case "reply": { const { id, text } = args as Static<typeof Ops.reply>; return { text: bus.reply(id, text) }; }
-    case "review": { const { id, decision, text } = args as Static<typeof Ops.review>; return { text: bus.review(id, decision, text) }; }
-    case "escalate": {
-      const { id, note } = args as Static<typeof Ops.escalate>;
-      void bus.escalate(id, note).catch(() => {});
-      return { text: `Escalated ${id} to the user` };
+    case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
+    case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }
+    case "cancel": return { text: await worq.cancel((args as Static<Ops["cancel"]>).ref) };
+    case "log": {
+      const { ref, since } = args as Static<Ops["log"]>;
+      const entries = worq.get(ref).tail(200, since ?? 0);
+      return { text: entries.map((e) => e.line).join("\n") || "(no activity)", data: entries };
     }
   }
   throw new Block("op", `Unhandled operation ${op}`);
 }
 
-/** JSON-lines control socket at <state>/ctl/<pid>.sock (directory 0700, socket 0600). */
-export async function serve(state: string, host: Host): Promise<{ path: string; close(): Promise<void> }> {
+/** JSON-lines control socket at <state>/ctl/<pid>.sock (dir 0700, socket 0600). */
+export async function serve(state: string, handle: (op: string, args: unknown) => Promise<{ text: string; data?: unknown }>) {
   const dir = join(state, "ctl");
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await chmod(dir, 0o700);
   const path = join(dir, `${process.pid}.sock`);
   await rm(path, { force: true });
-  const server: Server = createServer((socket) => {
+  const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (buffer.length > 64 * 1024) { socket.destroy(); return; }
-      let index: number;
-      while ((index = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, index);
-        buffer = buffer.slice(index + 1);
+      let at: number;
+      while ((at = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, at);
+        buffer = buffer.slice(at + 1);
         void (async () => {
           try {
             const { op, args } = JSON.parse(line) as { op: string; args?: unknown };
-            const result = await dispatch(host, op, args);
-            socket.write(JSON.stringify({ ok: true, ...result }) + "\n");
+            socket.write(JSON.stringify({ ok: true, ...(await handle(op, args)) }) + "\n");
           } catch (error) {
-            socket.write(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }) + "\n");
+            socket.write(JSON.stringify({ ok: false, error: errorText(error) }) + "\n");
           }
         })();
       }

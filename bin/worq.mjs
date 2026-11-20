@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Control a running Worq session from any terminal. Talks to <state>/ctl/<pid>.sock (JSON lines).
+// Inspect, steer and stop Worq agents from any terminal. Talks to <state>/ctl/<pid>.sock (JSON lines).
 import { readdirSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
@@ -7,16 +7,12 @@ import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const usage = `Usage: worq [--pid N] <command>
-  ls                                   list Pi sessions with a control socket
-  status                               run state, reports, agents, open items
-  agents                               agents and open questions/reviews
-  log <agent> [-f]                     agent activity (-f follows)
-  send <agent> [--follow-up] <text>    message an agent (steer by default)
-  interrupt <agent> <text>             abort the agent's turn and redirect it
-  reply <q-id> <text>                  answer an agent's question
-  review <g-id> approve|revise|escalate [text]
-  escalate <id>                        hand a question/review to the user
-  stop                                 stop the run`;
+  sessions                    Pi sessions with Worq loaded
+  list [ref]                  agents, or one agent in full
+  log <ref> [-f]              agent activity (-f follows)
+  spawn <kind> <task>         start an agent
+  send <ref> <text>           steer, answer, or start the next round
+  cancel <ref|all>            close or cancel; branch kept`;
 const state = resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq"));
 const ctl = join(state, "ctl");
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; } };
@@ -38,46 +34,31 @@ function call(pid, op, args = {}) {
     socket.on("error", fail);
   });
 }
-function take(argv, flag, value = false) {
-  const i = argv.indexOf(flag);
-  if (i === -1) return undefined;
-  const [, v] = argv.splice(i, value ? 2 : 1);
-  return value ? v : true;
-}
 async function main(argv) {
-  const pinned = take(argv, "--pid", true);
-  const [command, ...rest] = argv;
+  const at = argv.indexOf("--pid");
+  const pinned = at === -1 ? undefined : Number(argv.splice(at, 2)[1]);
+  const [command, first, ...rest] = argv;
   if (!command || command === "-h" || command === "--help") { console.log(usage); return; }
   const live = sockets();
-  if (command === "ls") { console.log(live.length ? live.map((p) => `pi ${p}`).join("\n") : "No Pi session with Worq is running."); return; }
-  const pid = pinned ? Number(pinned) : live.length === 1 ? live[0] : undefined;
+  if (command === "sessions") { console.log(live.length ? live.map((p) => `pi ${p}`).join("\n") : "No Pi session with Worq is running."); return; }
+  const pid = pinned ?? (live.length === 1 ? live[0] : undefined);
   if (!pid) throw new Error(live.length ? `Several sessions (${live.join(", ")}); pass --pid` : "No Pi session with Worq is running");
-  const [first, ...words] = rest;
-  const text = () => words.join(" ");
+  const print = async (op, args) => console.log((await call(pid, op, args)).text);
   switch (command) {
-    case "status": case "agents": case "stop": console.log((await call(pid, command)).text); return;
+    case "list": return print("list", first ? { ref: first } : {});
+    case "spawn": return print("spawn", { kind: first, task: rest.join(" ") });
+    case "send": return print("send", { ref: first, text: rest.join(" ") });
+    case "cancel": return print("cancel", { ref: first });
     case "log": {
-      const follow = take(rest, "-f");
-      const agent = rest[0];
+      const follow = rest.includes("-f");
       let since = 0;
       do {
-        const { data } = await call(pid, "log", { agent, lines: 60, since });
+        const { data } = await call(pid, "log", { ref: first, since });
         for (const entry of data) { console.log(entry.line); since = entry.seq; }
         if (follow) await sleep(1000);
       } while (follow);
       return;
     }
-    case "send": {
-      const followUp = take(words, "--follow-up");
-      console.log((await call(pid, "send", { agent: first, text: text(), mode: followUp ? "followUp" : "steer" })).text); return;
-    }
-    case "interrupt": console.log((await call(pid, "interrupt", { agent: first, text: text() })).text); return;
-    case "reply": console.log((await call(pid, "reply", { id: first, text: text() })).text); return;
-    case "review": {
-      const [decision, ...note] = words;
-      console.log((await call(pid, "review", { id: first, decision, ...(note.length ? { text: note.join(" ") } : {}) })).text); return;
-    }
-    case "escalate": console.log((await call(pid, "escalate", { id: first })).text); return;
     default: throw new Error(`Unknown command ${command}\n${usage}`);
   }
 }

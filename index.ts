@@ -1,206 +1,157 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type, type Static, type TSchema } from "typebox";
-import { piRoles } from "./src/agents.ts";
-import type { BusEvent } from "./src/bus.ts";
-import { obj, text } from "./src/contracts.ts";
-import { dispatch, Ops, serve, type Host, type Op } from "./src/control.ts";
-import { archived, Run, type State } from "./src/controller.ts";
-import { active, agentReportText, clean, inspect, report, STOP_KEY, summary, tone, widget } from "./src/ui.ts";
+import type { TSchema } from "typebox";
+import type { AgentEvent } from "./src/agent.ts";
+import { loadConfig } from "./src/config.ts";
+import { dispatch, ops, serve, type Op } from "./src/control.ts";
+import { errorText } from "./src/contracts.ts";
+import { piDriver } from "./src/pi.ts";
+import { loadPrompts } from "./src/prompts.ts";
+import { clean } from "./src/render.ts";
+import type { Driver } from "./src/session.ts";
 import { statePath } from "./src/workspace.ts";
+import { Worq } from "./src/worq.ts";
 
-/** What the manager (main Pi) reads when an agent asks or a handoff needs review. */
-export function managerMessage(event: Exclude<BusEvent, { type: "settled" }>) {
-  const { pending, context } = event;
-  if (event.type === "ask") {
-    return `[worq] ${pending.id} · agent ${pending.agent} asks:\n${pending.body}\n\n${context ? `Recent activity:\n${context}\n\n` : ""}`
-      + `Answer with worq_reply (id "${pending.id}"), or worq_escalate if only the user can decide.`;
-  }
-  return `[worq] ${pending.id} · ${pending.gate} review\n${pending.body}\n\n`
-    + `Review with worq_review (id "${pending.id}"): approve, revise with text, or escalate if it changes what the user asked for.`;
-}
+export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
+const ENABLED = "worq-enabled";
 
-export default function worq(pi: ExtensionAPI) {
-  let current: Run | undefined;
-  let closing = false;
-  let closeInspector: (() => void) | undefined;
-  let socket: Awaited<ReturnType<typeof serve>> | undefined;
-  const host: Host = { run: () => current, report: (run) => report(run.view) };
-  const say = (ctx: ExtensionContext, text: string, status: "info" | "warning" | "error" = "info") => {
-    if (ctx.mode === "tui") ctx.ui.notify(clean(text), status);
-    else if (ctx.mode === "print") process.stderr.write(`${clean(text)}\n`);
-  };
-  const stop = (ctx: ExtensionContext) => {
-    if (!current || !active(current.view)) { say(ctx, "No active Worq run to stop."); return; }
-    return current.stop();
-  };
-  const available = () => !current || (!active(current.view) && current.view.state !== "cleanup-unconfirmed");
+const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
+  worq_spawn: {
+    op: "spawn",
+    description: "Start a background Pi SDK agent of a kind (plan: read-only, writes .agents/plans/; execute: edits its own worktree on branch worq/<ref>). Returns a ref at once. Independent reviewers run automatically when it submits.",
+    guidelines: [
+      "Use worq_spawn for work the user hands to Worq. Plan first when the approach is open; then worq_spawn(\"execute\", \"<task> @<plan-ref>\") to implement against that plan. Worq agents cannot see this conversation: put everything they need in the task.",
+      "Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
+    ],
+  },
+  worq_list: {
+    op: "list",
+    description: "List Worq agents (no ref) or show one agent in full: plan path, branch, PQs, reviews and recent activity.",
+    guidelines: [],
+  },
+  worq_send: {
+    op: "send",
+    description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
+    guidelines: [
+      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. Send accepted findings with worq_send as concrete feedback. Escalate to the user only what changes their intent or scope.",
+    ],
+  },
+  worq_cancel: {
+    op: "cancel",
+    description: "Close or cancel an agent (or all): stops it, its PQ subagents and reviewers, removes its worktree and keeps its branch.",
+    guidelines: [
+      "Worq never merges. When an execute agent's reviews pass and you agree, merge its branch by hand (git merge worq/<ref>), then worq_cancel it to close.",
+    ],
+  },
+};
 
-  async function start(ctx: ExtensionContext, request: string, lenses = true) {
-    const run = new Run({ cwd: ctx.cwd, stateDir: statePath(), request, interactive: ctx.mode === "tui",
-      roles: piRoles(ctx), manager: ctx.mode === "tui", lenses });
-    current = run;
-    if (ctx.mode !== "tui") { await run.done; say(ctx, report(run.view)); return run; }
-    widget(ctx, run);
-    let asked: string | undefined;
-    let detach: (() => void) | undefined;
-    let delivered = 0;
-    const unsubscribe = run.subscribe(() => {
-      if (closing || current !== run) return;
-      for (const entry of run.view.reports.slice(delivered)) {
-        delivered++;
-        pi.sendMessage({ customType: "worq-agent", display: true, content: agentReportText(entry), details: entry }, { triggerTurn: false });
-      }
-      // Only asks and reviews trigger a manager turn.
-      if (run.bus && !detach) detach = run.bus.on((event) => {
-        if (closing || current !== run) return;
-        if (event.type === "settled") {
-          pi.sendMessage({ customType: "worq-agent", display: true, content: `[worq] ${event.id} ${event.outcome}; the run continues without it.` }, { deliverAs: "nextTurn" });
-          return;
-        }
-        pi.sendMessage({ customType: "worq-agent", display: true, content: managerMessage(event), details: event.pending }, { triggerTurn: true, deliverAs: "followUp" });
+/** Test seam: replace the Pi SDK driver. */
+export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string } = {}) {
+  return function worq(pi: ExtensionAPI) {
+    const prompts = loadPrompts();
+    const table = ops([...prompts.kinds.keys()]);
+    let instance: Worq | undefined;
+    let socket: Awaited<ReturnType<typeof serve>> | undefined;
+    let closing = false;
+    let ui: ExtensionContext | undefined;
+
+    const status = () => {
+      if (ui?.mode !== "tui" || !instance) return;
+      const live = instance.all().filter((a) => !a.ended);
+      ui.ui.setStatus("worq", live.length ? `worq ${live.map((a) => `${a.ref}:${a.state}`).join(" ")}` : undefined);
+    };
+    const notify = (event: AgentEvent) => {
+      if (closing) return;
+      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, { triggerTurn: true, deliverAs: "followUp" });
+      status();
+    };
+    const ensure = (ctx: ExtensionContext) => {
+      ui = ctx;
+      if (instance) return instance;
+      const config = loadConfig(options.agentDir?.() ?? getAgentDir());
+      const driver = options.driver?.(ctx) ?? piDriver(ctx, config);
+      instance = new Worq({ driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
+      return instance;
+    };
+    const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
+      const result = await dispatch(ensure(ctx), table, op, args);
+      status();
+      return result;
+    };
+
+    // Hidden until /worq: zero context cost in sessions that never use Worq.
+    for (const name of TOOLS) {
+      const { op, description, guidelines } = descriptions[name];
+      const parameters: TSchema = table[op];
+      pi.registerTool({
+        name, label: name, description, parameters, promptSnippet: description, defaultActive: false,
+        ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
+        async execute(_id, params, _signal, _update, ctx) {
+          const { text } = await run(ctx, op, params);
+          return { content: [{ type: "text", text: clean(text) }], details: undefined };
+        },
       });
-      const question = run.view.state === "question" ? run.view.question : undefined;
-      if (question === asked) return;
-      asked = question;
-      if (question) ctx.ui.notify(clean(question), "warning");
-    });
-    void run.done.then(() => {
-      unsubscribe(); detach?.();
-      if (closing || current !== run) return;
-      ctx.ui.setWidget("worq", undefined);
-      pi.appendEntry("worq-result", { short: summary(run.view), full: report(run.view), state: run.view.state });
-    }).catch((error: unknown) => { if (!closing) say(ctx, String(error), "error"); });
-    return run;
-  }
+    }
+    const enable = (on: boolean) => {
+      const active = new Set(pi.getActiveTools());
+      for (const name of TOOLS) { if (on) active.add(name); else active.delete(name); }
+      pi.setActiveTools([...active]);
+    };
+    const say = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info") => {
+      if (ctx.mode === "tui") ctx.ui.notify(clean(text), level);
+      else process.stderr.write(`${clean(text)}\n`);
+    };
 
-  pi.registerEntryRenderer<{ short: string; full: string; state?: State }>("worq-result", (entry, options, theme) => {
-    const data = entry.data;
-    if (!data || typeof data.short !== "string" || typeof data.full !== "string") return;
-    // `short` is plain text; color it here so stored entries never carry escape codes.
-    const color = data.state ? tone(data.state) : "accent";
-    const [icon, ...rest] = clean(data.short).split(" ");
-    const line = `${theme.fg(color, icon)} ${rest.join(" ")}`;
-    return new Text(options.expanded ? `${line}\n\n${theme.fg("muted", clean(data.full))}` : line, 1, 0);
-  });
-  pi.registerMessageRenderer("worq-agent", (message, options, theme) => {
-    const body = clean(typeof message.content === "string" ? message.content : message.content.map((c) => c.type === "text" ? c.text : "").join(""));
-    const [head, ...rest] = body.split("\n");
-    const line = `${theme.fg("accent", "◆")} ${theme.fg("muted", head.replace(/^\[worq\] /, "worq · "))}`;
-    return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
-  });
-
-  // Manager tools for the main Pi session. Same operations as `/worq <op>` and the `worq` CLI.
-  const ops: { op: Op; name: string; description: string; guideline?: string }[] = [
-    { op: "status", name: "worq_status", description: "Show the active Worq run: phase, state, agents and open questions/reviews." },
-    { op: "agents", name: "worq_agents", description: "List Worq's SDK agents (id, role, state) and open questions/reviews." },
-    { op: "log", name: "worq_log", description: "Read an agent's recent activity (tool calls and messages)." },
-    { op: "send", name: "worq_send", description: "Message a running Worq agent. mode steer (default) arrives after its current tool call; followUp waits until it would stop.",
-      guideline: "Use worq_send when the user wants to redirect or inform a running Worq agent; Worq agents cannot see this conversation." },
-    { op: "interrupt", name: "worq_interrupt", description: "Abort a Worq agent's current turn and redirect it with your message." },
-    { op: "reply", name: "worq_reply", description: "Answer a Worq agent's question by its id (q…).",
-      guideline: "When a [worq] message asks a question, answer with worq_reply if this conversation or the repository settles it; use worq_escalate when only the user can decide intent or scope." },
-    { op: "review", name: "worq_review", description: "Decide a Worq handoff review by its id (g…): approve, revise (with text), or escalate to the user.",
-      guideline: "For [worq] reviews, use worq_review: approve when the handoff fits what the user asked for in this conversation; revise with concrete text when it drifts. Never treat a review as acceptance: the independent Verify agent reports the verdict. A plan review may carry lens findings. Approve to discard them as overfitted or not material to what the user asked; revise, naming the findings to resolve, to reopen Plan with a copy of them." },
-    { op: "escalate", name: "worq_escalate", description: "Hand a Worq question or review to the user." },
-    { op: "stop", name: "worq_stop", description: "Stop the active Worq run and join its agents." },
-  ];
-  for (const { op, name, description, guideline } of ops) {
-    const parameters: TSchema = Ops[op];
-    pi.registerTool({
-      name, label: name, description, parameters, promptSnippet: description,
-      ...(guideline ? { promptGuidelines: [guideline] } : {}),
-      async execute(_id, params: Static<typeof parameters>) {
-        const { text } = await dispatch(host, op, params);
-        return { content: [{ type: "text", text: clean(text) }], details: undefined };
+    pi.registerCommand("worq", {
+      description: "Enable Worq tools: /worq [request] · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
+      async handler(args, ctx) {
+        if (closing) return;
+        const value = args.trim();
+        const [word = "", ref = "", ...rest] = value.split(/\s+/);
+        try {
+          if (word === "off") {
+            enable(false);
+            pi.appendEntry(ENABLED, { on: false });
+            say(ctx, "Worq tools hidden. Running agents continue; /worq cancel all stops them.");
+            return;
+          }
+          if (word === "list" || word === "send" || word === "cancel") {
+            const params = word === "list" ? (ref ? { ref } : {}) : word === "send" ? { ref, text: rest.join(" ") } : { ref };
+            say(ctx, (await run(ctx, word, params)).text);
+            return;
+          }
+          enable(true);
+          pi.appendEntry(ENABLED, { on: true });
+          ensure(ctx);
+          if (value) pi.sendUserMessage(`Use Worq for this: ${value}`);
+          else say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}.`);
+        } catch (error) { say(ctx, errorText(error), "error"); }
       },
     });
-  }
-  pi.registerTool({
-    name: "worq_start", label: "worq_start", description: "Start Worq for a plan, report, or code change with independent verification.",
-    promptSnippet: "Start a Worq run for a report or code change",
-    promptGuidelines: ["Use worq_start only when the user asks for Worq; you then manage its agents through the worq_* tools."],
-    parameters: obj({ request: text(6000), lenses: Type.Optional(Type.Boolean({ description: "Run lens SCQs (pair, defeater, decision, subtraction) on the finished plan; their findings join your plan review. Default true." })) }),
-    async execute(_id, params, _signal, _update, ctx) {
-      if (ctx.mode !== "tui") throw new Error("worq_start needs Pi's interactive mode; use /worq in print mode");
-      if (!available()) throw new Error("A Worq run is already active");
-      const run = await start(ctx, params.request, params.lenses ?? true);
-      return { content: [{ type: "text", text: `Started Worq run ${run.view.id}. Its reports, questions, and reviews will arrive as [worq] messages.` }], details: undefined };
-    },
-  });
 
-  pi.registerCommand("worq", {
-    description: "Start a Worq run: /worq [--no-lenses] [request]. Also: status · agents · log <agent> · send <agent> <text> · reply <id> <text> · review <id> approve|revise|escalate [text] · stop",
-    async handler(args, ctx) {
-      if (ctx.mode !== "tui" && ctx.mode !== "print") throw new Error("Worq supports Pi TUI and print modes only");
-      if (closing) return;
-      const trimmed = args.trim();
-      const subcommand = /^(start|status|stop|agents|log|send|interrupt|reply|review|escalate)(?=\s|$)/.exec(trimmed)?.[0];
-      const action = subcommand ?? "start";
-      const value = subcommand ? trimmed.slice(subcommand.length).trim() : trimmed;
-      const state = statePath();
-      try {
-        if (action === "start") {
-          if (!available()) { say(ctx, `A Worq run is already active (${STOP_KEY} stops it).`, "warning"); return; }
-          const noLenses = /^--no-lenses(?=\s|$)/.test(value);
-          const typed = noLenses ? value.slice("--no-lenses".length).trim() : value;
-          const request = typed || (ctx.mode === "tui" ? (await ctx.ui.editor("What outcome should Worq deliver?", ""))?.trim() : undefined);
-          if (closing || !available()) return;
-          if (!request) { if (ctx.mode === "print") say(ctx, "Supply a request: /worq <request>"); return; }
-          if (request.length > 6000) { say(ctx, "Keep the request under 6000 characters.", "warning"); return; }
-          await start(ctx, request, !noLenses);
-        } else if (action === "status") {
-          const run = current && (!value || current.view.id === value) ? current : undefined;
-          const stored = !run && value ? await archived(state, value, ctx.cwd) : undefined;
-          if (!run && !stored) { say(ctx, "No run in this session. Use /worq or /worq status <run-id>."); return; }
-          const get = () => run?.view ?? stored!;
-          if (ctx.mode === "tui") {
-            if (closeInspector) return;
-            await inspect(ctx, get, run?.subscribe.bind(run), (close) => { closeInspector = close; });
-          } else say(ctx, report(get()));
-        } else if (action === "stop") {
-          const done = stop(ctx);
-          if (ctx.mode === "print") await done;
-        } else {
-          const [first = "", ...rest] = value.split(/\s+/);
-          const tail = rest.join(" ");
-          const params: Record<Op, () => object> = {
-            agents: () => ({}), status: () => ({}), stop: () => ({}),
-            log: () => ({ agent: first }),
-            send: () => ({ agent: first, text: tail }),
-            interrupt: () => ({ agent: first, text: tail }),
-            reply: () => ({ id: first, text: tail }),
-            review: () => { const [decision = "", ...words] = rest; return { id: first, decision, ...(words.length ? { text: words.join(" ") } : {}) }; },
-            escalate: () => ({ id: first }),
-          };
-          const { text } = await dispatch(host, action, params[action as Op]());
-          say(ctx, text);
-        }
-      } catch (error) { if (!closing) say(ctx, error instanceof Error ? error.message : String(error), "error"); }
-    },
-  });
-  // While Worq waits on the user, whatever they type in Pi's editor is the answer.
-  pi.on("input", async (event, ctx) => {
-    const run = current;
-    if (closing || !run || run.view.state !== "question" || event.source !== "interactive") return { action: "continue" };
-    const text = event.text.trim();
-    if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
-    if (/^(stop|cancel|abort)$/i.test(text)) { void run.stop(); return { action: "handled" }; }
-    if (!run.answer(text)) say(ctx, "Keep the answer under 4000 characters.", "warning");
-    return { action: "handled" };
-  });
-  pi.registerShortcut(STOP_KEY, { description: "Stop the active Worq run", handler: (ctx) => { void stop(ctx); } });
-  pi.on("session_start", async (_event, ctx) => {
-    if (ctx.mode !== "tui" || socket) return;
-    try { socket = await serve(statePath(), host); }
-    catch (error) { say(ctx, `Worq control socket unavailable: ${String(error)}`, "warning"); }
-  });
-  pi.on("session_shutdown", async (_event, ctx) => {
-    closing = true;
-    closeInspector?.();
-    await current?.stop();
-    await socket?.close().catch(() => {});
-    socket = undefined;
-    if (ctx.mode === "tui") ctx.ui.setWidget("worq", undefined);
-  });
+    pi.registerMessageRenderer("worq", (message, options, theme) => {
+      const body = clean(typeof message.content === "string" ? message.content : message.content.map((c) => c.type === "text" ? c.text : "").join(""));
+      const [head = "", ...rest] = body.split("\n");
+      const line = `${theme.fg("accent", "◆")} ${theme.fg("muted", head.replace(/^\[worq ([0-9a-f]{4})\] /, "worq $1 · "))}`;
+      return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
+    });
+
+    pi.on("session_start", async (_event, ctx) => {
+      ui = ctx;
+      // Resume/fork: restore the last /worq choice on this branch.
+      const last = ctx.sessionManager.getBranch().filter((e) => e.type === "custom" && e.customType === ENABLED).at(-1);
+      if (last && last.type === "custom" && (last.data as { on?: boolean } | undefined)?.on) enable(true);
+      if (socket) return;
+      try { socket = await serve(statePath(), (op, args) => run(ctx, op, args)); }
+      catch (error) { if (ctx.mode === "tui") say(ctx, `Worq control socket unavailable: ${errorText(error)}`, "warning"); }
+    });
+    pi.on("session_shutdown", async (_event, ctx) => {
+      closing = true;
+      await instance?.shutdown();
+      await socket?.close().catch(() => {});
+      socket = undefined;
+      if (ctx.mode === "tui") ctx.ui.setStatus("worq", undefined);
+    });
+  };
 }
+export default createWorq();

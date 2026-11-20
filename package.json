@@ -1,8 +1,8 @@
 {
   "name": "pi-worq",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "type": "module",
-  "description": "Focused coding runs with independent CLI and terminal UI verification in Pi",
+  "description": "Plan and execute Pi SDK agents with probing-question subagents and independent reviewers, managed from the main Pi session",
   "keywords": ["pi-package"],
   "engines": { "node": ">=22.19" },
   "pi": { "extensions": ["./index.ts"] },
