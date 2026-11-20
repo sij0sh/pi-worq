@@ -76,9 +76,35 @@ export async function findProfile(root: string, explicit: string | undefined, di
     } catch { /* unrelated or unreadable profile */ }
   }
   if (matches.length > 1) throw new Block("profile-ambiguous", `Several profiles in ${dir} name this project: ${matches.map((m) => m.slice(dir.length + 1)).join(", ")}`);
-  if (!matches.length) throw new Block("no-profile", `No profile for ${root}. Copy examples/cli-profile.json to ${dir}/<name>.json and set "repository"`);
+  if (!matches.length) throw new Block("no-profile", `No profile for ${root}. In interactive Pi, run /worq-init cli or /worq-init tui from this project`);
   return matches[0];
 }
+
+export async function initProfile(cwd: string, surface: Profile["surface"], edit: (draft: string) => Promise<string | undefined>, dir = profilesPath()) {
+  const root = await realpath(await git(cwd, AbortSignal.timeout(5000), "rev-parse", "--show-toplevel"));
+  const ensureNew = async (directory: string) => {
+    if (inside(root, directory)) throw new Block("profile-location", "The verification profile must be outside the project");
+    const existing = await findProfile(root, undefined, directory).catch((error: unknown) => {
+      if (!(error instanceof Block && error.code === "no-profile")) throw error;
+    });
+    if (existing) throw new Block("profile-exists", `This project already has a profile: ${existing}`);
+  };
+  await ensureNew(dir);
+  const template = JSON.parse(await readFile(new URL(`../examples/${surface}-profile.json`, import.meta.url), "utf8"));
+  const raw = await edit(JSON.stringify({ ...template, repository: root }, null, 2));
+  if (raw === undefined) return;
+  if (Buffer.byteLength(raw) >= 256 * 1024) throw new Block("file", "Profile must be smaller than 256 KiB");
+  const profile = parse(ProfileSchema, json(raw, "Profile"), "Profile");
+  if (profile.repository !== root) throw new Block("profile-project", "Keep the prefilled repository path");
+  await validateProfile(profile, root);
+  await mkdir(dir, { mode: 0o700, recursive: true });
+  const directory = await realpath(dir);
+  await ensureNew(directory);
+  const path = join(directory, `${digest(root)}.json`);
+  await writeFile(path, `${raw.trimEnd()}\n`, { flag: "wx", mode: 0o600 });
+  return path;
+}
+
 export async function preflight(cwd: string, profilePath: string | undefined, signal: AbortSignal, profilesDir = profilesPath()) {
   if (process.platform !== "linux") throw new Block("platform", "Worq currently requires Linux");
   const root = await realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));

@@ -7,7 +7,7 @@ import { obj, text } from "./src/contracts.ts";
 import { dispatch, Ops, serve, type Host, type Op } from "./src/control.ts";
 import { archived, Run, type State } from "./src/controller.ts";
 import { active, clean, inspect, report, STOP_KEY, summary, tone, widget } from "./src/ui.ts";
-import { statePath } from "./src/workspace.ts";
+import { initProfile, statePath } from "./src/workspace.ts";
 
 /** What the manager (main Pi) reads when an agent asks or a handoff needs review. */
 export function managerMessage(event: Exclude<BusEvent, { type: "settled" }>) {
@@ -120,6 +120,20 @@ export default function worq(pi: ExtensionAPI) {
       if (!available()) throw new Error("A Worq run is already active");
       const run = await start(ctx, params.request, params.lenses ?? true);
       return { content: [{ type: "text", text: `Started Worq run ${run.view.id}. Its questions and reviews will arrive as [worq] messages.` }], details: undefined };
+    },
+  });
+
+  pi.registerCommand("worq-init", {
+    description: "Create this project's verification profile: /worq-init cli|tui",
+    async handler(args, ctx) {
+      if (ctx.mode !== "tui") { say(ctx, "/worq-init requires interactive Pi.", "error"); return; }
+      const surface = args.trim();
+      if (surface !== "cli" && surface !== "tui") { say(ctx, "Usage: /worq-init cli|tui", "warning"); return; }
+      if (process.env.WORQ_PROFILE) { say(ctx, "Unset WORQ_PROFILE to set up a profile with /worq-init.", "warning"); return; }
+      try {
+        const path = await initProfile(ctx.cwd, surface, (draft) => ctx.ui.editor("Edit and approve trusted verification commands", draft));
+        if (path) say(ctx, `Saved Worq profile: ${path}`);
+      } catch (error) { say(ctx, error instanceof Error ? error.message : String(error), "error"); }
     },
   });
 

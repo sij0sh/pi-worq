@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { test, type TestContext } from "node:test";
 import type { Action } from "../src/contracts.ts";
 import { cleanEnv, runProcess } from "../src/process.ts";
 import { journeyPty } from "../src/pty.ts";
+import { preflight } from "../src/workspace.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle/cli.js");
 const extension = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -155,6 +156,32 @@ const type = (text: string): Action => ({ type: "type", text });
 const press = (key: Extract<Action, { type: "press" }>["key"]): Action => ({ type: "press", key });
 const wait = (ms: number): Action => ({ type: "wait", ms });
 const observe: Action = { type: "observe" };
+
+test("/worq-init previews a project profile and saves only on submit", { timeout: 20_000 }, async (t) => {
+  const h = await harness(t);
+  const dir = join(h.env.XDG_CONFIG_HOME, "pi-worq", "profiles");
+  await rm(dir, { recursive: true });
+  const screens = await journeyPty(process.execPath, invocation, [
+    wait(1400), type("/worq-init tui"), press("enter"), wait(300), observe,
+    press("escape"), wait(200),
+    type("/worq-init cli"), press("enter"), wait(300), press("enter"), wait(300), observe,
+    type("/worq-init cli"), press("enter"), wait(300), observe,
+  ], h.cwd, h.env, AbortSignal.timeout(15_000));
+  assert.match(screens[0].screen, /Edit and approve trusted verification commands/);
+  assert.match(screens[1].screen, /Saved Worq profile/);
+  assert.match(screens[2].screen, /This project already has a profile/);
+  const files = await readdir(dir);
+  assert.equal(files.length, 1);
+  const path = join(dir, files[0]);
+  const profile = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(profile.repository, h.cwd);
+  assert.equal(profile.surface, "cli");
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual((await preflight(h.cwd, undefined, AbortSignal.timeout(3000), dir)).profile, profile);
+  assert.equal(h.git("status", "--porcelain"), "");
+  assert.deepEqual(h.calls, []);
+});
+
 for (const mode of ["regular", "fullscreen"] as const) {
   test(`Pi ${mode}: typed answer, keyboard inspector, resize and editor`, { timeout: 25_000 }, async (t) => {
     const h = await harness(t, mode);

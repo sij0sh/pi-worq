@@ -22,20 +22,28 @@ When Plan finishes, Worq fires lens SCQs on its own: independent read-only agent
 
 Requires Linux, Pi 1.6.0, Node.js 22.19+, Git at `/usr/bin/git`, and `/usr/bin/python3` for terminal UI verification.
 
-From your local `pi-worq` checkout, install dependencies and register the package with Pi:
+Install from GitHub:
 
 ```sh
-npm ci
-pi install "$PWD"
+pi install git:github.com/sij0sh/pi-worq
 ```
 
-To update, refresh the checkout and rerun `npm ci`. To remove the package, run `pi remove "$PWD"` from the same directory.
+Pi installs the dependencies and loads the bundled prompts and profile templates. No manual copying or `npm install` needed.
+
+Update or uninstall:
+
+```sh
+pi update git:github.com/sij0sh/pi-worq
+pi remove git:github.com/sij0sh/pi-worq
+```
+
+Uninstalling leaves your profiles and run records intact.
 
 ## Quick start
 
-1. Copy the [CLI profile](examples/cli-profile.json) or [terminal UI profile](examples/tui-profile.json) to `~/.config/pi-worq/profiles/<name>.json` (mode `0600`). Set `repository` to the project's absolute path. Use only code and commands you trust.
-2. From the project (clean committed baseline), run `pi`.
-3. Type:
+1. Run `pi` from your project (with a clean, committed Git baseline).
+2. Run `/worq-init cli` for a command-line app or `/worq-init tui` for a terminal UI. Edit the prefilled profile for your app and submit it only if you trust the commands and project code. Worq fills in the repository path and saves the profile outside the project for you.
+3. Start a run. For example:
 
 ```text
 /worq Make loading a note print its contents in uppercase
@@ -71,6 +79,7 @@ Set `"manager": { "review": "gates" | "asks-only" | "off", "askSeconds": 120, "g
 
 | Command / key | Action |
 | --- | --- |
+| `/worq-init cli\|tui` | Create a verification profile for the current project. |
 | `/worq` | Write the request in Pi's editor. |
 | `/worq status [run-id]` | Inspect contract, plan, lens runs, evidence and agents for the current or a saved run. |
 | `/worq agents` · `log <agent>` | List agents and open items · show an agent's recent activity. |
@@ -80,16 +89,7 @@ Set `"manager": { "review": "gates" | "asks-only" | "off", "askSeconds": 120, "g
 
 ### `worq` CLI
 
-Each interactive Pi session opens a control socket at `<state>/ctl/<pid>.sock` (owner-only). Use the CLI from another terminal:
-
-```sh
-node bin/worq.mjs agents          # or link it: npm link → worq agents
-worq log e3 -f
-worq send e3 "Keep the --legacy flag"
-worq review g4 revise "Also handle empty notes"
-```
-
-Run `worq --help` for all commands. Pass `--pid N` when several sessions are open. The CLI runs the same operations as Pi's tools.
+Each interactive Pi session opens a control socket at `<state>/ctl/<pid>.sock` (owner-only). From another terminal, use `pi list` to find the installed package directory and run `node /path/to/pi-worq/bin/worq.mjs agents`. Substitute `--help` for the full command list. Pass `--pid N` when several sessions are open. The CLI runs the same operations as Pi's tools.
 
 `WORQ_PROFILE=/abs/path.json` overrides profile discovery (`$XDG_CONFIG_HOME/pi-worq/profiles/*.json`, matched by `repository`).
 
@@ -137,7 +137,10 @@ Worq loads all prompts when you start a run. Edits take effect on the next run w
 
 ## Development
 
+From a local checkout:
+
 ```sh
+npm ci
 npm run check
 npm test
 ```
