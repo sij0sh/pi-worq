@@ -1,13 +1,13 @@
 {
   "name": "pi-worq",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "type": "module",
   "description": "Focused coding runs with independent CLI and terminal UI verification in Pi",
   "keywords": ["pi-package"],
   "engines": { "node": ">=22.19" },
   "pi": { "extensions": ["./index.ts"] },
   "bin": { "worq": "./bin/worq.mjs" },
-  "files": ["index.ts", "bin/", "src/", "examples/", "prompts/"],
+  "files": ["index.ts", "bin/", "src/", "prompts/"],
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --experimental-strip-types --test test/*.test.ts"

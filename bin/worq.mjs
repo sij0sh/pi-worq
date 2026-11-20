@@ -8,13 +8,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const usage = `Usage: worq [--pid N] <command>
   ls                                   list Pi sessions with a control socket
-  status                               run state, agents, open items
+  status                               run state, reports, agents, open items
   agents                               agents and open questions/reviews
   log <agent> [-f]                     agent activity (-f follows)
   send <agent> [--follow-up] <text>    message an agent (steer by default)
   interrupt <agent> <text>             abort the agent's turn and redirect it
   reply <q-id> <text>                  answer an agent's question
-  review <g-id> approve|revise|escalate [text] [--route product|design|intent]
+  review <g-id> approve|revise|escalate [text]
   escalate <id>                        hand a question/review to the user
   stop                                 stop the run`;
 const state = resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq"));
@@ -74,9 +74,8 @@ async function main(argv) {
     case "interrupt": console.log((await call(pid, "interrupt", { agent: first, text: text() })).text); return;
     case "reply": console.log((await call(pid, "reply", { id: first, text: text() })).text); return;
     case "review": {
-      const route = take(words, "--route", true);
       const [decision, ...note] = words;
-      console.log((await call(pid, "review", { id: first, decision, ...(note.length ? { text: note.join(" ") } : {}), ...(route ? { route } : {}) })).text); return;
+      console.log((await call(pid, "review", { id: first, decision, ...(note.length ? { text: note.join(" ") } : {}) })).text); return;
     }
     case "escalate": console.log((await call(pid, "escalate", { id: first })).text); return;
     default: throw new Error(`Unknown command ${command}\n${usage}`);

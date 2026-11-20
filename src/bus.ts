@@ -2,12 +2,11 @@ import { Block } from "./contracts.ts";
 
 /** How much the manager (main Pi session) is consulted. */
 export type ReviewMode = "gates" | "asks-only" | "off";
-export type GateKind = "plan" | "candidate" | "route";
+export type GateKind = "plan" | "candidate";
 export type Decision = "approve" | "revise" | "escalate";
-export type Route = "product" | "design" | "intent";
 export interface AgentInfo { id: string; role: string; state: "running" | "waiting" | "done" | "failed"; turns: number; sealed: boolean; last?: string }
 export interface PendingInfo { id: string; kind: "ask" | "gate"; agent?: string; gate?: GateKind; body: string; created: number }
-export interface Review { decision: Decision; text?: string; route?: Route; by: "manager" | "user" | "auto" }
+export interface Review { decision: Decision; text?: string; by: "manager" | "user" | "auto" }
 export type BusEvent = { type: "ask" | "gate"; pending: PendingInfo; context: string } | { type: "settled"; id: string; outcome: string };
 export interface AgentHandle { steer(text: string): void; followUp(text: string): void; interrupt(text: string): Promise<void> }
 export interface Timing { askMs: number; gateMs: number }
@@ -128,12 +127,11 @@ export class Bus {
     this.take(id, "ask").settle(`Manager: ${text}`);
     return `Answered ${id}`;
   }
-  review(id: string, decision: Decision, text?: string, route?: Route) {
+  review(id: string, decision: Decision, text?: string) {
     const pending = this.take(id, "gate");
-    if (decision === "revise" && !text?.trim() && !route) throw new Block("review-text", "A revision needs text explaining what to change");
-    if (route && pending.info.gate !== "route") throw new Block("review-route", "Only route reviews accept a route");
+    if (decision === "revise" && !text?.trim()) throw new Block("review-text", "A revision needs text explaining what to change");
     if (decision === "escalate") { void this.escalate(id, text).catch(() => {}); return `Escalated ${id} to the user`; }
-    pending.settle({ decision, text, route, by: "manager" });
+    pending.settle({ decision, text, by: "manager" });
     return `${decision === "approve" ? "Approved" : "Requested revision on"} ${id}`;
   }
   async escalate(id: string, note?: string) {

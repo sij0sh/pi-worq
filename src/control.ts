@@ -15,8 +15,7 @@ export const Ops = {
   send: obj({ agent: ref, text: message, mode: Type.Optional(Type.Union([Type.Literal("steer"), Type.Literal("followUp")])) }),
   interrupt: obj({ agent: ref, text: message }),
   reply: obj({ id: ref, text: message }),
-  review: obj({ id: ref, decision: Type.Union([Type.Literal("approve"), Type.Literal("revise"), Type.Literal("escalate")]), text: Type.Optional(message),
-    route: Type.Optional(Type.Union([Type.Literal("product"), Type.Literal("design"), Type.Literal("intent")])) }),
+  review: obj({ id: ref, decision: Type.Union([Type.Literal("approve"), Type.Literal("revise"), Type.Literal("escalate")]), text: Type.Optional(message) }),
   escalate: obj({ id: ref, note: Type.Optional(text(600)) }),
   stop: obj({}),
 };
@@ -44,12 +43,12 @@ export async function dispatch(host: Host, op: string, raw: unknown): Promise<{ 
   const run = host.run();
   if (!run) throw new Block("no-run", "No Worq run in this session");
   const bus = run.bus;
-  if (key === "status") return { text: `${host.report(run)}\n\n${agentsText(run)}` };
+  if (key === "status") return { text: `${host.report(run)}\n\n${agentsText(run)}`, data: { reports: run.view.reports } };
   if (key === "stop") {
     void run.stop();
     return { text: "Stopping the run" };
   }
-  if (!bus) throw new Block("not-ready", "The run has not loaded its profile yet");
+  if (!bus) throw new Block("not-ready", "The run has not opened its manager channel yet");
   switch (key) {
     case "agents": return { text: agentsText(run), data: { agents: bus.agentsView(), pending: bus.pendingView() } };
     case "log": {
@@ -60,7 +59,7 @@ export async function dispatch(host: Host, op: string, raw: unknown): Promise<{ 
     case "send": { const { agent, text, mode } = args as Static<typeof Ops.send>; return { text: bus.send(agent, text, mode) }; }
     case "interrupt": { const { agent, text } = args as Static<typeof Ops.interrupt>; return { text: await bus.interrupt(agent, text) }; }
     case "reply": { const { id, text } = args as Static<typeof Ops.reply>; return { text: bus.reply(id, text) }; }
-    case "review": { const { id, decision, text, route } = args as Static<typeof Ops.review>; return { text: bus.review(id, decision, text, route) }; }
+    case "review": { const { id, decision, text } = args as Static<typeof Ops.review>; return { text: bus.review(id, decision, text) }; }
     case "escalate": {
       const { id, note } = args as Static<typeof Ops.escalate>;
       void bus.escalate(id, note).catch(() => {});

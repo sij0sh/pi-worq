@@ -1,6 +1,6 @@
 # pi-worq
 
-**Worq gives Pi users three focused passes over one request, then verifies the outcome through the product itself.**
+**Worq plans in Pi, writes reports, and independently verifies code changes. No project setup required.**
 
 When one coding session interprets, plans, builds, and reviews a change, its first assumption can carry through to the verdict. Worq gives each phase one recursive question and keeps the user's intended outcome in a shared contract.
 
@@ -14,9 +14,11 @@ Each phase repeats its question until no relevant, material and uncertain answer
 | Execute | What consequential work remains before the result is ready for independent verification? |
 | Verify | What evidence or counterexample could materially change the acceptance verdict? |
 
-Plan frames contract C: your request verbatim plus outcome, criteria bound to profile checks, boundaries and assumptions. C scopes Execute and Verify.
+- **Reports and plans:** Plan reads the repository without changing product files. It can save Markdown in the run's private `.agents/artifacts/` folder, or answer a small request directly. These runs end at `REPORT READY` without building or testing anything.
+- **Code changes:** Plan describes the outcome, scope, and what Verify might look at in plain language. Execute builds on a separate branch. Verify sees a fresh checkout of the exact candidate commit and decides how to test it. It can run focused tests or direct CLI commands, drive a TUI, or use available local browser tools and save screenshots. It does not generate test scripts or need preset checks.
+- **Verdicts:** `PASS` means the Verify agent judged its observations sufficient. `FAIL` means it observed a mismatch; Worq can give Execute up to two repair rounds. `INCONCLUSIVE` means Verify could not establish the result. Worq records the agent's observations and candidate commit; it does not decide whether the observations prove the outcome. Nothing is merged automatically.
 
-When Plan finishes, Worq fires lens SCQs on its own: independent read-only agents that see only your request and Plan's final contract and approach (`pair`, `defeater`, `decision`, `subtraction`). Their findings join Pi's plan review. Pi approves to discard them as overfitted, or revises to reopen Plan with a copy of them. Lenses need a Pi plan review, so print mode and `review: "asks-only"`/`"off"` skip them. Turn them off with `/worq --no-lenses <request>` or `worq_start` `lenses: false`. A fresh verifier selects a journey from your profile using the contract. Worq runs it on the exact candidate commit and checks what the user sees. A syntax check can pass while opening a note still prints the wrong text.
+When Plan finishes a change plan, Worq runs independent read-only lenses (`pair`, `defeater`, `decision`, `subtraction`). Their findings join Pi's plan review. Pi approves to proceed or revises with the findings Plan should address. Print mode skips lenses because there's no Pi plan review. Turn them off with `/worq --no-lenses <request>` or `worq_start` with `lenses: false`.
 
 ## Install
 
@@ -28,7 +30,7 @@ Install from GitHub:
 pi install git:github.com/sij0sh/pi-worq
 ```
 
-Pi installs the dependencies and loads the bundled prompts and profile templates. No manual copying or `npm install` needed.
+Pi installs the dependencies and loads the bundled prompts. No manual copying or `npm install` needed.
 
 Update or uninstall:
 
@@ -37,17 +39,18 @@ pi update git:github.com/sij0sh/pi-worq
 pi remove git:github.com/sij0sh/pi-worq
 ```
 
-Uninstalling leaves your profiles and run records intact.
+Uninstalling leaves run records intact.
 
 ## Quick start
 
-1. Run `pi` from your project (with a clean, committed Git baseline).
-2. Run `/worq-init cli` for a command-line app or `/worq-init tui` for a terminal UI. Edit the prefilled profile for your app and submit it only if you trust the commands and project code. Worq fills in the repository path and saves the profile outside the project for you.
-3. Start a run. For example:
+Run `pi` in your Git repository, then type a request:
 
 ```text
+/worq Audit how notes are loaded and save a Markdown report
 /worq Make loading a note print its contents in uppercase
 ```
+
+Code changes need a clean, committed baseline. Use coding runs only on projects you trust: Execute and Verify can run local code as your user. Worq manages their processes and uses fresh runtime directories, but it is not a security sandbox. Verify uses a fresh checkout and runtime directories, not the original checkout's ignored files or dependencies. It can use available local tools but won't install missing dependencies or browsers.
 
 That's it. A live rail shows each phase:
 
@@ -57,31 +60,28 @@ That's it. A live rail shows each phase:
   ↳ Building in the candidate worktree
 ```
 
-If Worq needs you, the rail turns to **needs you** — just type your answer in Pi's editor and press Enter. For a changed contract, `y` approves; anything else is the change you want. Other chat goes to Pi as usual.
+If Worq needs you, the rail turns to **needs you** — type your answer in Pi's editor and press Enter. Other chat goes to Pi as usual.
 
-The result lands in the conversation as one line (expand for evidence and paths).
+Agents send concise `[worq]` reports to main Pi without starting a new turn. Expand a report for observations, artifact paths, and the commit it covers. The same reports are available in status, the control CLI, and print mode.
 
 ## Pi as manager
 
-In Pi's interactive mode, the main Pi session manages Worq's agents. Pi has context Worq's agents lack: your conversation and preferences. Pi uses it to catch drift before a costly Verify round. Pi is never the verifier: only host-observed checks can PASS.
+In Pi's interactive mode, the main Pi session manages Worq's agents. Pi has context Worq's agents lack: your conversation and preferences. Pi uses it to catch drift before Verify. Manager approval does not set or override the Verify agent's verdict.
 
 - **Agents ask Pi.** A Plan or Execute agent that is blocked calls `ask_manager`. The question arrives in Pi's chat as a `[worq]` message. Pi answers it, or escalates it to you when it depends on your intent. Without Pi attached, Plan's questions come straight to you.
-- **Pi reviews handoffs.** Pi reviews the plan (contract and approach), the candidate before Verify, and the route after a mismatch. Pi approves, revises once per round, or escalates to you. Pi sees only the sanitized mismatch reason, never private fixtures. A contract change after an intent mismatch always needs your approval.
-- **Verify stays independent.** Pi cannot steer journey selection or the verdict.
+- **Pi reviews handoffs.** Pi reviews a code change's plan and candidate. Pi approves, requests a revision, or escalates to you.
+- **Verify stays independent.** Pi and Execute cannot steer Verify or set its verdict.
 - **Talk to agents through Pi.** Say "tell the executor to keep the old flag". Pi uses `worq_send` (steer or follow-up) or `worq_interrupt`.
 - **Timeouts.** A question with no answer after 120s tells the agent to decide and record its assumption. A review with no answer after 180s auto-approves. The agent's time budget pauses while it waits. In print mode, nobody manages the run: questions return at once and reviews auto-approve.
 
 Pi's tools: `worq_status`, `worq_agents`, `worq_log`, `worq_send`, `worq_interrupt`, `worq_reply`, `worq_review`, `worq_escalate`, `worq_stop`, `worq_start`.
 
-Set `"manager": { "review": "gates" | "asks-only" | "off", "askSeconds": 120, "gateSeconds": 180 }` in your profile (default `gates`).
-
 ## Commands
 
 | Command / key | Action |
 | --- | --- |
-| `/worq-init cli\|tui` | Create a verification profile for the current project. |
 | `/worq` | Write the request in Pi's editor. |
-| `/worq status [run-id]` | Inspect contract, plan, lens runs, evidence and agents for the current or a saved run. |
+| `/worq status [run-id]` | Inspect contract, plan, lens runs, reports and agents for the current or a saved run. |
 | `/worq agents` · `log <agent>` | List agents and open items · show an agent's recent activity. |
 | `/worq send <agent> <text>` · `interrupt <agent> <text>` | Steer an agent · abort its turn and redirect it. |
 | `/worq reply <q-id> <text>` · `review <g-id> approve\|revise\|escalate [text]` | Answer a question · decide a review yourself. |
@@ -91,19 +91,17 @@ Set `"manager": { "review": "gates" | "asks-only" | "off", "askSeconds": 120, "g
 
 Each interactive Pi session opens a control socket at `<state>/ctl/<pid>.sock` (owner-only). From another terminal, use `pi list` to find the installed package directory and run `node /path/to/pi-worq/bin/worq.mjs agents`. Substitute `--help` for the full command list. Pass `--pid N` when several sessions are open. The CLI runs the same operations as Pi's tools.
 
-`WORQ_PROFILE=/abs/path.json` overrides profile discovery (`$XDG_CONFIG_HOME/pi-worq/profiles/*.json`, matched by `repository`).
-
 Print mode waits and reports to stderr:
 
 ```sh
 pi -p '/worq Make loading a note print its contents in uppercase'
 ```
 
-## Profiles and records
+## Run records
 
-In your profile, `entry` names the staged executable or script, `checks` defines the acceptance journeys, and `devChecks` lists development commands. Use data suitable for your model providers.
+Worq stores reports and artifacts in `${XDG_STATE_HOME:-$HOME/.local/state}/pi-worq/<run-id>`. Override the state root with `WORQ_STATE_DIR`. Inspect a code candidate with `git show worq/<run-id>`.
 
-Worq stores run records and verification receipts in `${XDG_STATE_HOME:-$HOME/.local/state}/pi-worq`. Override with `WORQ_STATE_DIR`. Inspect the candidate with `git show worq/<run-id>`.
+Upgrading: `/worq-init`, saved profiles, and `WORQ_PROFILE` no longer drive runs. Existing profile files are left untouched.
 
 ## Agent and SCQ models
 
@@ -123,7 +121,7 @@ Edit `~/.pi/agent/pi-worq.json` (or `$PI_CODING_AGENT_DIR/pi-worq.json`). Use ex
 }
 ```
 
-- Agent keys: `plan`, `execute`, `journey` (Verify journey), and `route` (Verify mismatch routing).
+- Agent keys: `plan`, `execute`, `verify`. An older `journey` entry is used only if `verify` is absent; `route` is ignored.
 - SCQ keys match the lens filenames without `.md`: `pair`, `defeater`, `decision`, and `subtraction`.
 - Each override inherits any omitted field from the top level. Without a configured primary model, Worq uses Pi's active model. Without a fallback, no model switch occurs.
 - A configured fallback can take over once per agent session if the primary fails. It continues within the same session and budget, retaining completed tool results. It does not trigger on cancellation or a normal response that omits submission.
@@ -131,7 +129,7 @@ Edit `~/.pi/agent/pi-worq.json` (or `$PI_CODING_AGENT_DIR/pi-worq.json`). Use ex
 
 ## Phase prompts
 
-Edit the Markdown files in [`prompts/`](prompts/) in the installed Worq checkout. Verify uses `verify-journey.md` to select a journey and `verify-route.md` to classify a mismatch. `shared.md` (the common recursive mechanism and manager rules) is appended to every role, and `settle.md` is sent once when an agent stops without submitting. Each `lenses/*.md` (except `reviewer.md`, the shared lens role) runs after every Plan; add or delete files to change lenses.
+Edit the Markdown files in [`prompts/`](prompts/) in the installed Worq checkout. `verify.md` guides the independent Verify agent. `shared.md` (the common recursive mechanism and manager rules) is appended to every role, and `settle.md` is sent once when an agent stops without submitting. Each `lenses/*.md` (except `reviewer.md`, the shared lens role) can run after a change plan; add or delete files to change lenses.
 
 Worq loads all prompts when you start a run. Edits take effect on the next run without restarting Pi. Missing or blank files prevent the run from starting.
 

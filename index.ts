@@ -6,8 +6,8 @@ import type { BusEvent } from "./src/bus.ts";
 import { obj, text } from "./src/contracts.ts";
 import { dispatch, Ops, serve, type Host, type Op } from "./src/control.ts";
 import { archived, Run, type State } from "./src/controller.ts";
-import { active, clean, inspect, report, STOP_KEY, summary, tone, widget } from "./src/ui.ts";
-import { initProfile, statePath } from "./src/workspace.ts";
+import { active, agentReportText, clean, inspect, report, STOP_KEY, summary, tone, widget } from "./src/ui.ts";
+import { statePath } from "./src/workspace.ts";
 
 /** What the manager (main Pi) reads when an agent asks or a handoff needs review. */
 export function managerMessage(event: Exclude<BusEvent, { type: "settled" }>) {
@@ -37,15 +37,21 @@ export default function worq(pi: ExtensionAPI) {
   const available = () => !current || (!active(current.view) && current.view.state !== "cleanup-unconfirmed");
 
   async function start(ctx: ExtensionContext, request: string, lenses = true) {
-    const run = new Run({ cwd: ctx.cwd, profilePath: process.env.WORQ_PROFILE, stateDir: statePath(), request, interactive: ctx.mode === "tui",
+    const run = new Run({ cwd: ctx.cwd, stateDir: statePath(), request, interactive: ctx.mode === "tui",
       roles: piRoles(ctx), manager: ctx.mode === "tui", lenses });
     current = run;
     if (ctx.mode !== "tui") { await run.done; say(ctx, report(run.view)); return run; }
     widget(ctx, run);
     let asked: string | undefined;
     let detach: (() => void) | undefined;
+    let delivered = 0;
     const unsubscribe = run.subscribe(() => {
-      // The bus exists once the profile loads; route its asks and reviews to the main Pi session.
+      if (closing || current !== run) return;
+      for (const entry of run.view.reports.slice(delivered)) {
+        delivered++;
+        pi.sendMessage({ customType: "worq-agent", display: true, content: agentReportText(entry), details: entry }, { triggerTurn: false });
+      }
+      // Only asks and reviews trigger a manager turn.
       if (run.bus && !detach) detach = run.bus.on((event) => {
         if (closing || current !== run) return;
         if (event.type === "settled") {
@@ -94,8 +100,8 @@ export default function worq(pi: ExtensionAPI) {
     { op: "interrupt", name: "worq_interrupt", description: "Abort a Worq agent's current turn and redirect it with your message." },
     { op: "reply", name: "worq_reply", description: "Answer a Worq agent's question by its id (q…).",
       guideline: "When a [worq] message asks a question, answer with worq_reply if this conversation or the repository settles it; use worq_escalate when only the user can decide intent or scope." },
-    { op: "review", name: "worq_review", description: "Decide a Worq handoff review by its id (g…): approve, revise (with text), or escalate to the user. Route reviews may set route.",
-      guideline: "For [worq] reviews, use worq_review: approve when the handoff fits what the user asked for in this conversation; revise with concrete text when it drifts. Never treat a review as acceptance: only Worq's host verification can PASS. A plan review may carry lens findings. Approve to discard them as overfitted or not material to what the user asked; revise, naming the findings to resolve, to reopen Plan with a copy of them." },
+    { op: "review", name: "worq_review", description: "Decide a Worq handoff review by its id (g…): approve, revise (with text), or escalate to the user.",
+      guideline: "For [worq] reviews, use worq_review: approve when the handoff fits what the user asked for in this conversation; revise with concrete text when it drifts. Never treat a review as acceptance: the independent Verify agent reports the verdict. A plan review may carry lens findings. Approve to discard them as overfitted or not material to what the user asked; revise, naming the findings to resolve, to reopen Plan with a copy of them." },
     { op: "escalate", name: "worq_escalate", description: "Hand a Worq question or review to the user." },
     { op: "stop", name: "worq_stop", description: "Stop the active Worq run and join its agents." },
   ];
@@ -111,29 +117,15 @@ export default function worq(pi: ExtensionAPI) {
     });
   }
   pi.registerTool({
-    name: "worq_start", label: "worq_start", description: "Start a Worq run (Plan, Execute, independent Verify) for a coding request.",
-    promptSnippet: "Start a verified Worq run for a coding request",
+    name: "worq_start", label: "worq_start", description: "Start Worq for a plan, report, or code change with independent verification.",
+    promptSnippet: "Start a Worq run for a report or code change",
     promptGuidelines: ["Use worq_start only when the user asks for Worq; you then manage its agents through the worq_* tools."],
     parameters: obj({ request: text(6000), lenses: Type.Optional(Type.Boolean({ description: "Run lens SCQs (pair, defeater, decision, subtraction) on the finished plan; their findings join your plan review. Default true." })) }),
     async execute(_id, params, _signal, _update, ctx) {
       if (ctx.mode !== "tui") throw new Error("worq_start needs Pi's interactive mode; use /worq in print mode");
       if (!available()) throw new Error("A Worq run is already active");
       const run = await start(ctx, params.request, params.lenses ?? true);
-      return { content: [{ type: "text", text: `Started Worq run ${run.view.id}. Its questions and reviews will arrive as [worq] messages.` }], details: undefined };
-    },
-  });
-
-  pi.registerCommand("worq-init", {
-    description: "Create this project's verification profile: /worq-init cli|tui",
-    async handler(args, ctx) {
-      if (ctx.mode !== "tui") { say(ctx, "/worq-init requires interactive Pi.", "error"); return; }
-      const surface = args.trim();
-      if (surface !== "cli" && surface !== "tui") { say(ctx, "Usage: /worq-init cli|tui", "warning"); return; }
-      if (process.env.WORQ_PROFILE) { say(ctx, "Unset WORQ_PROFILE to set up a profile with /worq-init.", "warning"); return; }
-      try {
-        const path = await initProfile(ctx.cwd, surface, (draft) => ctx.ui.editor("Edit and approve trusted verification commands", draft));
-        if (path) say(ctx, `Saved Worq profile: ${path}`);
-      } catch (error) { say(ctx, error instanceof Error ? error.message : String(error), "error"); }
+      return { content: [{ type: "text", text: `Started Worq run ${run.view.id}. Its reports, questions, and reviews will arrive as [worq] messages.` }], details: undefined };
     },
   });
 

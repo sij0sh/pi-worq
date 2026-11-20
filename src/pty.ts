@@ -7,7 +7,7 @@ import { CleanupError, launch } from "./process.ts";
 const helper = fileURLToPath(new URL("./pty_bridge.py", import.meta.url));
 const keys: Record<string, string> = { enter: "\r", escape: "\x1b", tab: "\t", backspace: "\x7f", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", "ctrl-c": "\x03" };
 
-export async function journeyPty(executable: string, args: string[], actions: Action[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal) {
+export async function observePty(executable: string, args: string[], actions: Action[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal) {
   const terminal = new xterm.Terminal({ cols: 80, rows: 24, scrollback: 0, allowProposedApi: true });
   let pending = "", ready = false, exit: number | undefined, lastData = performance.now();
   let processed = Promise.resolve();
@@ -32,7 +32,7 @@ export async function journeyPty(executable: string, args: string[], actions: Ac
       }
     },
   });
-  const ended = child.done.then((result) => { throw new Block("pty-ended", `PTY exited before journey completed (${result.code}): ${result.stderr.slice(0, 600)}`); });
+  const ended = child.done.then((result) => { throw new Block("pty-ended", `PTY exited before observation completed (${result.code}): ${result.stderr.slice(0, 600)}`); });
   void ended.catch(() => {});
   const pause = (ms: number) => Promise.race([sleep(ms, undefined, { signal }), ended]);
   const send = (msg: object) => { child.input.write(JSON.stringify(msg) + "\n"); };
@@ -59,7 +59,7 @@ export async function journeyPty(executable: string, args: string[], actions: Ac
         screens.push({ step: i + 1, screen });
       }
     }
-    if (exit !== undefined) throw new Block("pty-ended", "Product exited before the journey finished");
+    if (exit !== undefined) throw new Block("pty-ended", "Product exited before observation finished");
     child.input.end(JSON.stringify({ type: "stop" }) + "\n");
     const result = await child.done;
     if (result.code !== 0 || pending || exit === undefined) throw new Block("pty-protocol", `PTY did not close cleanly: ${result.stderr.slice(0, 600)}`);

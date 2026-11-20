@@ -4,14 +4,14 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { RunView } from "../src/controller.ts";
 import { renderRail, summary } from "../src/ui.ts";
 
-const contract = { request: "r", outcome: "Print OK", boundaries: [], assumptions: [], criteria: [{ id: "result", outcome: "Prints OK", checks: ["output"] }] };
+const contract = { request: "r", outcome: "Print OK", boundaries: [], assumptions: [], criteria: [{ id: "result", outcome: "Prints OK" }] };
 const base: RunView = { version: 1, id: "00000000-0000-0000-0000-000000000000", owner: 1, started: 0, phase: "Execute", state: "running",
-  activity: "Building in the candidate worktree", attempt: 1, request: "r", branch: "worq/x", selfChecks: [], evidence: [], path: [], contract,
+  activity: "Building in the candidate worktree", attempt: 1, request: "r", branch: "worq/x", reports: [], path: [], contract,
   jobs: [{ id: "j1", kind: "read", state: "running", task: "t" }] };
 const views: Record<string, RunView> = {
   running: base,
-  question: { ...base, phase: "Plan", state: "question", question: "Which text should the CLI print? ".repeat(6), proposedContract: contract },
-  pass: { ...base, phase: "Verify", state: "pass", finished: 151_000, candidate: "1a2b3c4d5e6f", evidence: [{ criterion: "result", pass: true } as RunView["evidence"][number]] },
+  question: { ...base, phase: "Plan", state: "question", question: "Which text should the CLI print? ".repeat(6) },
+  pass: { ...base, phase: "Verify", state: "pass", finished: 151_000, candidate: "1a2b3c4d5e6f" },
   blocked: { ...base, state: "blocked", activity: "Commit or remove local changes", code: "dirty-baseline" },
 };
 
@@ -33,7 +33,6 @@ test("rail shows phases, progress and pause cues", () => {
   const paused = renderRail(views.question, 100, undefined, 0, 42_000).join("\n");
   assert.match(paused, /needs you/);
   assert.match(paused, /\? Which text/);
-  assert.match(paused, /criteria result/);
   assert.match(paused, /type your answer below/);
   assert.match(renderRail(views.running, 30, undefined, 0, 0)[1], /✓⠋○ Execute/);
   const waiting = { ...views.running, pending: [{ id: "g1", kind: "gate" as const, gate: "plan" as const, body: "steps", created: 0 }] };
@@ -42,6 +41,6 @@ test("rail shows phases, progress and pause cues", () => {
 
 test("finished runs collapse to one summary line", () => {
   assert.deepEqual(renderRail(views.pass, 100, undefined, 0, 0), [summary(views.pass)]);
-  assert.match(summary(views.pass), /^✔ worq PASS · 1\/1 observed · 1a2b3c4d on worq\/x · not merged · 2:31$/);
+  assert.match(summary(views.pass), /^✔ worq PASS · Verify agent accepted · 1a2b3c4d on worq\/x · not merged · 2:31$/);
   assert.match(summary(views.blocked, undefined, 42_000), /^✖ worq BLOCKED · Commit or remove local changes · 0:42$/);
 });

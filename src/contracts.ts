@@ -19,58 +19,24 @@ export function parse<T extends TSchema>(schema: T, value: unknown, label: strin
 export function json(raw: string, label: string): unknown {
   try { return JSON.parse(raw); } catch { throw new Block("invalid-json", `${label} must be valid JSON`); }
 }
-export const Criterion = obj({ id, outcome: text(360), checks: array(id, 4) });
+export const Criterion = obj({ id, outcome: text(360) });
 const scope = { outcome: text(480), boundaries: array(text(300), 5), assumptions: array(text(240), 5), criteria: array(Criterion, 6, 1) };
-/** Contract C: the user's verbatim request (host-set) plus the scope Plan frames for Execute and Verify. */
-export const ContractSchema = obj({ request: text(4000), ...scope });
-export const PlanSchema = obj({ contract: obj(scope), summary: text(), steps: array(text(400), 8, 1) });
-export const ExecuteSchema = obj({ summary: text() });
-export const JourneySchema = obj({ cases: array(obj({ check: id, scenario: id }), 12), blocker: Type.Optional(text(500)) });
-export const RouteSchema = obj({ route: Type.Union([Type.Literal("product"), Type.Literal("design"), Type.Literal("intent")]), reason: text(500) });
+const report = { summary: text(1600), notes: Type.Optional(text(4000)) };
+/** Contract C: intent and scope, not a test specification. */
+export const ContractSchema = obj({ request: text(6000), ...scope });
+export const PlanSchema = obj({ ...report, mode: Type.Enum(["report", "change"] as const), contract: Type.Optional(obj(scope)),
+  steps: Type.Optional(array(text(400), 8)), verificationNote: Type.Optional(text(1600)) });
+export const ExecuteSchema = obj(report);
+export const VerifySchema = obj({ ...report, verdict: Type.Enum(["pass", "fail", "inconclusive"] as const) });
 export type Contract = Static<typeof ContractSchema>;
-export type Plan = Static<typeof PlanSchema>;
-export type Journey = Static<typeof JourneySchema>;
+export type Verdict = Static<typeof VerifySchema>["verdict"];
 
-const args = array(Type.String({ maxLength: 4096 }), 32);
-const cmd = obj({ executable: text(1024), args });
-const expected = obj({ channel: Type.Union([Type.Literal("stdout"), Type.Literal("stderr"), Type.Literal("screen"), Type.Literal("exit")]), op: Type.Union([Type.Literal("equals"), Type.Literal("contains")]), value: Type.Union([Type.String({ maxLength: 2048 }), Type.Integer({ minimum: 0, maximum: 255 })]) });
-const action = Type.Union([
+export const command = { executable: text(1024), args: array(Type.String({ maxLength: 4096 }), 32) };
+export const PtyAction = Type.Union([
   obj({ type: Type.Literal("press"), key: Type.Enum(["enter", "escape", "tab", "backspace", "up", "down", "left", "right", "ctrl-c"] as const) }),
   obj({ type: Type.Literal("type"), text: Type.String({ maxLength: 2048, pattern: "^[^\\x00-\\x1f\\x7f]*$" }) }),
   obj({ type: Type.Literal("resize"), cols: Type.Integer({ minimum: 20, maximum: 240 }), rows: Type.Integer({ minimum: 5, maximum: 80 }) }),
   obj({ type: Type.Literal("observe") }),
   obj({ type: Type.Literal("wait"), ms: Type.Integer({ minimum: 1, maximum: 2000 }) }),
 ]);
-const scenario = obj({ id, name: text(240), args, stdin: Type.Optional(Type.String({ maxLength: 8192 })),
-  fixtures: Type.Optional(array(obj({ path: text(1024), content: Type.String({ maxLength: 8192 }) }), 8)),
-  steps: Type.Optional(array(action, 16, 1)), expect: array(expected, 6, 1),
-});
-export const ProfileSchema = obj({
-  version: Type.Literal(1), trustLocalCode: Type.Literal(true), repository: text(2048),
-  manager: Type.Optional(obj({
-    review: Type.Optional(Type.Union([Type.Literal("gates"), Type.Literal("asks-only"), Type.Literal("off")])),
-    askSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })), gateSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
-  })),
-  surface: Type.Union([Type.Literal("cli"), Type.Literal("tui")]), entry: text(1024), interpreter: Type.Optional(text(1024)),
-  build: Type.Optional(cmd), devChecks: Type.Optional(array(obj({ id, ...cmd.properties }), 6)),
-  checks: array(obj({ id, outcome: text(360), scenarios: array(scenario, 4, 1) }), 12, 1),
-});
-export type Profile = Static<typeof ProfileSchema>;
-export type Scenario = Static<typeof scenario>;
-export type Action = Static<typeof action>;
-export type Command = Static<typeof cmd>;
-export function distinct(ids: string[], label: string) {
-  if (new Set(ids).size !== ids.length) throw new Block("duplicate-id", `${label} must have unique IDs`);
-}
-export function coverage(contract: Contract, profile: Profile): string[] {
-  distinct(contract.criteria.map((x) => x.id), "Criteria");
-  const required = new Set<string>();
-  for (const criterion of contract.criteria) {
-    distinct(criterion.checks, `Checks for ${criterion.id}`);
-    if (!criterion.checks.length || criterion.checks.some((key) => !profile.checks.some((check) => check.id === key))) {
-      throw new Block("coverage", `No approved check covers ${criterion.id}: ${criterion.outcome}`);
-    }
-    criterion.checks.forEach((key) => required.add(key));
-  }
-  return [...required];
-}
+export type Action = Static<typeof PtyAction>;

@@ -1,18 +1,9 @@
-import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { access, chmod, lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { Block, distinct, json, parse, ProfileSchema, type Profile } from "./contracts.ts";
+import { Block } from "./contracts.ts";
 import { cleanEnv, git } from "./process.ts";
 
-export const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-export async function digestFile(path: string) {
-  const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
-  return hash.digest("hex");
-}
 export function inside(base: string, path: string): boolean {
   const rel = relative(base, path);
   return !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
@@ -37,7 +28,7 @@ export async function scoped(base: string, path: string, options: { missing?: bo
   }
   return cursor;
 }
-export async function writeScoped(base: string, path: string, content: string) {
+export async function writeScoped(base: string, path: string, content: string | Buffer) {
   const target = await scoped(base, path, { missing: true });
   await mkdir(dirname(target), { recursive: true });
   // Replace rather than mutate an existing inode (including hardlinks).
@@ -46,7 +37,6 @@ export async function writeScoped(base: string, path: string, content: string) {
     return undefined;
   });
   if (info && !info.isFile()) throw new Block("path", `Not a regular file: ${path}`);
-  const { rename, mkdtemp, rm } = await import("node:fs/promises");
   const tmp = await mkdtemp(join(dirname(target), ".worq-"));
   try {
     await writeFile(join(tmp, "content"), content, { mode: info?.mode ?? 0o644 });
@@ -59,101 +49,20 @@ export async function readSmall(path: string, max: number) {
   return readFile(path, "utf8");
 }
 export function statePath() { return resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq")); }
-export function profilesPath() { return resolve(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "pi-worq", "profiles"); }
-/** Explicit path wins; otherwise the single profile in `dir` whose `repository` is this project. */
-export async function findProfile(root: string, explicit: string | undefined, dir: string) {
-  if (explicit) {
-    if (!isAbsolute(explicit)) throw new Block("no-profile", "WORQ_PROFILE must be an absolute path");
-    return explicit;
-  }
-  const names = await readdir(dir).catch(() => [] as string[]);
-  const matches: string[] = [];
-  for (const name of names.filter((n) => n.endsWith(".json")).sort()) {
-    const path = join(dir, name);
-    try {
-      const { repository } = json(await readSmall(path, 256 * 1024), "Profile") as { repository?: unknown };
-      if (typeof repository === "string" && isAbsolute(repository) && await realpath(repository) === root) matches.push(path);
-    } catch { /* unrelated or unreadable profile */ }
-  }
-  if (matches.length > 1) throw new Block("profile-ambiguous", `Several profiles in ${dir} name this project: ${matches.map((m) => m.slice(dir.length + 1)).join(", ")}`);
-  if (!matches.length) throw new Block("no-profile", `No profile for ${root}. In interactive Pi, run /worq-init cli or /worq-init tui from this project`);
-  return matches[0];
-}
-
-export async function initProfile(cwd: string, surface: Profile["surface"], edit: (draft: string) => Promise<string | undefined>, dir = profilesPath()) {
-  const root = await realpath(await git(cwd, AbortSignal.timeout(5000), "rev-parse", "--show-toplevel"));
-  const ensureNew = async (directory: string) => {
-    if (inside(root, directory)) throw new Block("profile-location", "The verification profile must be outside the project");
-    const existing = await findProfile(root, undefined, directory).catch((error: unknown) => {
-      if (!(error instanceof Block && error.code === "no-profile")) throw error;
-    });
-    if (existing) throw new Block("profile-exists", `This project already has a profile: ${existing}`);
-  };
-  await ensureNew(dir);
-  const template = JSON.parse(await readFile(new URL(`../examples/${surface}-profile.json`, import.meta.url), "utf8"));
-  const raw = await edit(JSON.stringify({ ...template, repository: root }, null, 2));
-  if (raw === undefined) return;
-  if (Buffer.byteLength(raw) >= 256 * 1024) throw new Block("file", "Profile must be smaller than 256 KiB");
-  const profile = parse(ProfileSchema, json(raw, "Profile"), "Profile");
-  if (profile.repository !== root) throw new Block("profile-project", "Keep the prefilled repository path");
-  await validateProfile(profile, root);
-  await mkdir(dir, { mode: 0o700, recursive: true });
-  const directory = await realpath(dir);
-  await ensureNew(directory);
-  const path = join(directory, `${digest(root)}.json`);
-  await writeFile(path, `${raw.trimEnd()}\n`, { flag: "wx", mode: 0o600 });
-  return path;
-}
-
-export async function preflight(cwd: string, profilePath: string | undefined, signal: AbortSignal, profilesDir = profilesPath()) {
+export async function repository(cwd: string, signal: AbortSignal) {
   if (process.platform !== "linux") throw new Block("platform", "Worq currently requires Linux");
-  const root = await realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));
-  const path = await realpath(await findProfile(root, profilePath, profilesDir));
-  if (inside(root, path)) throw new Block("profile-location", "The verification profile must be outside the project");
-  const info = await stat(path);
-  if (info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0) throw new Block("profile-owner", "The profile must be owned by you and not group/world writable");
-  const raw = await readSmall(path, 256 * 1024);
-  const profile = parse(ProfileSchema, json(raw, "Profile"), "Profile");
-  if (!isAbsolute(profile.repository) || await realpath(profile.repository) !== root) throw new Block("profile-project", "The profile authorizes a different repository");
-  await validateProfile(profile, root);
-  const baseline = await git(root, signal, "rev-parse", "--verify", "HEAD^{commit}");
+  return realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));
+}
+
+export async function baselineProject(root: string, signal: AbortSignal) {
   if (await git(root, signal, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")) {
-    throw new Block("dirty-baseline", "Commit or remove local changes before starting Worq");
+    throw new Block("dirty-baseline", "Commit or remove local changes before executing a Worq change");
   }
-  if (await git(root, signal, "ls-files", "--", ".gitmodules")) throw new Block("submodules", "This slice does not stage projects with submodules");
-  return { root, profile, profileDigest: digest(raw), baseline };
+  const baseline = await git(root, signal, "rev-parse", "--verify", "HEAD^{commit}");
+  if (await git(root, signal, "ls-files", "--", ".gitmodules")) throw new Block("submodules", "Worq does not stage projects with submodules");
+  return { root, baseline };
 }
-export type Project = Awaited<ReturnType<typeof preflight>>;
-async function validateProfile(profile: Profile, root: string) {
-  parts(profile.entry);
-  const adapter = profile.surface === "tui" ? "/usr/bin/python3" : undefined;
-  for (const executable of [adapter, profile.interpreter, profile.build?.executable, ...(profile.devChecks ?? []).map((cmd) => cmd.executable)]) {
-    if (executable === undefined) continue;
-    try {
-      if (!isAbsolute(executable) || inside(root, await realpath(executable)) || !(await stat(executable)).isFile()) throw new Error("not an external executable file");
-      await access(executable, constants.X_OK);
-    } catch { throw new Block("profile-executable", `Expected an absolute executable host file outside the project: ${executable}`); }
-  }
-  distinct(profile.checks.map((x) => x.id), "Profile checks");
-  distinct((profile.devChecks ?? []).map((x) => x.id), "Development checks");
-  for (const check of profile.checks) {
-    distinct(check.scenarios.map((s) => s.id), `Scenarios for ${check.id}`);
-    for (const scenario of check.scenarios) {
-      if (scenario.fixtures) {
-        distinct(scenario.fixtures.map((x) => x.path), "Fixture paths");
-        for (const fixture of scenario.fixtures) parts(fixture.path);
-      }
-      if (profile.surface === "tui") {
-        if (scenario.stdin !== undefined || !scenario.steps?.some((x) => x.type === "observe")) throw new Block("profile-tui", `${scenario.id} needs an observe step and must not specify stdin`);
-      } else if (scenario.steps) throw new Block("profile-cli", `${scenario.id} must not specify PTY steps`);
-      for (const e of scenario.expect) {
-        if (profile.surface === "tui" ? e.channel !== "screen" : e.channel === "screen") throw new Block("profile-channel", `Invalid ${e.channel} for ${profile.surface}`);
-        if (e.channel === "exit" ? typeof e.value !== "number" || e.op !== "equals" : typeof e.value !== "string" || (e.op === "contains" && !e.value)) throw new Block("profile-expectation", `Invalid ${e.channel} predicate`);
-      }
-      if (!scenario.expect.some((e) => e.channel !== "exit")) throw new Block("profile-expectation", `${scenario.id} needs observable output, not only an exit code`);
-    }
-  }
-}
+export type Project = Awaited<ReturnType<typeof baselineProject>>;
 export async function builder(project: Project, dir: string, branch: string, signal: AbortSignal) {
   const work = join(dir, "work");
   await git(project.root, signal, "worktree", "add", "-b", branch, work, project.baseline);

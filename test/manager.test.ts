@@ -8,7 +8,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 import { Bus, unanswered, type BusEvent } from "../src/bus.ts";
 import { dispatch, serve } from "../src/control.ts";
-import type { Run } from "../src/controller.ts";
+import type { Run, RunView } from "../src/controller.ts";
+import { report } from "../src/ui.ts";
 
 const never = new AbortController().signal;
 const fast = { askMs: 2000, gateMs: 2000 };
@@ -49,9 +50,9 @@ test("no manager: asks answer at once, gates auto-approve; unanswered asks time 
 
 test("verification agents are sealed; live agents receive steer and interrupt", async () => {
   const bus = new Bus("gates", true, fast);
-  const journey = bus.register("journey", true);
-  journey.attach({ steer() {}, followUp() {}, async interrupt() {} });
-  assert.throws(() => bus.send(journey.id, "pick another scenario"), /independent/);
+  const verify = bus.register("verify", true);
+  verify.attach({ steer() {}, followUp() {}, async interrupt() {} });
+  assert.throws(() => bus.send(verify.id, "change the verdict"), /independent/);
   const got: string[] = [];
   const exec = bus.register("execute", false);
   exec.attach({ steer: (t) => got.push(`steer ${t}`), followUp: (t) => got.push(`follow ${t}`), interrupt: async (t) => { got.push(`int ${t}`); } });
@@ -72,7 +73,6 @@ test("reviews: revise needs text, escalation asks the user, aborts reject", asyn
   await sleep(0);
   const [first] = bus.pendingView();
   assert.throws(() => bus.review(first.id, "revise"), /needs text/);
-  assert.throws(() => bus.review(first.id, "approve", undefined, "intent"), /Only route reviews/);
   bus.review(first.id, "escalate");
   assert.deepEqual(await review, { decision: "revise", text: "Keep stderr empty", by: "user" });
   assert.match(asked[0], /Review plan/);
@@ -88,8 +88,10 @@ test("CLI drives the control socket; socket is private and removed on close", as
   t.after(() => rm(dir, { recursive: true, force: true }));
   const bus = new Bus("gates", true, fast);
   let stopped = false;
-  const run = { bus, view: {}, stop: async () => { stopped = true; } } as unknown as Run;
-  const host = { run: () => run, report: () => "Worq test · RUNNING" };
+  const view: RunView = { version: 1, id: "test", owner: process.pid, phase: "Plan", state: "report-ready", activity: "Audit complete", attempt: 1, request: "Audit", branch: "worq/test", path: [], jobs: [],
+    reports: [{ run: "test", phase: "Plan", attempt: 1, role: "plan", agent: "p1", summary: "Audit complete", artifacts: [join(dir, "audit.md")] }] };
+  const run = { bus, view, stop: async () => { stopped = true; } } as unknown as Run;
+  const host = { run: () => run, report: () => report(view) };
   const server = await serve(dir, host);
   assert.equal((await stat(server.path)).mode & 0o777, 0o600);
   assert.equal((await stat(join(dir, "ctl"))).mode & 0o777, 0o700);
@@ -99,6 +101,9 @@ test("CLI drives the control socket; socket is private and removed on close", as
   const question = bus.ask(agent.id, "Which module?", never);
   const gate = bus.gate("plan", "1. Edit app.py", never);
   await sleep(0);
+  const status = (await cli("status")).stdout;
+  assert.match(status, /\[worq\] p1 · plan · Audit complete/);
+  assert.match(status, /Artifact: .*audit\.md/);
   const listing = (await cli("agents")).stdout;
   assert.match(listing, /p1 · plan · waiting/);
   assert.match(listing, /q2 · p1 asks: Which module\?/);
@@ -106,7 +111,7 @@ test("CLI drives the control socket; socket is private and removed on close", as
   assert.match((await cli("reply", "q2", "src/app.py")).stdout, /Answered q2/);
   assert.equal(await question, "Manager: src/app.py");
   await cli("review", "g3", "revise", "Add", "a", "test");
-  assert.deepEqual(await gate, { decision: "revise", text: "Add a test", route: undefined, by: "manager" });
+  assert.deepEqual(await gate, { decision: "revise", text: "Add a test", by: "manager" });
   await assert.rejects(cli("reply", "q9", "x"), /No open question q9/);
   await cli("stop");
   assert.equal(stopped, true);
