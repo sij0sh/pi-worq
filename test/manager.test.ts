@@ -37,10 +37,14 @@ test("no manager: asks answer at once, gates auto-approve; unanswered asks time 
   const agent = off.register("plan", false);
   assert.equal(await off.ask(agent.id, "?", never), unanswered);
   assert.deepEqual(await off.gate("plan", "x", never), { decision: "approve", by: "auto" });
-  const slow = new Bus("gates", true, { askMs: 30, gateMs: 30 });
-  const a = slow.register("execute", false);
-  assert.equal(await slow.ask(a.id, "?", never), unanswered);
-  assert.equal((await slow.gate("plan", "x", never)).by, "auto");
+  // Bus fallback timers are unref'd so a forgotten ask never holds Pi open; keep the loop alive while they fire.
+  const alive = setInterval(() => {}, 1000);
+  try {
+    const slow = new Bus("gates", true, { askMs: 30, gateMs: 30 });
+    const a = slow.register("execute", false);
+    assert.equal(await slow.ask(a.id, "?", never), unanswered);
+    assert.equal((await slow.gate("plan", "x", never)).by, "auto");
+  } finally { clearInterval(alive); }
 });
 
 test("verification agents are sealed; live agents receive steer and interrupt", async () => {
