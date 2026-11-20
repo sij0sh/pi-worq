@@ -10,6 +10,7 @@ import {
 import { array, Block, id, obj, parse, text } from "./contracts.ts";
 import type { Assignment, Roles } from "./controller.ts";
 import type { Bus } from "./bus.ts";
+import { loadModelConfig, type AgentRole } from "./model-config.ts";
 import { CleanupError, runProcess } from "./process.ts";
 import { readSmall, runtimeEnv, scoped, writeScoped } from "./workspace.ts";
 
@@ -63,7 +64,7 @@ function loadLenses() {
   return new Map(names.map((name) => [name, loadPrompt(`lenses/${name}`)]));
 }
 
-export function piRoles(context: Pick<ExtensionContext, "model">): Roles {
+export function piRoles(context: Pick<ExtensionContext, "model" | "modelRegistry">): Roles {
   const instructions = {
     plan: loadPrompt("plan"),
     execute: loadPrompt("execute"),
@@ -74,11 +75,14 @@ export function piRoles(context: Pick<ExtensionContext, "model">): Roles {
   const settle = loadPrompt("settle");
   const lenses = loadLenses();
   const reviewer = lenses.size ? loadPrompt("lenses/reviewer") : "";
-  const model = context.model;
-  type Role = keyof typeof instructions | "lens";
-  async function sdk<T extends TSchema>(input: { role: Role; cwd: string; task: object; signal: AbortSignal; tools: ToolDefinition[]; turns: number; bus?: Bus; prompt?: string; validate?: (output: unknown) => void }, schema: T) {
+  const models = loadModelConfig(context, lenses.keys());
+  async function sdk<T extends TSchema>(input: { role: AgentRole | "lens"; lens?: string; cwd: string; task: object; signal: AbortSignal; tools: ToolDefinition[]; turns: number; bus?: Bus; prompt?: string; validate?: (output: unknown) => void }, schema: T) {
     input.signal.throwIfAborted();
-    if (!model) throw new Block("model", "Select a Pi model before starting Worq");
+    const selection = models(input.role, input.lens);
+    const model = selection.model ?? selection.fallback;
+    if (!model) throw new Block("model", "Select a Pi model or set a model in pi-worq.json before starting Worq");
+    let fallback = selection.fallback;
+    if (fallback?.provider === model.provider && fallback.id === model.id) fallback = undefined;
     const budget = new AbortController();
     const signal = AbortSignal.any([input.signal, budget.signal]);
     // Time budget pauses while the agent waits on its manager.
@@ -114,12 +118,14 @@ export function piRoles(context: Pick<ExtensionContext, "model">): Roles {
       });
       let aborting: Promise<void> | undefined;
       let turns = 0;
+      let modelFailed = false;
       const inbox: string[] = [];
       const abort = () => { aborting ??= session.abort(); void aborting.catch(() => {}); };
       const unsubscribe = session.subscribe((event) => {
         if (event.type === "turn_start") { agent?.turn(); if (++turns > input.turns) budget.abort(new Block("agent-budget", `${input.role} reached its turn limit`)); }
         else if (event.type === "tool_execution_start") agent?.log(`→ ${event.toolName} ${JSON.stringify(event.args ?? {}).slice(0, 200)}`);
         else if (event.type === "message_end" && event.message.role === "assistant") {
+          modelFailed = event.message.stopReason === "error";
           const said = (event.message.content as { type: string; text?: string }[]).flatMap((c) => c.type === "text" && c.text?.trim() ? [c.text] : []).join(" ");
           if (said) agent?.log(said);
         }
@@ -139,8 +145,27 @@ export function piRoles(context: Pick<ExtensionContext, "model">): Roles {
         let next = JSON.stringify(input.task, null, 2);
         let settling = false;
         for (;;) {
-          await joined(session.prompt(next), signal, `${input.role} session`);
+          let started = false;
+          modelFailed = false;
+          try {
+            await joined(session.prompt(next, { preflightResult: (state) => { started = state === "started"; } }), signal, `${input.role} session`);
+          } catch (error) {
+            // Prompt preflight can reject before a model turn (e.g. missing credentials).
+            if (started || !fallback || error instanceof CleanupError || signal.aborted) throw error;
+            modelFailed = true;
+          }
           if (aborting || signal.aborted || submitted !== undefined) break;
+          if (modelFailed && fallback) {
+            const backup = fallback;
+            fallback = undefined;
+            agent?.log(`Model failed; switching to ${backup.provider}/${backup.id}`);
+            await joined(session.setModel(backup), signal, `${input.role} model switch`);
+            signal.throwIfAborted();
+            session.setThinkingLevel("low");
+            // Keep completed tool results in the same session; never restart the assignment.
+            if (started) next = inbox.shift() ?? "The previous model request failed. Continue the same assignment using the conversation and tool results so far.";
+            continue;
+          }
           const message = inbox.shift();
           if (message) { next = message; continue; }
           // One settlement turn: re-ask the role's recursive question instead of blocking at once.
@@ -162,7 +187,7 @@ export function piRoles(context: Pick<ExtensionContext, "model">): Roles {
     async lens({ lens, task, cwd, signal, bus }) {
       const prompt = lenses.get(lens);
       if (!prompt) throw new Block("lens", `Unknown lens ${lens}`);
-      return finding(await sdk({ role: "lens", prompt: `${reviewer}\n\n${prompt}`, cwd, task, signal, tools: readTools(cwd, signal), turns: 12, bus }, lensSchema));
+      return finding(await sdk({ role: "lens", lens, prompt: `${reviewer}\n\n${prompt}`, cwd, task, signal, tools: readTools(cwd, signal), turns: 12, bus }, lensSchema));
     },
     async ask(assignment, schema) {
       if (assignment.role === "journey" || assignment.role === "route") return sdk({ ...assignment, tools: [], turns: 2 }, schema);

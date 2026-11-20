@@ -32,16 +32,19 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
   const cwd = join(dir, "repo"), config = join(dir, "agent"), xdg = join(dir, "xdg"), profile = join(xdg, "pi-worq", "profiles", "repo.json"), state = join(dir, "state"), home = join(dir, "home");
   await Promise.all([cwd, config, home, dirname(profile)].map(async (path) => { await mkdir(path, { recursive: true }); }));
   const journal: string[] = [], failures: string[] = [], managed: string[] = [], reviews: string[] = [];
+  const calls: { role: string; model: string; trail: string[] }[] = [];
   const server = createServer(async (request, response) => {
     try {
       let raw = "";
       for await (const chunk of request) raw += chunk.toString();
-      const { messages } = JSON.parse(raw) as { messages: Message[] };
+      const { messages, model } = JSON.parse(raw) as { messages: Message[]; model: string };
       const prompt = bodyText(messages[0].content);
       const user = bodyText(messages.find((item) => item.role === "user")?.content ?? "");
       const latest = bodyText(messages.findLast((item) => item.role === "user")?.content ?? "");
       const trail = messages.flatMap((item) => (item.tool_calls ?? []).map((call) => call.function.name));
       const last = messages.at(-1);
+      const role = /^# Role: ([^\n]+)/m.exec(prompt)?.[1] ?? "Pi";
+      calls.push({ role: role === "Lens" ? /^# (\w+)$/m.exec(prompt)![1] : role, model, trail });
       if (last?.role === "tool") journal.push(bodyText(last.content));
       if (prompt.includes("# Role: Plan")) {
         assert.ok(!prompt.includes("start_job"));
@@ -55,10 +58,12 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
         const task = JSON.parse(user) as { request: string; contract: { request: string }; plan: { steps: string[] } };
         assert.equal(task.contract.request, task.request);
         assert.deepEqual(task.plan.steps, ["Edit app.py"]);
-        delta(response, submit({ summary: prompt.includes("# Defeater") ? "Trailing newline unverified" : "No consequential findings" }));
+        if (model === "pair") response.writeHead(503).end("Model unavailable");
+        else delta(response, submit({ summary: prompt.includes("# Defeater") ? "Trailing newline unverified" : "No consequential findings" }));
       } else if (prompt.includes("# Role: Execute")) {
         if (user.includes("Clarify") && !trail.includes("ask_manager")) delta(response, { name: "ask_manager", args: { question: "Exact output?" } });
         else if (!trail.filter((name) => name !== "ask_manager").length) delta(response, { name: "write_file", args: { path: "app.py", content: "print('OK')\n" } });
+        else if (model === "broken") response.writeHead(503).end("Model unavailable");
         else if (!trail.includes("dev_check")) delta(response, { name: "dev_check", args: { id: "simple" } });
         else delta(response, submit({ summary: "Updated app" }));
       } else if (prompt.includes("# Role: Verify journey")) {
@@ -87,7 +92,7 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
   t.after(async () => { server.closeAllConnections(); server.close(); await rm(dir, { recursive: true, force: true }); });
   const address = server.address();
   assert.ok(address && typeof address === "object");
-  await writeFile(join(config, "models.json"), JSON.stringify({ providers: { "worq-test": { api: "openai-completions", apiKey: "offline-test", baseUrl: `http://127.0.0.1:${address.port}/v1`, models: [{ id: "test", name: "Test Model", reasoning: false }] } } }));
+  await writeFile(join(config, "models.json"), JSON.stringify({ providers: { "worq-test": { api: "openai-completions", apiKey: "offline-test", baseUrl: `http://127.0.0.1:${address.port}/v1`, models: ["test", "default", "plan", "pair", "broken", "backup", "override-backup"].map((id) => ({ id, name: id, reasoning: false })) } } }));
   await writeFile(join(config, "settings.json"), JSON.stringify({ tuiMode: mode, quietStartup: true }));
   await writeFile(join(cwd, "app.py"), "print('WRONG')\n");
   const git = (...args: string[]) => execFileSync("/usr/bin/git", ["-c", "user.name=fixture", "-c", "user.email=test@localhost", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -97,7 +102,8 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
     checks: [{ id: "output", outcome: "Standard output is exactly OK", scenarios: [{ id: "default", name: "Run app", args: [], expect: [{ channel: "stdout", op: "equals", value: "OK\n" }] }] }] }), { mode: 0o600 });
   const env = { ...cleanEnv, PI_CODING_AGENT_DIR: config, XDG_CONFIG_HOME: xdg, WORQ_STATE_DIR: state, HOME: home, TERM: "xterm-256color" };
   const records = async () => Promise.all((await readdir(state)).filter((name) => name !== "ctl").map(async (name) => JSON.parse(await readFile(join(state, name, "run.json"), "utf8"))));
-  return { cwd, env, journal, failures, records, git, managed, reviews, state };
+  const configure = (value: object) => writeFile(join(config, "pi-worq.json"), JSON.stringify(value));
+  return { cwd, env, journal, failures, records, git, managed, reviews, state, calls, configure };
 }
 
 test("Pi loads the installed package; print mode skips lenses without a Pi review", { timeout: 30_000 }, async (t) => {
@@ -122,6 +128,29 @@ test("an agent that stops without submitting gets one settlement turn", { timeou
   assert.match(`${result.stdout}\n${result.stderr}`, /PASS · Verify · 1\/1 observed/);
 });
 
+test("global config selects models and falls back without replaying completed tools", { timeout: 20_000 }, async (t) => {
+  const h = await harness(t);
+  await h.configure({ model: "worq-test/default", fallbackModel: "worq-test/backup", agents: {
+    plan: { model: "worq-test/plan" }, execute: { model: "worq-test/broken", fallbackModel: "worq-test/override-backup" },
+  } });
+  const result = await runProcess(process.execPath, [...invocation, "-p", "/worq Make the note print OK"], { cwd: h.cwd, env: h.env, signal: AbortSignal.timeout(15_000), ms: 16_000 });
+  assert.deepEqual(h.failures, []);
+  assert.match(`${result.stdout}\n${result.stderr}`, /PASS · Verify · 1\/1 observed/);
+  assert.deepEqual(h.calls.filter((c) => c.role === "Plan").map((c) => c.model), ["plan"]);
+  assert.deepEqual(h.calls.filter((c) => c.role === "Verify journey").map((c) => c.model), ["default"]);
+  const execute = h.calls.filter((c) => c.role === "Execute");
+  assert.deepEqual(execute.map((c) => c.model), ["broken", "broken", "override-backup", "override-backup"]);
+  assert.deepEqual(execute[2].trail, ["write_file"]);
+});
+
+test("unknown models in the global config are reported before starting a run", { timeout: 20_000 }, async (t) => {
+  const h = await harness(t);
+  await h.configure({ model: "worq-test/typo" });
+  const result = await runProcess(process.execPath, [...invocation, "-p", "/worq Make the note print OK"], { cwd: h.cwd, env: h.env, signal: AbortSignal.timeout(15_000), ms: 16_000 });
+  assert.match(result.stderr, /pi-worq\.json: Pi does not know model worq-test\/typo/);
+  assert.deepEqual(h.calls, []);
+});
+
 const type = (text: string): Action => ({ type: "type", text });
 const press = (key: Extract<Action, { type: "press" }>["key"]): Action => ({ type: "press", key });
 const wait = (ms: number): Action => ({ type: "wait", ms });
@@ -129,6 +158,7 @@ const observe: Action = { type: "observe" };
 for (const mode of ["regular", "fullscreen"] as const) {
   test(`Pi ${mode}: typed answer, keyboard inspector, resize and editor`, { timeout: 25_000 }, async (t) => {
     const h = await harness(t, mode);
+    if (mode === "fullscreen") await h.configure({ model: "worq-test/default", fallbackModel: "worq-test/backup", scq: { pair: { model: "worq-test/pair" } } });
     const screens = await journeyPty(process.execPath, invocation, [
       wait(1400), type("/worq Clarify the note"), press("enter"), wait(800), observe,
       type("OK"), press("enter"), wait(1000), observe, type("/worq status"), press("enter"), wait(450), observe,
@@ -155,6 +185,11 @@ for (const mode of ["regular", "fullscreen"] as const) {
     // Lenses fired on the finished plan without Plan asking; Pi saw their findings in the plan review.
     assert.deepEqual(record.jobs.map((job: { kind: string; state: string }) => [job.kind, job.state]),
       [["lens:decision", "done"], ["lens:defeater", "done"], ["lens:pair", "done"], ["lens:subtraction", "done"]]);
+    if (mode === "fullscreen") {
+      assert.deepEqual(h.calls.filter((c) => c.role === "Pair").map((c) => c.model), ["pair", "backup"]);
+      assert.deepEqual(h.calls.filter((c) => c.role === "Defeater").map((c) => c.model), ["default"]);
+      assert.ok(h.calls.filter((c) => c.role === "Pi").every((c) => c.model === "test"));
+    }
     assert.ok(h.reviews.some((body) => /plan review[\s\S]*Lens findings[\s\S]*\[defeater\] Trailing newline unverified/.test(body)), JSON.stringify(h.reviews));
   });
 }

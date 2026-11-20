@@ -1,6 +1,6 @@
 {
   "name": "pi-worq",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "type": "module",
   "description": "Focused coding runs with independent CLI and terminal UI verification in Pi",
   "keywords": ["pi-package"],

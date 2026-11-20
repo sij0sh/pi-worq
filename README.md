@@ -105,6 +105,30 @@ In your profile, `entry` names the staged executable or script, `checks` defines
 
 Worq stores run records and verification receipts in `${XDG_STATE_HOME:-$HOME/.local/state}/pi-worq`. Override with `WORQ_STATE_DIR`. Inspect the candidate with `git show worq/<run-id>`.
 
+## Agent and SCQ models
+
+Edit `~/.pi/agent/pi-worq.json` (or `$PI_CODING_AGENT_DIR/pi-worq.json`). Use exact `provider/model-id` references from Pi's model catalog, with credentials configured in Pi. Replace the example references with your own:
+
+```json
+{
+  "model": "my-provider/default-model",
+  "fallbackModel": "my-provider/backup-model",
+  "agents": {
+    "plan": { "model": "my-provider/planning-model" },
+    "execute": { "fallbackModel": "my-provider/coding-backup" }
+  },
+  "scq": {
+    "defeater": { "model": "my-provider/review-model" }
+  }
+}
+```
+
+- Agent keys: `plan`, `execute`, `journey` (Verify journey), and `route` (Verify mismatch routing).
+- SCQ keys match the lens filenames without `.md`: `pair`, `defeater`, `decision`, and `subtraction`.
+- Each override inherits any omitted field from the top level. Without a configured primary model, Worq uses Pi's active model. Without a fallback, no model switch occurs.
+- A configured fallback can take over once per agent session if the primary fails. It continues within the same session and budget, retaining completed tool results. It does not trigger on cancellation or a normal response that omits submission.
+- The file is optional and read at the start of each run. Changes don't affect the main Pi model or runs already in progress.
+
 ## Phase prompts
 
 Edit the Markdown files in [`prompts/`](prompts/) in the installed Worq checkout. Verify uses `verify-journey.md` to select a journey and `verify-route.md` to classify a mismatch. `shared.md` (the common recursive mechanism and manager rules) is appended to every role, and `settle.md` is sent once when an agent stops without submitting. Each `lenses/*.md` (except `reviewer.md`, the shared lens role) runs after every Plan; add or delete files to change lenses.
