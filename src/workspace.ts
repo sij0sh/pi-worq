@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, chmod, lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -59,11 +59,30 @@ export async function readSmall(path: string, max: number) {
   return readFile(path, "utf8");
 }
 export function statePath() { return resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq")); }
-export async function preflight(cwd: string, profilePath: string | undefined, signal: AbortSignal) {
+export function profilesPath() { return resolve(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "pi-worq", "profiles"); }
+/** Explicit path wins; otherwise the single profile in `dir` whose `repository` is this project. */
+export async function findProfile(root: string, explicit: string | undefined, dir: string) {
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new Block("no-profile", "WORQ_PROFILE must be an absolute path");
+    return explicit;
+  }
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const matches: string[] = [];
+  for (const name of names.filter((n) => n.endsWith(".json")).sort()) {
+    const path = join(dir, name);
+    try {
+      const { repository } = json(await readSmall(path, 256 * 1024), "Profile") as { repository?: unknown };
+      if (typeof repository === "string" && isAbsolute(repository) && await realpath(repository) === root) matches.push(path);
+    } catch { /* unrelated or unreadable profile */ }
+  }
+  if (matches.length > 1) throw new Block("profile-ambiguous", `Several profiles in ${dir} name this project: ${matches.map((m) => m.slice(dir.length + 1)).join(", ")}`);
+  if (!matches.length) throw new Block("no-profile", `No profile for ${root}. Copy examples/cli-profile.json to ${dir}/<name>.json and set "repository"`);
+  return matches[0];
+}
+export async function preflight(cwd: string, profilePath: string | undefined, signal: AbortSignal, profilesDir = profilesPath()) {
   if (process.platform !== "linux") throw new Block("platform", "Worq currently requires Linux");
-  if (!profilePath || !isAbsolute(profilePath)) throw new Block("no-profile", "Set WORQ_PROFILE to an absolute path to an operator-owned JSON profile outside the project");
   const root = await realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));
-  const path = await realpath(profilePath);
+  const path = await realpath(await findProfile(root, profilePath, profilesDir));
   if (inside(root, path)) throw new Block("profile-location", "The verification profile must be outside the project");
   const info = await stat(path);
   if (info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0) throw new Block("profile-owner", "The profile must be owned by you and not group/world writable");

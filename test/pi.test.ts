@@ -27,13 +27,11 @@ function delta(response: ServerResponse, payload: string | { name: string; args:
   response.end(chunk({ role: "assistant", ...part }, null) + chunk({}, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n");
 }
 const submit = (args: object) => ({ name: "worq_submit", args });
-async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscreen", useWorkers = false) {
+async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscreen") {
   const dir = await mkdtemp(join(tmpdir(), "worq-pi-"));
-  const cwd = join(dir, "repo"), config = join(dir, "agent"), profile = join(dir, "profile.json"), state = join(dir, "state"), home = join(dir, "home");
-  await Promise.all([cwd, config, home].map(async (path) => { await mkdir(path); }));
-  const journal: string[] = [], failures: string[] = [];
-  let releaseWriter!: () => void;
-  const writerGate = new Promise<void>((resolve) => { releaseWriter = resolve; });
+  const cwd = join(dir, "repo"), config = join(dir, "agent"), xdg = join(dir, "xdg"), profile = join(xdg, "pi-worq", "profiles", "repo.json"), state = join(dir, "state"), home = join(dir, "home");
+  await Promise.all([cwd, config, home, dirname(profile)].map(async (path) => { await mkdir(path, { recursive: true }); }));
+  const journal: string[] = [], failures: string[] = [], managed: string[] = [], reviews: string[] = [];
   const server = createServer(async (request, response) => {
     try {
       let raw = "";
@@ -41,40 +39,48 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
       const { messages } = JSON.parse(raw) as { messages: Message[] };
       const prompt = bodyText(messages[0].content);
       const user = bodyText(messages.find((item) => item.role === "user")?.content ?? "");
+      const latest = bodyText(messages.findLast((item) => item.role === "user")?.content ?? "");
       const trail = messages.flatMap((item) => (item.tool_calls ?? []).map((call) => call.function.name));
       const last = messages.at(-1);
       if (last?.role === "tool") journal.push(bodyText(last.content));
-      if (prompt.includes("Capture intent")) {
+      if (prompt.includes("# Role: Plan")) {
+        assert.ok(!prompt.includes("start_job"));
+        assert.ok(!trail.includes("start_job"));
+        const plan = submit({ contract, summary: "Update output", steps: ["Edit app.py"] });
         if (user.includes("Slow note")) { await sleep(2000); if (response.destroyed) return; }
-        delta(response, JSON.stringify(user.includes("Clarify") && !user.includes('"answer"') ? { question: "Which text should the CLI print?" } : { contract }));
-      } else if (prompt.includes("Design the shortest")) {
-        if (useWorkers && !trail.length) delta(response, { name: "start_job", args: { kind: "read", task: "Confirm the current app output" } });
-        else delta(response, submit({ summary: "Update output", steps: ["Edit app.py"] }));
-      } else if (prompt.includes("Handle only the assigned")) {
-        const { authority } = JSON.parse(user);
-        if (authority === "write") {
-          await writerGate;
-          if (!trail.length) delta(response, { name: "write_file", args: { path: "app.py", content: "print('OK')\n" } });
-          else delta(response, submit({ summary: "Changed app output" }));
-        } else {
-          if (!trail.length) delta(response, { name: "read_file", args: { path: "app.py" } });
-          else delta(response, submit({ summary: "Current app prints WRONG" }));
-        }
-      } else if (prompt.includes("Implement in this worktree")) {
-        if (useWorkers && !trail.length) delta(response, { name: "start_job", args: { kind: "write", task: "Make app.py output OK" } });
-        else if (useWorkers && trail.at(-1) === "start_job") delta(response, { name: "write_file", args: { path: "app.py", content: "print('cannot race')\n" } });
-        else if (useWorkers && trail.at(-1) === "write_file") {
-          releaseWriter();
-          delta(response, submit({ summary: "Delegated update" }));
-        } else if (!trail.length) delta(response, { name: "write_file", args: { path: "app.py", content: "print('OK')\n" } });
+        if (user.includes("Settle") && !latest.includes("without calling worq_submit")) delta(response, "Approach is obvious.");
+        else if (user.includes("Clarify") && !trail.includes("ask_manager")) delta(response, { name: "ask_manager", args: { question: "Which text should the CLI print?" } });
+        else delta(response, plan);
+      } else if (prompt.includes("# Role: Lens")) {
+        const task = JSON.parse(user) as { request: string; contract: { request: string }; plan: { steps: string[] } };
+        assert.equal(task.contract.request, task.request);
+        assert.deepEqual(task.plan.steps, ["Edit app.py"]);
+        delta(response, submit({ summary: prompt.includes("# Defeater") ? "Trailing newline unverified" : "No consequential findings" }));
+      } else if (prompt.includes("# Role: Execute")) {
+        if (user.includes("Clarify") && !trail.includes("ask_manager")) delta(response, { name: "ask_manager", args: { question: "Exact output?" } });
+        else if (!trail.filter((name) => name !== "ask_manager").length) delta(response, { name: "write_file", args: { path: "app.py", content: "print('OK')\n" } });
         else if (!trail.includes("dev_check")) delta(response, { name: "dev_check", args: { id: "simple" } });
         else delta(response, submit({ summary: "Updated app" }));
-      } else if (prompt.includes("Independently select")) {
-        assert.ok(!user.includes("Delegated update"));
+      } else if (prompt.includes("# Role: Verify journey")) {
         assert.ok(!user.includes("Update output"));
-        assert.deepEqual((JSON.parse(user) as { request: string }).request.includes("note"), true);
+        const task = JSON.parse(user) as { request: string; contract: { request: string } };
+        assert.ok(task.request.includes("note"));
+        assert.equal(task.contract.request, task.request);
         delta(response, submit({ cases: [{ check: "output", scenario: "default" }] }));
-      } else throw new Error(`Unexpected prompt: ${prompt.slice(0, 300)}`);
+      } else if (last?.role === "tool" && trail.at(-1)?.startsWith("worq_")) delta(response, "Done.");
+      else if (/\[worq\] (g\d+) · \w+ review/.test(latest)) {
+        const id = /\[worq\] (g\d+)/.exec(latest)![1];
+        managed.push(id);
+        reviews.push(latest);
+        delta(response, { name: "worq_review", args: { id, decision: "approve" } });
+      } else if (/\[worq\] (q\d+) · agent/.test(latest)) {
+        const id = /\[worq\] (q\d+)/.exec(latest)![1];
+        managed.push(id);
+        // Intent questions belong to the user; tactical ones Pi answers.
+        if (latest.includes("Which text")) delta(response, { name: "worq_escalate", args: { id } });
+        else delta(response, { name: "worq_reply", args: { id, text: "Print OK exactly" } });
+      } else if (user === "hello pi") delta(response, "PI-CHAT-REPLY");
+      else throw new Error(`Unexpected prompt: ${prompt.slice(0, 300)}`);
     } catch (error) { failures.push(String(error)); response.writeHead(500).end(String(error)); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -89,24 +95,31 @@ async function harness(t: TestContext, mode: "regular" | "fullscreen" = "fullscr
   await writeFile(profile, JSON.stringify({ version: 1, repository: cwd, trustLocalCode: true, surface: "cli", entry: "app.py", interpreter: "/usr/bin/python3",
     devChecks: [{ id: "simple", executable: "/usr/bin/true", args: [] }],
     checks: [{ id: "output", outcome: "Standard output is exactly OK", scenarios: [{ id: "default", name: "Run app", args: [], expect: [{ channel: "stdout", op: "equals", value: "OK\n" }] }] }] }), { mode: 0o600 });
-  const env = { ...cleanEnv, PI_CODING_AGENT_DIR: config, WORQ_PROFILE: profile, WORQ_STATE_DIR: state, HOME: home, TERM: "xterm-256color" };
-  const records = async () => Promise.all((await readdir(state)).map(async (name) => JSON.parse(await readFile(join(state, name, "run.json"), "utf8"))));
-  return { cwd, env, journal, failures, records, git };
+  const env = { ...cleanEnv, PI_CODING_AGENT_DIR: config, XDG_CONFIG_HOME: xdg, WORQ_STATE_DIR: state, HOME: home, TERM: "xterm-256color" };
+  const records = async () => Promise.all((await readdir(state)).filter((name) => name !== "ctl").map(async (name) => JSON.parse(await readFile(join(state, name, "run.json"), "utf8"))));
+  return { cwd, env, journal, failures, records, git, managed, reviews, state };
 }
 
-test("Pi loads the installed package and /worq runs managed jobs with one writer", { timeout: 30_000 }, async (t) => {
-  const h = await harness(t, "fullscreen", true);
+test("Pi loads the installed package; print mode skips lenses without a Pi review", { timeout: 30_000 }, async (t) => {
+  const h = await harness(t);
   const install = await runProcess(process.execPath, [cli, "install", packagePath], { cwd: h.cwd, env: h.env, signal: AbortSignal.timeout(5_000), ms: 6000 });
   assert.equal(install.code, 0, install.stderr);
   const request = "Make the note print OK";
   const result = await runProcess(process.execPath, [cli, ...options, "-p", `/worq ${request}`], { cwd: h.cwd, env: h.env, signal: AbortSignal.timeout(20_000), ms: 21_000 });
   assert.deepEqual(h.failures, [], JSON.stringify(h.failures) + result.stderr);
   assert.match(`${result.stdout}\n${result.stderr}`, /PASS · Verify · 1\/1 observed/, `${result.stdout}\n${result.stderr}\n${JSON.stringify(h.journal)}`);
-  assert.ok(h.journal.some((entry) => entry.includes("only writer slot")), JSON.stringify(h.journal));
   const [record] = await h.records();
   assert.equal(record.request, request);
-  assert.deepEqual(record.jobs.map((job: { kind: string; state: string }) => [job.kind, job.state]), [["read", "done"], ["write", "done"]]);
+  assert.deepEqual(record.jobs, []);
+  assert.ok(record.path.includes("1 · lenses skipped: no Pi plan review"), JSON.stringify(record.path));
   assert.equal(h.git("status", "--porcelain"), "");
+});
+
+test("an agent that stops without submitting gets one settlement turn", { timeout: 20_000 }, async (t) => {
+  const h = await harness(t);
+  const result = await runProcess(process.execPath, [...invocation, "-p", "/worq Settle the note output"], { cwd: h.cwd, env: h.env, signal: AbortSignal.timeout(15_000), ms: 16_000 });
+  assert.deepEqual(h.failures, [], JSON.stringify(h.failures) + result.stderr);
+  assert.match(`${result.stdout}\n${result.stderr}`, /PASS · Verify · 1\/1 observed/);
 });
 
 const type = (text: string): Action => ({ type: "type", text });
@@ -114,35 +127,50 @@ const press = (key: Extract<Action, { type: "press" }>["key"]): Action => ({ typ
 const wait = (ms: number): Action => ({ type: "wait", ms });
 const observe: Action = { type: "observe" };
 for (const mode of ["regular", "fullscreen"] as const) {
-  test(`Pi ${mode}: command, clarification, keyboard inspector, resize and editor`, { timeout: 25_000 }, async (t) => {
+  test(`Pi ${mode}: typed answer, keyboard inspector, resize and editor`, { timeout: 25_000 }, async (t) => {
     const h = await harness(t, mode);
     const screens = await journeyPty(process.execPath, invocation, [
       wait(1400), type("/worq Clarify the note"), press("enter"), wait(800), observe,
-      type("/worq answer OK"), press("enter"), wait(1000), type("/worq status"), press("enter"), wait(450), observe,
+      type("OK"), press("enter"), wait(1000), observe, type("/worq status"), press("enter"), wait(450), observe,
       press("down"), press("down"), press("down"), press("down"), press("enter"), wait(150), observe,
       press("escape"), wait(150), press("escape"), wait(150), type("unfinished draft"), { type: "resize", cols: 45, rows: 20 }, wait(250), observe,
     ], h.cwd, h.env, AbortSignal.timeout(20_000));
     const text = screens.map((entry) => entry.screen);
     assert.deepEqual(h.failures, []);
-    assert.match(text[0], /Which text should the CLI print\?|\/worq answer/);
-    assert.match(text[1], /Worq status/);
-    assert.match(text[2], /Expected: stdout equals/);
-    assert.match(text[3], /unfinished draft/);
+    assert.match(text[0], /needs you/);
+    assert.match(text[0], /Which text should the CLI print\?/);
+    assert.match(text[1], /PASS/);
+    assert.doesNotMatch(text[1], /needs you/);
+    assert.match(text[2], /Worq status/);
+    assert.match(text[3], /Expected: stdout equals/);
+    assert.match(text[4], /unfinished draft/);
     const [record] = await h.records();
     assert.equal(record.state, "pass");
+    // Main Pi managed the run: escalated Plan's intent question, reviewed plan and candidate, and answered the executor.
+    assert.ok(h.managed.filter((id) => id.startsWith("g")).length >= 2, JSON.stringify(h.managed));
+    assert.ok(h.journal.includes("User: OK"), JSON.stringify(h.journal));
+    assert.ok(h.journal.includes("Manager: Print OK exactly"), JSON.stringify(h.journal));
+    assert.ok(record.path.some((step: string) => step.includes("plan review: approved")), JSON.stringify(record.path));
+    assert.ok(record.agents.some((agent: { role: string; sealed: boolean }) => agent.role === "journey" && agent.sealed));
+    // Lenses fired on the finished plan without Plan asking; Pi saw their findings in the plan review.
+    assert.deepEqual(record.jobs.map((job: { kind: string; state: string }) => [job.kind, job.state]),
+      [["lens:decision", "done"], ["lens:defeater", "done"], ["lens:pair", "done"], ["lens:subtraction", "done"]]);
+    assert.ok(h.reviews.some((body) => /plan review[\s\S]*Lens findings[\s\S]*\[defeater\] Trailing newline unverified/.test(body)), JSON.stringify(h.reviews));
   });
 }
 
-test("bare /worq opens an editor; /worq stop joins the run", { timeout: 20_000 }, async (t) => {
+test("bare /worq opens an editor; chat passes through; stop shortcut joins the run", { timeout: 20_000 }, async (t) => {
   const h = await harness(t);
   const screens = await journeyPty(process.execPath, invocation, [
     wait(1400), type("/worq"), press("enter"), wait(250), observe,
     type("Slow note"), press("enter"), wait(300), observe,
-    type("/worq stop"), press("enter"), wait(450), observe,
+    type("hello pi"), press("enter"), wait(400), observe,
+    { type: "type", text: "\x1bx" }, wait(450), observe,
   ], h.cwd, h.env, AbortSignal.timeout(15_000));
   assert.match(screens[0].screen, /What outcome should Worq deliver\?/);
-  assert.match(screens[1].screen, /Capturing the requested outcome/);
-  assert.match(screens[2].screen, /CANCELLED|cancelled/);
+  assert.match(screens[1].screen, /Framing the contract and approach/);
+  assert.match(screens[2].screen, /PI-CHAT-REPLY/);
+  assert.match(screens[3].screen, /CANCELLED/);
   const [record] = await h.records();
   assert.equal(record.state, "cancelled");
   assert.equal(h.git("branch", "--list", "worq/*"), "");

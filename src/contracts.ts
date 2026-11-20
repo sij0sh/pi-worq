@@ -20,9 +20,10 @@ export function json(raw: string, label: string): unknown {
   try { return JSON.parse(raw); } catch { throw new Block("invalid-json", `${label} must be valid JSON`); }
 }
 export const Criterion = obj({ id, outcome: text(360), checks: array(id, 4) });
-export const ContractSchema = obj({ outcome: text(480), boundaries: array(text(300), 5), assumptions: array(text(240), 5), criteria: array(Criterion, 6, 1) });
-export const OrientSchema = Type.Union([obj({ contract: ContractSchema }), obj({ question: text(480) })]);
-export const PlanSchema = obj({ summary: text(), steps: array(text(400), 8, 1) });
+const scope = { outcome: text(480), boundaries: array(text(300), 5), assumptions: array(text(240), 5), criteria: array(Criterion, 6, 1) };
+/** Contract C: the user's verbatim request (host-set) plus the scope Plan frames for Execute and Verify. */
+export const ContractSchema = obj({ request: text(4000), ...scope });
+export const PlanSchema = obj({ contract: obj(scope), summary: text(), steps: array(text(400), 8, 1) });
 export const ExecuteSchema = obj({ summary: text() });
 export const JourneySchema = obj({ cases: array(obj({ check: id, scenario: id }), 12), blocker: Type.Optional(text(500)) });
 export const RouteSchema = obj({ route: Type.Union([Type.Literal("product"), Type.Literal("design"), Type.Literal("intent")]), reason: text(500) });
@@ -46,7 +47,10 @@ const scenario = obj({ id, name: text(240), args, stdin: Type.Optional(Type.Stri
 });
 export const ProfileSchema = obj({
   version: Type.Literal(1), trustLocalCode: Type.Literal(true), repository: text(2048),
-  orientModel: Type.Optional(obj({ provider: text(120), id: text(240) })),
+  manager: Type.Optional(obj({
+    review: Type.Optional(Type.Union([Type.Literal("gates"), Type.Literal("asks-only"), Type.Literal("off")])),
+    askSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })), gateSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
+  })),
   surface: Type.Union([Type.Literal("cli"), Type.Literal("tui")]), entry: text(1024), interpreter: Type.Optional(text(1024)),
   build: Type.Optional(cmd), devChecks: Type.Optional(array(obj({ id, ...cmd.properties }), 6)),
   checks: array(obj({ id, outcome: text(360), scenarios: array(scenario, 4, 1) }), 12, 1),

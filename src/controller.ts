@@ -3,19 +3,20 @@ import { renameSync, writeFileSync } from "node:fs";
 import { realpath, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Static, TSchema } from "typebox";
-import { Block, ContractSchema, coverage, ExecuteSchema, JourneySchema, OrientSchema, parse, PlanSchema, RouteSchema, type Contract, type Plan } from "./contracts.ts";
+import { Block, ContractSchema, coverage, ExecuteSchema, JourneySchema, parse, PlanSchema, RouteSchema, type Contract, type Plan } from "./contracts.ts";
+import { Bus, type AgentInfo, type GateKind, type PendingInfo, type Review } from "./bus.ts";
 import { CleanupError, git } from "./process.ts";
 import { catalog, verify, type Evidence } from "./verify.ts";
 import { builder, inside, pin, preflight, runDirectory, type Project } from "./workspace.ts";
 
-export type Phase = "Orient" | "Plan" | "Execute" | "Verify";
+export type Phase = "Plan" | "Execute" | "Verify";
 export type State = "running" | "question" | "stopping" | "cancelled" | "blocked" | "limited" | "cleanup-unconfirmed" | "pass";
 export interface JobView { id: string; kind: string; state: string; task: string }
 export interface RunView {
-  version: 1; id: string; owner: number; phase: Phase; state: State; activity: string; attempt: number; request: string;
+  version: 1; id: string; owner: number; started?: number; finished?: number; phase: Phase; state: State; activity: string; attempt: number; request: string;
   branch: string; directory?: string; repository?: string; candidate?: string; question?: string; code?: string;
-  contract?: Contract; proposedContract?: Contract; plan?: Plan; selfChecks: string[]; evidence: Evidence[];
-  receipt?: { path: string; digest: string }; path: string[]; jobs: JobView[];
+  contract?: Contract; proposedContract?: Contract; plan?: Pick<Plan, "summary" | "steps">; selfChecks: string[]; evidence: Evidence[];
+  receipt?: { path: string; digest: string }; path: string[]; jobs: JobView[]; agents?: AgentInfo[]; pending?: PendingInfo[];
 }
 export interface Assignment {
   role: "plan" | "execute" | "journey" | "route";
@@ -24,11 +25,16 @@ export interface Assignment {
   signal: AbortSignal;
   project?: Project;
   directory?: string;
-  job?: (view: JobView) => void;
   selfCheck?: (value: string) => void;
+  /** Checked inside worq_submit so the agent can repair a rejected result. */
+  validate?: (output: unknown) => void;
+  bus?: Bus;
 }
 export interface Roles {
-  orient(task: object, profile: Project["profile"], signal: AbortSignal): Promise<unknown>;
+  /** Lens names available for the host-triggered plan challenge. */
+  lenses: string[];
+  /** One independent, read-only lens review of the finished plan; returns its findings. */
+  lens(input: { lens: string; task: object; cwd: string; signal: AbortSignal; bus?: Bus }): Promise<string>;
   ask<T extends TSchema>(assignment: Assignment, schema: T): Promise<Static<T>>;
 }
 
@@ -38,6 +44,7 @@ async function projectedPath(path: string): Promise<string> {
     return join(await projectedPath(dirname(path)), path.slice(dirname(path).length).replace(/^\//, ""));
   }
 }
+const approves = (reply: string) => /^(y|yes|ok|okay|approve[ds]?|lgtm|accept|👍)[.!]*$/i.test(reply.trim());
 export class Run {
   readonly view: RunView;
   readonly done: Promise<void>;
@@ -46,11 +53,14 @@ export class Run {
   private reply?: (value: string) => void;
   private work?: string;
   private root?: string;
-  private readonly options: { cwd: string; profilePath?: string; stateDir: string; request: string; interactive: boolean; roles: Roles };
+  private asking: Promise<unknown> = Promise.resolve();
+  /** Manager channel; exists once the profile is loaded. */
+  bus?: Bus;
+  private readonly options: { cwd: string; profilePath?: string; profilesDir?: string; stateDir: string; request: string; interactive: boolean; roles: Roles; manager?: boolean; lenses?: boolean };
   constructor(options: Run["options"]) {
     this.options = options;
     const id = randomUUID();
-    this.view = { version: 1, id, owner: process.pid, phase: "Orient", state: "running", activity: "Checking profile and baseline", attempt: 1,
+    this.view = { version: 1, id, owner: process.pid, started: Date.now(), phase: "Plan", state: "running", activity: "Checking profile and baseline", attempt: 1,
       branch: `worq/${id}`, request: options.request, selfChecks: [], evidence: [], path: [], jobs: [] };
     this.done = this.run();
   }
@@ -96,7 +106,7 @@ export class Run {
     const signal = this.controller.signal;
     signal.throwIfAborted();
     this.view.question = prompt;
-    this.view.activity = "Waiting for /worq answer";
+    this.view.activity = "Waiting for your answer";
     this.view.state = "question";
     let rejectReply!: (reason: unknown) => void;
     const pending = new Promise<string>((resolve, reject) => { this.reply = resolve; rejectReply = reject; });
@@ -110,59 +120,126 @@ export class Run {
       if (!signal.aborted) this.view.state = "running";
     }
   }
-  private async orient(project: Project, feedback?: string) {
-    this.stage("Orient", "Capturing the requested outcome");
-    const signal = this.controller.signal;
-    const base = { request: this.view.request, availableChecks: catalog(project), ...(feedback ? { feedback, previousContract: this.view.contract } : {}) };
-    const call = async (task: object) => parse(OrientSchema, await this.options.roles.orient(task, project.profile, signal), "Orient response");
-    let response = await call(base);
-    signal.throwIfAborted();
-    if ("question" in response) {
-      const answer = await this.question(response.question);
-      this.activity("Updating the contract with your answer");
-      response = await call({ ...base, question: response.question, answer });
-      if ("question" in response) throw new Block("unclear-intent", response.question);
-    }
-    const contract = parse(ContractSchema, response.contract, "Contract");
-    coverage(contract, project.profile);
-    if (feedback && JSON.stringify(contract) !== JSON.stringify(this.view.contract)) {
-      this.view.proposedContract = contract;
-      const approval = await this.question("Review the proposed contract in /worq status. Reply 'approve' to accept the change.");
-      if (approval !== "approve") throw new Block("contract-unapproved", "Proposed contract was not approved");
+  /** Plan frames contract C (scope for Execute and Verify) and the approach. A changed contract needs the user's approval. */
+  private async plan(project: Project, feedback?: string) {
+    this.stage("Plan", "Framing the contract and approach");
+    const previous = this.view.contract;
+    const scope = (contract?: Contract) => { if (!contract) return undefined; const { request: _, ...rest } = contract; return rest; };
+    const base = { request: this.view.request, availableChecks: catalog(project), ...(feedback ? { feedback, previousContract: scope(previous), previousPlan: this.view.plan } : {}) };
+    const contractOf = (output: unknown) => {
+      const contract = parse(ContractSchema, { request: this.view.request, ...(output as Plan).contract }, "Contract");
+      coverage(contract, project.profile);
+      return contract;
+    };
+    const call = async (extra: object = {}) => {
+      const output = await this.ask(PlanSchema, "plan", this.work ?? project.root, { ...base, ...extra }, project, (value) => { contractOf(value); });
+      return { contract: contractOf(output), plan: { summary: output.summary, steps: output.steps } };
+    };
+    let accepted = previous;
+    const confirm = async (result: Awaited<ReturnType<typeof call>>) => {
+      for (let revision = 1; accepted && JSON.stringify(result.contract) !== JSON.stringify(accepted); revision++) {
+        this.view.proposedContract = result.contract;
+        const reply = await this.question("Contract changed — approve? (y, or type what to change)");
+        if (approves(reply)) break;
+        if (revision > 2) throw new Block("contract-unapproved", "Proposed contract was not approved");
+        this.activity("Revising the contract with your changes");
+        result = await call({ proposedContract: scope(result.contract), revision: reply });
+      }
       this.view.proposedContract = undefined;
+      accepted = result.contract;
+      return result;
+    };
+    let result = await confirm(await call());
+    const findings = await this.challenge(project, result);
+    const describe = (r: typeof result) => {
+      const c = r.contract;
+      return `Outcome: ${c.outcome}\nCriteria: ${c.criteria.map((x) => `${x.id}: ${x.outcome}`).join("; ")}${c.boundaries.length ? `\nBoundaries: ${c.boundaries.join("; ")}` : ""}${c.assumptions.length ? `\nAssumptions: ${c.assumptions.join("; ")}` : ""}`
+        + `\nApproach: ${r.plan.summary}\n${r.plan.steps.map((step, i) => `${i + 1}. ${step}`).join("\n")}`;
+    };
+    const review = await this.review("plan", describe(result) + (findings
+      ? `\n\nLens findings. Approve discards them as overfitted; revise reopens Plan with them and your text:\n${findings}` : ""));
+    if (review.decision === "revise" && review.text) {
+      this.activity("Revising the plan with the review");
+      result = await confirm(await call({ review: review.text, ...(findings ? { lensFindings: findings } : {}), proposedContract: scope(result.contract), previousPlan: result.plan }));
     }
-    signal.throwIfAborted();
-    this.view.contract = contract;
+    this.controller.signal.throwIfAborted();
+    this.view.contract = result.contract;
+    this.view.plan = result.plan;
     this.publish();
   }
-  private async ask<T extends TSchema>(schema: T, role: Assignment["role"], cwd: string, task: object, project?: Project) {
+  /**
+   * Host-triggered lens SCQs on the finished plan. They see only the request and Plan's final work;
+   * Pi decides in the plan review whether their findings reopen Plan. Without a Pi review nobody can decide, so they are skipped.
+   */
+  private async challenge(project: Project, result: { contract: Contract; plan: RunView["plan"] }) {
+    const names = this.options.roles.lenses;
+    if (this.options.lenses === false || !names.length) return undefined;
+    const signal = this.controller.signal;
+    const attempt = this.view.attempt;
+    if (!this.bus?.attached || this.bus.mode !== "gates") { this.view.path.push(`${attempt} · lenses skipped: no Pi plan review`); this.publish(); return undefined; }
+    this.activity(`Challenging the plan · ${names.length} lenses`);
+    const task = { request: this.view.request, contract: result.contract, plan: result.plan };
+    const outcomes = await Promise.allSettled(names.map(async (lens) => {
+      const view: JobView = { id: `lens-${lens}-${attempt}`, kind: `lens:${lens}`, state: "running", task: `Challenge the plan through ${lens}` };
+      this.view.jobs.push(view);
+      this.publish();
+      try {
+        const output = await this.options.roles.lens({ lens, task, cwd: this.work ?? project.root, signal, bus: this.bus });
+        view.state = "done";
+        return `[${lens}] ${output}`;
+      } catch (error) {
+        view.state = error instanceof CleanupError ? "unknown" : signal.aborted ? "stopped" : "failed";
+        if (error instanceof CleanupError || signal.aborted) throw error;
+        return `[${lens}] failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally { this.publish(); }
+    }));
+    const fatal = outcomes.find((o) => o.status === "rejected");
+    if (fatal) throw fatal.reason;
+    signal.throwIfAborted();
+    this.view.path.push(`${attempt} · lenses: ${names.join(", ")}`);
+    return outcomes.map((o) => (o as PromiseFulfilledResult<string>).value).join("\n\n");
+  }
+  private async ask<T extends TSchema>(schema: T, role: Assignment["role"], cwd: string, task: object, project?: Project, validate?: Assignment["validate"]) {
     const signal = this.controller.signal;
     const attempt = this.view.attempt;
     const phase = this.view.phase;
     const current = () => !signal.aborted && attempt === this.view.attempt && phase === this.view.phase;
-    const output = await this.options.roles.ask({ role, task, cwd, signal, project, directory: role === "execute" ? this.view.directory : undefined,
-      job: (view) => {
-        if (!current()) return;
-        const entry = this.view.jobs.findIndex((x) => x.id === view.id);
-        if (entry !== -1) this.view.jobs[entry] = view;
-        else this.view.jobs.push(view);
-        this.publish();
-      }, selfCheck: (value) => { if (current()) { this.view.selfChecks.push(value); this.publish(); } },
+    const output = await this.options.roles.ask({ role, task, cwd, signal, project, validate, bus: this.bus, directory: role === "execute" ? this.view.directory : undefined,
+      selfCheck: (value) => { if (current()) { this.view.selfChecks.push(value); this.publish(); } },
     }, schema);
     signal.throwIfAborted();
     if (!current()) throw new Block("stale-result", "Role completed for a stale phase or attempt");
     return parse(schema, output, `${role} response`);
   }
+  /** Handoff review by the manager. Auto-approves when no manager is attached or gates are off. */
+  private async review(gate: GateKind, body: string): Promise<Review> {
+    const bus = this.bus;
+    if (!bus?.attached || bus.mode !== "gates") return { decision: "approve", by: "auto" };
+    const before = this.view.activity;
+    this.activity(`Waiting on Pi · ${gate} review`);
+    const review = await bus.gate(gate, body, this.controller.signal);
+    this.controller.signal.throwIfAborted();
+    this.view.path.push(`${this.view.attempt} · ${gate} review: ${review.decision === "approve" ? "approved" : "revise"}${review.by === "manager" ? "" : ` (${review.by})`}`);
+    this.activity(before);
+    return review;
+  }
   private async run() {
     const signal = this.controller.signal;
     try {
-      const project = await preflight(this.options.cwd, this.options.profilePath, signal);
+      const project = await preflight(this.options.cwd, this.options.profilePath, signal, this.options.profilesDir);
       this.root = project.root;
       this.view.repository = project.root;
+      const manager = project.profile.manager;
+      this.bus = new Bus(manager?.review ?? "gates", this.options.manager ?? false, { askMs: (manager?.askSeconds ?? 120) * 1000, gateMs: (manager?.gateSeconds ?? 180) * 1000 });
+      this.bus.escalator = (prompt) => { const answer = this.asking.then(() => this.question(prompt)); this.asking = answer.catch(() => {}); return answer; };
+      this.bus.onChange(() => {
+        this.view.agents = this.bus!.agentsView();
+        this.view.pending = this.bus!.pendingView();
+        try { this.publish(); } catch { this.notify(); }
+      });
       const state = await projectedPath(resolve(this.options.stateDir));
       if (inside(project.root, state)) throw new Block("state-location", "State and workspaces must be outside the original project");
       this.view.directory = await runDirectory(state, this.view.id);
-      await this.orient(project);
       let feedback: string | undefined;
       let needsPlan = true;
       for (let attempt = 1; attempt <= 3; attempt++) {
@@ -170,18 +247,24 @@ export class Run {
         this.view.receipt = undefined;
         this.view.evidence = [];
         this.view.candidate = undefined;
+        if (needsPlan) await this.plan(project, feedback);
         const contract = this.view.contract!;
-        if (needsPlan) {
-          this.stage("Plan", "Designing a short implementation route");
-          this.view.plan = await this.ask(PlanSchema, "plan", this.work ?? project.root, { request: this.view.request, contract, feedback });
-        }
         this.stage("Execute", "Building in the candidate worktree");
         this.work ??= await builder(project, this.view.directory, this.view.branch, signal);
         const result = await this.ask(ExecuteSchema, "execute", this.work, {
           request: this.view.request, contract, plan: this.view.plan, feedback, devChecks: (project.profile.devChecks ?? []).map((c) => c.id),
         }, project);
         this.view.selfChecks.push(`Round ${attempt} · ${result.summary}`);
-        const commit = await pin(this.work, signal);
+        let commit = await pin(this.work, signal);
+        const candidate = await this.review("candidate", `${result.summary}\n${await git(this.work, signal, "diff", "--stat", project.baseline, commit) || "No changes"}`);
+        if (candidate.decision === "revise" && candidate.text) {
+          this.activity("Revising the candidate with the review");
+          const revised = await this.ask(ExecuteSchema, "execute", this.work, {
+            request: this.view.request, contract, plan: this.view.plan, feedback, review: candidate.text, devChecks: (project.profile.devChecks ?? []).map((c) => c.id),
+          }, project);
+          this.view.selfChecks.push(`Round ${attempt} · revised · ${revised.summary}`);
+          commit = await pin(this.work, signal);
+        }
         this.view.candidate = commit;
         this.stage("Verify", "Choosing an independent user journey");
         const task = { request: this.view.request, contract, commit, surface: project.profile.surface, checks: catalog(project, contract) };
@@ -210,14 +293,17 @@ export class Run {
         }
         this.activity("Classifying a recorded mismatch");
         const resultRoute = await this.ask(RouteSchema, "route", this.view.directory, { ...task, failures });
-        // Keep private acceptance observations out of downstream worker briefs.
-        feedback = `${resultRoute.route} finding: ${resultRoute.reason}\nAffected criteria: ${[...new Set(failures.map((e) => e.criterion))].join(", ")}`;
-        this.view.path.push(`${attempt} · ${resultRoute.route} → ${resultRoute.route === "product" ? "Execute" : resultRoute.route === "design" ? "Plan" : "Orient"}`);
-        needsPlan = resultRoute.route !== "product";
-        if (resultRoute.route === "intent") {
-          this.view.attempt = attempt + 1;
-          await this.orient(project, feedback);
+        const affected = [...new Set(failures.map((e) => e.criterion))].join(", ");
+        // The manager sees only the sanitized route, never private acceptance observations.
+        const routed = await this.review("route", `Route: ${resultRoute.route}\nReason: ${resultRoute.reason}\nAffected criteria: ${affected}`);
+        if (routed.route && routed.route !== resultRoute.route) {
+          const confirmed = routed.route !== "intent" || routed.by === "user" || approves(await this.question(`Pi proposes revisiting the contract: ${routed.text ?? resultRoute.reason} — approve? (y/n)`));
+          if (confirmed) resultRoute.route = routed.route;
         }
+        // Keep private acceptance observations out of downstream worker briefs.
+        feedback = `${resultRoute.route} finding: ${resultRoute.reason}\nAffected criteria: ${affected}${routed.decision === "revise" && routed.text ? `\nManager review: ${routed.text}` : ""}`;
+        this.view.path.push(`${attempt} · ${resultRoute.route} → ${resultRoute.route === "product" ? "Execute" : "Plan"}`);
+        needsPlan = resultRoute.route !== "product";
       }
     } catch (error) {
       if (error instanceof CleanupError) this.finish("cleanup-unconfirmed", error.message, error.code);
@@ -239,6 +325,7 @@ export class Run {
   }
   private finish(state: State, activity: string, code?: string) {
     this.view.state = state;
+    this.view.finished = Date.now();
     this.view.activity = activity;
     this.view.code = code;
     this.view.question = undefined;
