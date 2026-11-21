@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { DEFAULT_LIMITS, type Config } from "../src/config.ts";
 import { Block, obj, text } from "../src/contracts.ts";
 import { piDriver, thinkingLevels } from "../src/pi.ts";
-import { Conversation, NUDGE, type Capabilities, type Driver, type Spec, type Tool } from "../src/session.ts";
+import { assertChoice, Conversation, NUDGE, type Capabilities, type Driver, type Spec, type Tool } from "../src/session.ts";
 import { fakeHarness, FULL_CAPS, MINIMAL_CAPS, type FakeOptions, type Script } from "./fake.ts";
 
 const finish = { name: "submit", description: "Submit.", schema: obj({ value: text(4000) }) };
@@ -202,6 +202,24 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     assert.equal(levels.length === 0, !caps.fallback && caps.thinking.length === 0, `${name}: thinking levels are exposed as data`);
   }
 
+  // denial paths: a capability-minimal adapter must refuse what it cannot do, naming the config path
+  {
+    if (caps.fallback) {
+      assert.doesNotThrow(() => assertChoice({ harness: name, fallbackModel: "p/m", from: { fallbackModel: "/fallbackModel" } }, caps), `${name}: a supported fallback is accepted`);
+    } else {
+      assert.throws(() => assertChoice({ harness: name, fallbackModel: "p/m", from: { fallbackModel: "/fallbackModel" } }, caps),
+        (error: unknown) => error instanceof Block && error.code === "capability" && /\/fallbackModel/.test(error.message),
+        `${name}: a configured fallback on a harness without one is denied naming from.fallbackModel`);
+    }
+    if (caps.thinking.length === 0) {
+      assert.throws(() => assertChoice({ harness: name, thinking: "high", from: { thinking: "/models/agent.plan/thinking" } }, caps),
+        (error: unknown) => error instanceof Block && error.code === "capability" && /\/models\/agent\.plan\/thinking/.test(error.message),
+        `${name}: a configured level without level control is denied naming from.thinking`);
+    } else {
+      assert.doesNotThrow(() => assertChoice({ harness: name, thinking: "high", from: { thinking: "/models/agent.plan/thinking" } }, caps), `${name}: a supported level is accepted`);
+    }
+  }
+
   // context
   {
     const logs: string[] = [];
@@ -278,7 +296,7 @@ test("conformance: the abort-duty case fails a dangling abort", async () => {
 test("pi: capability snapshot derives thinking from the model", () => {
   const model = { provider: "p", id: "m", reasoning: true, thinkingLevelMap: { xhigh: "x" } };
   const registry = { find: (provider: string, id: string) => provider === "p" && id === "m" ? model : undefined };
-  const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ model: "p/m" }) };
+  const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", model: "p/m", from: {} }) };
   const driver = piDriver({ model, modelRegistry: registry } as never, config);
   const caps = driver.capabilities("agent.plan");
   assert.equal(caps.fallback, true);
@@ -297,7 +315,7 @@ test("live: Pi adapter", { skip: process.env.WORQ_CONFORMANCE_PI === "1" ? false
   const model = models.getModel(ref.slice(0, at), ref.slice(at + 1));
   assert.ok(model, `unknown model ${ref}`);
   const registry = { find: (provider: string, id: string) => models.getModel(provider, id) };
-  const config: Config = { path: "live", limits: DEFAULT_LIMITS, model: () => ({ model: ref }) };
+  const config: Config = { path: "live", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", model: ref, from: {} }) };
   const driver = piDriver({ model, modelRegistry: registry } as never, config);
   const caps = driver.capabilities("agent.plan");
   assert.equal(typeof caps.fallback, "boolean");

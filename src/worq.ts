@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { Agent, ENDED, Semaphore, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
 import type { Config } from "./config.ts";
-import type { Prompts } from "./prompts.ts";
+import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines } from "./render.ts";
-import type { Driver } from "./session.ts";
+import { assertChoice, type Driver } from "./session.ts";
 import { branchExists, repository } from "./workspace.ts";
 
 export interface WorqDeps {
@@ -28,6 +28,14 @@ export class Worq {
     this.deps = deps;
     this.semaphore = new Semaphore(deps.config.limits.parallel);
   }
+  /** Judge one role's resolved choice against what its harness can do. Fails before any work. */
+  private readonly check = (role: string): void => {
+    assertChoice(this.deps.config.model(role), this.deps.driver.capabilities(role));
+  };
+  /** Every role one kind's agent will use: its own, the subagent it may delegate to, and its reviewers. */
+  private roles(kind: Kind): string[] {
+    return [`agent.${kind.name}`, "subagent", ...this.deps.prompts.reviewers(kind.review).map((r) => `reviewer.${r.name}`)];
+  }
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
   get(ref: string) {
@@ -40,6 +48,8 @@ export class Worq {
     const { prompts, config } = this.deps;
     const kind = prompts.kinds.get(kindName);
     if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}`);
+    // Fail a misconfigured role before the repository, the ref or any worktree exists.
+    for (const role of this.roles(kind)) this.check(role);
     const live = this.all().filter((a) => !a.ended).length;
     if (live >= config.limits.agents) throw new Block("at-capacity", `${live} agents are live (limits.agents ${config.limits.agents}); close or cancel one first`);
     const root = await repository(this.deps.cwd, AbortSignal.timeout(10_000));
@@ -50,7 +60,7 @@ export class Worq {
       if (!this.agents.has(candidate) && !(await branchExists(root, `worq/${candidate}`, AbortSignal.timeout(10_000)))) ref = candidate;
     }
     if (!ref) throw new Block("ref", "Could not allocate a free agent ref");
-    const agent = new Agent({ driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify },
+    const agent = new Agent({ driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
       { ref, kind, task, attachments });
     this.agents.set(ref, agent);
     agent.launch();

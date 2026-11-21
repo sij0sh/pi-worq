@@ -8,6 +8,8 @@ import type { Capabilities, Driver, Handle, Spec, Tool } from "./session.ts";
 
 const CORE_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
 const EXTRA_LEVELS = ["xhigh", "max"] as const;
+/** The level strings Pi accepts; Pi clamps a level the chosen model does not support. */
+type Level = (typeof CORE_LEVELS)[number] | (typeof EXTRA_LEVELS)[number];
 type Leveled = { reasoning?: boolean; thinkingLevelMap?: Partial<Record<string, string | null>> };
 /** The same list `getSupportedThinkingLevels` derives: ["off"] when the model cannot reason, [] when it cannot be told. */
 export function thinkingLevels(model: Leveled | undefined): string[] {
@@ -66,13 +68,13 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
   };
   const driver = (async (spec: Spec): Promise<Handle> => {
     const { choice, model } = effective(spec.name);
-    const level = choice.thinking ?? "low";
+    const level: Level = (choice.thinking as Level | undefined) ?? "low";
     let fallback = resolve(choice.fallbackModel);
     if (!model) throw new Block("model", "Select a Pi model or set model in pi-worq.json");
     if (fallback && fallback.provider === model.provider && fallback.id === model.id) fallback = undefined;
     const tools = spec.tools.map(sdkTool);
     const { session } = await createAgentSession({
-      cwd: spec.cwd, model, thinkingLevel: "low", resourceLoader: resources(spec.system),
+      cwd: spec.cwd, model, thinkingLevel: level, resourceLoader: resources(spec.system),
       tools: tools.map((t) => t.name), customTools: tools,
       sessionManager: SessionManager.inMemory(spec.cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
@@ -111,7 +113,10 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
         const next = fallback;
         fallback = undefined;
         await session.setModel(next);
-        session.setThinkingLevel("low");
+        session.setThinkingLevel(level);
+        // A fallback model that cannot take the level is a documented degradation, not an error.
+        const supported = thinkingLevels(next);
+        if (!supported.includes(level)) spec.log(`thinking level ${level} is not supported by fallback model ${next.provider}/${next.id} (${supported.join(", ")}); Pi clamps it`);
         return true;
       },
       dispose() { unsubscribe(); session.dispose(); },

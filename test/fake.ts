@@ -148,7 +148,7 @@ export async function repo() {
 export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}) {
   const events: AgentEvent[] = [];
   const seen: Spec[] = [];
-  const config: Config = { path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, model: () => ({}) };
+  const config: Config = { path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, model: () => ({ harness: "pi", from: {} }) };
   let wake: (() => void) | undefined;
   const worq = new Worq({ driver: fakeDriver(scripts, seen), prompts: loadPrompts(), config, state, cwd: root,
     notify: (event) => { events.push(event); wake?.(); } });
