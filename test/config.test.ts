@@ -107,6 +107,27 @@ test("config: a denied fallback is Block(capability) naming from.fallbackModel",
     (error: unknown) => error instanceof Block && error.code === "capability" && /\/models\/subagent\/fallbackModel/.test(error.message));
 });
 
+/** Criterion 11: a caller may branch on the code alone, so all five codes are pinned here. */
+test("config: every refusal carries one of the five stable codes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "worq-codes-"));
+  const byCode = (code: string) => (error: unknown) => error instanceof Block && error.code === code;
+  // malformed JSON: the file is not JSON at all (src/contracts.ts:21)
+  await writeFile(join(dir, "pi-worq.json"), '{ "limits": ');
+  assert.throws(() => loadConfig(dir), byCode("invalid-json"));
+  // schema-invalid: JSON the config schema rejects (src/contracts.ts:16)
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: "three" } }));
+  assert.throws(() => loadConfig(dir), byCode("invalid-payload"));
+  // config: a ref the adapter registry does not accept (src/config.ts:70-75)
+  await assert.rejects(configOf({ model: "not-a-ref" }), byCode("config"));
+  // capability: a choice the role's harness cannot honour (assertChoice, src/session.ts:60)
+  assert.throws(() => assertChoice({ harness: "pi", thinking: "high", from: { thinking: "/models/subagent/thinking" } }, MINIMAL_CAPS), byCode("capability"));
+  // model: a choice that resolved to nothing at all (src/pi.ts:73)
+  const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", from: {} }) };
+  const driver = piDriver({ model: undefined, modelRegistry: { find: () => undefined } } as never, config);
+  const spec: Spec = { id: "x", profile: "agent", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} };
+  await assert.rejects(driver(spec), byCode("model"));
+});
+
 test("config: nothing to resolve is Block(model)", async () => {
   const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", from: {} }) };
   const driver = piDriver({ model: undefined, modelRegistry: { find: () => undefined } } as never, config);
