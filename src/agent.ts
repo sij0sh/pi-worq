@@ -60,6 +60,7 @@ export class Agent {
   readonly kind: Kind;
   readonly task: string;
   readonly attachments: Attachment[];
+  readonly verify: boolean;
   readonly branch?: string;
   readonly owner = process.pid;
   state: AgentState = "starting";
@@ -88,12 +89,13 @@ export class Agent {
   private readonly deps: AgentDeps;
   private start!: () => void;
 
-  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[] }) {
+  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean }) {
     this.deps = deps;
     this.ref = input.ref;
     this.kind = input.kind;
     this.task = input.task;
     this.attachments = input.attachments;
+    this.verify = input.verify ?? true;
     if (input.kind.access === "write") this.branch = `worq/${input.ref}`;
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
@@ -189,7 +191,7 @@ export class Agent {
           validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "running").map((d) => d.id).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
-      let message = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      let message = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
       for (;;) {
         this.round++;
         this.set("running");
@@ -309,7 +311,7 @@ export class Agent {
       this.submission = workText(report as WorkReport);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
-    const roster = prompts.reviewers(this.kind.review);
+    const roster = this.kind.access === "read" || this.verify ? prompts.reviewers(this.kind.name) : [];
     this.reviews = await Promise.all(roster.map((r) => this.reviewer(r.name, r.prompt)));
     signal.throwIfAborted();
     this.set("review-ready");
@@ -365,8 +367,10 @@ export class Agent {
     const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready`;
     const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
     const next = write
-      ? `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Passed and you agree → merge ${this.branch} by hand (git merge), then worq_cancel("${this.ref}") to close. plan-fault → spawn a new plan with @${this.ref}'s plan.`
-      : `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Ready → worq_spawn("execute", "<task> @${this.ref}"), then worq_cancel("${this.ref}") to close.`;
+      ? this.verify
+        ? `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Passed and you agree → merge ${this.branch} by hand (git merge), then worq_cancel("${this.ref}") to close. plan-fault → spawn a new plan with @${this.ref}'s plan.`
+        : `No verifier ran: read git diff ${this.project!.baseline.slice(0, 10)}..${this.branch} yourself, then merge it by hand (git merge) or worq_send("${this.ref}", "<the change>") for one repair round, then worq_cancel("${this.ref}") to close.`
+      : `Ready → fold what you accept into the execute task and worq_spawn("execute", "<task> @${this.ref}"), then worq_cancel("${this.ref}") to close. Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest. worq_send("${this.ref}", "<witness as worq_list shows it> — <change>") only when a finding changes the plan's criteria or scope.`;
     return [head, one(this.submission ?? "", 600), where, "Reviews:", ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }), next].join("\n");
   }
 }

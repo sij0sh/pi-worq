@@ -44,15 +44,18 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.match(agent.ref, /^[0-9a-f]{4}$/);
   const ready = await next("review-ready", agent.ref);
   assert.equal(agent.state, "review-ready");
-  assert.deepEqual(reviewers.sort(), ["reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
+  assert.deepEqual(reviewers.sort(), ["reviewer.decision", "reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
   assert.match(ready.text, /defeater: fail/);
   assert.match(ready.text, /defeater-1: Criterion D1 ignores trailing newline/);
   assert.match(ready.text, /worq_send/);
+  assert.match(ready.text, /Ready → fold what you accept into the execute task/);
+  assert.match(ready.text, /only when a finding changes the plan's criteria or scope/);
   assert.ok(agent.plan);
   assert.match(agent.plan.path, new RegExp(`^\\.agents/plans/${agent.ref}-uppercase-the-greeting\\.md$`));
   const saved = await readFile(join(root, agent.plan.path), "utf8");
   assert.match(saved, /## Decisions[\s\S]*D1/);
   assert.match(saved, /## Thought tree/);
+  assert.ok(!agentTexts[0].includes('"verify"'), "read kinds carry no verify key");
   assert.equal(agent.delegations[0].state, "answered");
   assert.ok(agentTexts.some((x) => x.includes("Answer (observed): app.py:1")));
   assert.equal(seen.find((s) => s.name === "agent.plan")?.profile, "agent");
@@ -98,6 +101,7 @@ test("execute agent: @plan attached, own worktree and branch, verifier sees pinn
   assert.deepEqual(exec.attachments.map((a) => a.ref), [plan.ref]);
   const ready = await next("review-ready", exec.ref);
   assert.match(attached, /Change the greeting to uppercase/);
+  assert.match(attached, /"verify": true/);
   assert.match(verifierSaw, /HELLO/);
   assert.match(ready.text, /intent: pass/);
   assert.match(ready.text, new RegExp(`merge worq/${exec.ref} by hand`));
@@ -109,6 +113,28 @@ test("execute agent: @plan attached, own worktree and branch, verifier sees pinn
   assert.ok(!existsSync(work), "worktree removed");
   git("merge", "-q", `worq/${exec.ref}`);
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('HELLO')\n");
+});
+
+test("execute with verify:false: no reviewer runs and the digest says the diff is unread", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const texts: string[] = [];
+  const { worq, next, seen } = setup(root, state, {
+    "agent.execute": async (turn) => {
+      texts.push(turn.text);
+      await turn.tool("write_file", { path: "app.py", content: "print('HELLO')\n" });
+      await turn.tool("submit", { summary: "Uppercased", changes: ["app.py"], checksRun: ["cat app.py"] });
+    },
+  });
+  const exec = await worq.spawn("execute", "Uppercase the greeting", false);
+  const ready = await next("review-ready", exec.ref);
+  assert.match(texts[0], /"verify": false/);
+  assert.equal(seen.filter((s) => s.profile === "reviewer").length, 0, "no reviewer ran");
+  assert.match(ready.text, /No reviewers ran: this result is unverified/);
+  assert.match(ready.text, /No verifier ran: read git diff/);
+  assert.doesNotMatch(ready.text, /Adjudicate each finding/);
+  assert.match(exec.diffstat!, /app\.py/);
+  await worq.cancel(exec.ref);
 });
 
 test("ask_main parks the agent until Main answers; steering reaches a running agent", async (t) => {

@@ -1,6 +1,5 @@
 ---
 access: read
-review: plan
 description: read-only; settles consequential decisions and saves a plan to .agents/plans/
 ---
 ## Kind: plan
@@ -13,7 +12,7 @@ You can read the repository but not change it. Your submission is the plan; Worq
 Submit:
 - `summary`: the approach, its main steps and dependencies. For analysis or advice requests, the findings themselves.
 - `criteria`: checkable, observable outcomes that mean the request is met. Not a test recipe.
-- `decisions`: each consequential choice with basis (evidence or an exposed assumption), a serious alternative, the tradeoff and a revisit condition. Routine reversible choices need none.
+- `decisions`: each consequential choice with basis (evidence or an exposed assumption), a serious alternative, the tradeoff and a revisit condition; for a choice the user owns, also name the owner and what would reverse it. Routine reversible choices need none.
 - `assumptions`: anything relied on but not observed.
 - `tree`: your thought tree, compact: question → how resolved → answer.
 - `document` (optional): longer Markdown when the request asks for a document.

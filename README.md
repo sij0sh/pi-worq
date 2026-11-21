@@ -21,18 +21,18 @@ Tools stay hidden until you run `/worq` in a session (zero context cost otherwis
 
 Choose the route by the ask:
 
-| Route | Kind | Reviewers |
+| Route | Spawn | Reviewers |
 |---|---|---|
-| small, plainly verifiable change | `execute-lite` | none; Main reads the diff |
-| open work | `plan` → `execute` | three lenses, then the verifier |
-| user-owned choices, broad scope | `plan-full` | four lenses, including `decision` |
+| small, plainly verifiable, no behaviour change | `execute`, `verify:false` | none; Main reads the diff |
+| open work with one visible route | `plan` → `execute` | four lenses, then the verifier |
+| user-facing behaviour, broad scope, a user-owned choice | `plan`, read it → `execute` | four lenses, then the verifier |
 
 Standard recipe (state it in AGENTS.md to make it a convention):
 
 1. `worq_spawn("plan", task)` → plan saved to `.agents/plans/<ref>-<slug>.md`.
-2. Review digest arrives as `[worq <ref>]`. Adjudicate each finding: accept, reject or defer. Accepted → `worq_send(ref, feedback)` starts another round.
-3. `worq_spawn("execute", "<task> @<plan-ref>")` → works in its own worktree on `worq/<ref>`.
-4. Verifier passes and you agree → `git merge worq/<ref>` by hand, then `worq_cancel(ref)` to close.
+2. Review digest arrives as `[worq <ref>]`. Adjudicate each finding: accept, reject or defer. Accepted → put the correction in the execute task; `worq_send` starts another round, so use it only for a finding that changes the plan's criteria or scope.
+3. `worq_spawn("execute", "<the user's ask verbatim> @<plan-ref>", verify?)` → works in its own worktree on `worq/<ref>`. Attach a plan only when one exists; `verify:false` skips the verifier.
+4. Verifier passes (or you have read the diff) and you agree → `git merge worq/<ref>` by hand, then `worq_cancel(ref)` to close.
 
 A digest carries the four most consequential findings per reviewer; `worq_list <ref>` carries all of them with full text.
 
@@ -42,7 +42,7 @@ A digest carries the four most consequential findings per reviewer; `worq_list <
 |---|---|
 | Main | your Pi session |
 | Agent | SDK session Main spawns; has a kind |
-| Kind | `prompts/kinds/<name>.md`: recursive question, access (`read`/`write`), reviewer roster |
+| Kind | `prompts/kinds/<name>.md`: recursive question, access (`read`/`write`) |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
 | Reviewer | sealed session fired on submit; roster `prompts/reviewers/<roster>/*.md`, run in parallel |
@@ -52,7 +52,7 @@ A digest carries the four most consequential findings per reviewer; `worq_list <
 
 | Tool | Params | Effect |
 |---|---|---|
-| `worq_spawn` | `kind`, `task` | start an agent; `@ref` in task attaches that agent's plan |
+| `worq_spawn` | `kind`, `task`, `verify?` | start an agent; `@ref` in task attaches that agent's plan; `verify:false` (execute only) skips the verifier |
 | `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
 | `worq_send` | `ref`, `text` | running → steer · waiting → answer · review-ready → next round |
 | `worq_cancel` | `ref` or `all` | close/cancel; kills subagents, reviewers, processes; removes worktree; keeps branch |

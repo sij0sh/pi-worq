@@ -18,10 +18,10 @@ const ENABLED = "worq-enabled";
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically when it submits.",
+    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit unless the spawn sets verify:false.",
     guidelines: [
-      "Use worq_spawn for work the user hands to Worq. Match the route to the ask: execute-lite for a small, plainly verifiable change; plan then worq_spawn(\"execute\", \"<task> @<plan-ref>\") for open work; plan-full only when user-owned choices or broad scope need the full roster. Worq agents cannot see this conversation: put everything they need in the task.",
-      "Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
+      "Pick the route by the ask: under ~2 files, plainly verifiable, no behaviour-surface change → worq_spawn(\"execute\", task, verify:false) (edit directly only when the user's ask says so); open work with one visible route → worq_spawn(\"plan\") then worq_spawn(\"execute\", \"<task> @<plan-ref>\"); more than ~8 files, user-facing behaviour, or a user-owned choice → plan first, read the plan, then execute.",
+      "One plan round is the norm; a second only for a finding that changes criteria or scope and cannot be folded into the execute task — never to collect more findings. Put the user's ask in the execute task verbatim: Worq agents cannot see this conversation. Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
     ],
   },
   worq_list: {
@@ -33,7 +33,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "send",
     description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
     guidelines: [
-      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. The digest carries the four most consequential per reviewer; worq_list(<ref>) carries all of them with full text. Send accepted findings with worq_send as concrete feedback. Escalate to the user only what changes their intent or scope.",
+      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. Fold accepted plan findings into the execute task; worq_send starts another round, so use it only for a finding that changes the plan's criteria or scope. worq_list(<ref>) carries every finding in full. Escalate to the user only what changes their intent or scope.",
     ],
   },
   worq_cancel: {

@@ -36,7 +36,7 @@ export class Worq {
   private roles(kind: Kind): string[] {
     const reviewers = new Set<string>();
     for (const other of this.deps.prompts.kinds.values()) {
-      for (const r of this.deps.prompts.reviewers(other.review)) reviewers.add(`reviewer.${r.name}`);
+      for (const r of this.deps.prompts.reviewers(other.name)) reviewers.add(`reviewer.${r.name}`);
     }
     return [`agent.${kind.name}`, "subagent", ...reviewers];
   }
@@ -48,10 +48,11 @@ export class Worq {
     return agent;
   }
 
-  async spawn(kindName: string, task: string): Promise<Agent> {
+  async spawn(kindName: string, task: string, verify = true): Promise<Agent> {
     const { prompts, config } = this.deps;
     const kind = prompts.kinds.get(kindName);
     if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}`);
+    if (kind.access !== "write" && verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
     // Fail a misconfigured role before the repository, the ref or any worktree exists.
     for (const role of this.roles(kind)) this.check(role);
     const live = this.all().filter((a) => !a.ended).length;
@@ -65,7 +66,7 @@ export class Worq {
     }
     if (!ref) throw new Block("ref", "Could not allocate a free agent ref");
     const agent = new Agent({ driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
-      { ref, kind, task, attachments });
+      { ref, kind, task, attachments, verify });
     this.agents.set(ref, agent);
     agent.launch();
     return agent;

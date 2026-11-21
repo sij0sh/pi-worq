@@ -72,15 +72,11 @@ test("config: defaults, model lookup by specificity, invalid keys name the file"
 
 test("prompts: kinds and reviewer rosters are data", () => {
   const prompts = loadPrompts();
-  assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "execute-lite", "plan", "plan-full"]);
+  assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "plan"]);
   assert.equal(prompts.kinds.get("plan")!.access, "read");
-  assert.equal(prompts.kinds.get("plan-full")!.access, "read");
   assert.equal(prompts.kinds.get("execute")!.access, "write");
-  assert.equal(prompts.kinds.get("execute-lite")!.review, "execute-lite");
-  assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["defeater", "pair", "subtraction"]);
-  assert.deepEqual(prompts.reviewers("plan-full").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
+  assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
   assert.deepEqual(prompts.reviewers("execute").map((r) => r.name), ["intent"]);
-  assert.deepEqual(prompts.reviewers("execute-lite"), []);
 });
 
 test("tools are hidden until /worq, restored on resume, and share one schema with the CLI", async (t) => {
@@ -140,7 +136,11 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq } = setup(root, state, {});
   const table = ops(["plan", "execute"]);
+  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["kind", "task", "verify"]);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", task: "x" }), /kind/);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: "no" }), /verify/);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: false }), /verify:false applies to execute only/);
+  assert.equal(worq.size, 0, "a refused spawn leaves no agent");
   await assert.rejects(dispatch(worq, table, "send", { ref: "zz", text: "x" }), /ref/);
   await assert.rejects(dispatch(worq, table, "nope", {}), /Unknown operation/);
   assert.match((await dispatch(worq, table, "list", {})).text, /No Worq agents/);

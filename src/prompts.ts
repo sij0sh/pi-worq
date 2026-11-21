@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Block } from "./contracts.ts";
 
 export type Access = "read" | "write";
-export interface Kind { name: string; access: Access; review: string; prompt: string; description: string }
+export interface Kind { name: string; access: Access; prompt: string; description: string }
 export interface Reviewer { name: string; prompt: string }
 export interface Prompts {
   dir: string;
@@ -47,9 +47,7 @@ export function loadPrompts(dir = fileURLToPath(new URL("../prompts/", import.me
     const path = join(dir, "kinds", `${name}.md`);
     const { meta, body } = frontmatter(read(path));
     if (meta.access !== "read" && meta.access !== "write") throw new Block("prompt-file", `${path}: access must be read or write`);
-    const review = meta.review || name;
-    if (!NAME.test(review)) throw new Block("prompt-file", `${path}: invalid review roster ${review}`);
-    kinds.set(name, { name, access: meta.access, review, prompt: body, description: meta.description || name });
+    kinds.set(name, { name, access: meta.access, prompt: body, description: meta.description || name });
   }
   if (!kinds.size) throw new Block("prompt-file", `No agent kinds in ${join(dir, "kinds")}`);
   const cache = new Map<string, Reviewer[]>();

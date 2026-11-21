@@ -57,7 +57,7 @@ function keep(findings: NonNullable<ReviewReport["findings"]>, limit?: number) {
 }
 
 export function reviewLines(reviews: ReviewRecord[], caps: ReviewCaps = DETAIL) {
-  if (!reviews.length) return ["No reviewers configured for this kind: the result is unverified."];
+  if (!reviews.length) return ["No reviewers ran: this result is unverified."];
   return reviews.flatMap((r) => {
     const findings = r.findings ?? [];
     const shown = keep(findings, caps.limit);
