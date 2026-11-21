@@ -4,6 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
 import { DEFAULT_LIMITS, type Config } from "../src/config.ts";
 import { Block, obj, text } from "../src/contracts.ts";
+import { createDriver, HARNESSES } from "../src/harness.ts";
 import { piDriver, thinkingLevels } from "../src/pi.ts";
 import { assertChoice, Conversation, NUDGE, type Capabilities, type Driver, type Spec, type Tool } from "../src/session.ts";
 import { fakeHarness, FULL_CAPS, MINIMAL_CAPS, type FakeOptions, type Script } from "./fake.ts";
@@ -291,6 +292,35 @@ test("conformance: a throwing steer downgrades to the inbox with one log line", 
 test("conformance: the abort-duty case fails a dangling abort", async () => {
   const options: FakeOptions = { abort: "dangle", images: [], toolErrors: [], prompts: [], aborts: { n: 0 }, calls: { n: 0 } };
   await assert.rejects(adapterConformance("DANGLING", (caps) => fakeHarness(caps, { x: script }, options), options), /abort\(\) settles/);
+});
+
+test("harness: createDriver routes by the role's harness and passes capabilities through", async () => {
+  const model = { provider: "p", id: "m", reasoning: true };
+  const ctx = { model, modelRegistry: { find: () => undefined } };
+  const piOnly: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", from: {} }) };
+  assert.deepEqual(createDriver({ host: ctx }, piOnly).capabilities("agent.plan"), piDriver(ctx as never, piOnly).capabilities("agent.plan"));
+  // Pi cannot resolve a ref here, so both report Main's model and its derived level list.
+  assert.deepEqual(createDriver({ host: ctx }, piOnly).capabilities("reviewer.pair").thinking, ["off", "minimal", "low", "medium", "high"]);
+
+  const created: string[] = [];
+  HARNESSES["test"] = { modelRef: /.*/, create: () => { created.push("test"); return fakeHarness(FULL_CAPS, {}, {}); } };
+  try {
+    const mixed: Config = { path: "test", limits: DEFAULT_LIMITS, model: (name) => ({ harness: name === "subagent" ? "test" : "pi", from: {} }) };
+    const driver = createDriver({ host: ctx }, mixed);
+    assert.deepEqual(driver.capabilities("subagent"), FULL_CAPS, "the role's harness answers capabilities");
+    assert.deepEqual(driver.capabilities("agent.plan").thinking, ["off", "minimal", "low", "medium", "high"], "another role routes to pi");
+    const spec: Spec = { id: "s", profile: "subagent", name: "subagent", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} };
+    const handle = await driver(spec);
+    assert.deepEqual(created, ["test"], "opening a session routes to the record the role resolves to");
+    assert.equal(typeof handle.abort, "function");
+    handle.dispose();
+  } finally { delete HARNESSES["test"]; }
+
+  const unregistered: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "claude", from: {} }) };
+  assert.throws(() => createDriver({ host: ctx }, unregistered).capabilities("agent.plan"),
+    (error: unknown) => error instanceof Block && error.code === "config" && /unknown harness "claude"/.test(error.message));
+  await assert.rejects(createDriver({ host: ctx }, unregistered)({ id: "s", profile: "agent", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} }),
+    (error: unknown) => error instanceof Block && error.code === "config");
 });
 
 test("pi: capability snapshot derives thinking from the model", () => {
