@@ -7,56 +7,130 @@ import type { AgentEvent } from "../src/agent.ts";
 import { DEFAULT_LIMITS, type Config, type Limits } from "../src/config.ts";
 import { errorText } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
-import type { Driver, Handle, Spec } from "../src/session.ts";
+import type { Capabilities, Driver, Handle, Spec } from "../src/session.ts";
 import { Worq } from "../src/worq.ts";
 
 export interface Turn {
   spec: Spec;
   text: string;
+  /** What the model actually sees: exactly spec.system when the harness isolates it. */
+  system: string;
   /** Call a tool like the SDK would: errors come back as text, not exceptions. */
   tool(name: string, params: object): Promise<string>;
   steered: string[];
 }
 export type Script = (turn: Turn) => Promise<void> | void;
+export interface FakeOptions {
+  /** settle: abort() settles the running prompt (the duty). dangle: it does not (an adapter bug). */
+  abort?: "settle" | "dangle";
+  /** throw: steer rejects, so the core queues the message and logs one downgrade line. */
+  steer?: "queue" | "throw";
+  /** Number of model requests that fail before one succeeds. */
+  failures?: number;
+  /** Number of fallback switches the handle still has. */
+  fallbacks?: number;
+  /** Image payloads a tool returned. */
+  images?: { mimeType: string; data: string }[];
+  /** Argument-validation failures the fake reported through spec.toolError. */
+  toolErrors?: { name: string; message: string }[];
+  /** Every prompt() text, in order. */
+  prompts?: string[];
+  /** Count of abort() calls. */
+  aborts?: { n: number };
+  /** Count of prompt() calls. */
+  calls?: { n: number };
+}
+export const FULL_CAPS: Capabilities = {
+  fallback: true,
+  thinking: ["off", "minimal", "low", "medium", "high"],
+  context: { system: "replace", ambientInstructions: false },
+};
+export const MINIMAL_CAPS: Capabilities = {
+  fallback: false,
+  thinking: [],
+  context: { system: "append", ambientInstructions: true },
+};
+
 /** Scripts keyed by spec.name (agent.plan, subagent, reviewer.intent …); the first matching prefix wins. */
-export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = []): Driver {
-  return async (spec) => {
+export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], caps: Capabilities = FULL_CAPS, options: FakeOptions = {}): Driver {
+  const driver = (async (spec: Spec): Promise<Handle> => {
     seen.push(spec);
     const key = Object.keys(scripts).find((k) => spec.name === k || spec.name.startsWith(`${k}.`)) ?? Object.keys(scripts).find((k) => spec.name.startsWith(k));
     const script = key ? scripts[key] : undefined;
     const steered: string[] = [];
+    const isolated = caps.context.system === "replace" && !caps.context.ambientInstructions;
+    const system = isolated ? spec.system : `${spec.system}\n\n# AGENTS.md\n\nDecoy ambient project instructions.\n`;
     let streaming = false;
+    let stopRequested = false;
+    let release: (() => void) | undefined;
+    let failures = options.failures ?? 0;
+    let fallbacks = options.fallbacks ?? 0;
     const controller = new AbortController();
     const handle: Handle = {
       async prompt(first) {
+        if (options.calls) options.calls.n++;
+        if (options.prompts) options.prompts.push(first);
+        // A request that failed before any work: no turn, no tool call.
+        if (first.startsWith("fail") && (failures > 0 || options.failures === undefined)) { if (failures > 0) failures--; return true; }
         streaming = true;
-        // Steered text joins the same run, as the SDK does: replay it as a further turn.
+        stopRequested = false;
         try {
+          // Steered text joins the same run, as the SDK does: replay it as a further turn.
+          let initial = true;
           for (let text: string | undefined = first; text !== undefined; text = steered.shift()) {
-          spec.turn();
-          await script?.({
-            spec, text, steered,
-            async tool(name, params) {
-              const found = spec.tools.find((t) => t.name === name);
-              if (!found) return `No tool ${name}`;
-              const fail = (message: string) => { spec.toolError(name, message); return `Error: ${message}`; };
-              if (!Value.Check(found.parameters, params)) return fail(`Invalid ${name} arguments`);
-              try { const out = await found.run(params, controller.signal); return typeof out === "string" ? out : out.text; }
-              catch (error) { return fail(errorText(error)); }
-            },
-          });
+            if (!initial && options.prompts) options.prompts.push(text);
+            initial = false;
+            spec.turn();
+            if (stopRequested) break;
+            const work = Promise.resolve(script?.({
+              spec, text, system, steered,
+              async tool(name, params) {
+                const found = spec.tools.find((t) => t.name === name);
+                if (!found) return `No tool ${name}`;
+                const fail = (message: string) => { spec.toolError(name, message); options.toolErrors?.push({ name, message }); return `Error: ${message}`; };
+                if (!Value.Check(found.parameters, params)) return fail(`Invalid ${name} arguments`);
+                try {
+                  const out = await found.run(params, controller.signal);
+                  if (typeof out !== "string" && out.image) options.images?.push(out.image);
+                  return typeof out === "string" ? out : out.text;
+                }
+                catch (error) { return fail(errorText(error)); }
+              },
+            }));
+            work.catch(() => {});
+            await Promise.race([work, new Promise<void>((resolve) => { release = resolve; })]);
+            release = undefined;
+            if (stopRequested) break;
           }
-        } finally { streaming = false; }
+        } finally { streaming = false; release = undefined; }
         return false;
       },
-      async steer(text) { steered.push(text); },
+      async steer(text) {
+        if (options.steer === "throw") throw new Error("the harness cannot steer into this run");
+        steered.push(text);
+      },
       get streaming() { return streaming; },
-      async abort() { controller.abort(); },
-      async fallback() { return false; },
+      async abort() {
+        if (options.aborts) options.aborts.n++;
+        controller.abort();
+        if (options.abort !== "dangle") { stopRequested = true; release?.(); }
+      },
+      async fallback() {
+        if (fallbacks <= 0) return false;
+        fallbacks--;
+        return true;
+      },
       dispose() {},
     };
     return handle;
-  };
+  }) as Driver;
+  driver.capabilities = () => caps;
+  return driver;
+}
+
+/** The scripted reference adapter with explicit capabilities. */
+export function fakeHarness(caps: Capabilities, scripts: Record<string, Script>, options: FakeOptions = {}): Driver {
+  return fakeDriver(scripts, [], caps, options);
 }
 
 export async function repo() {
