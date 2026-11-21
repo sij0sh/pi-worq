@@ -66,6 +66,7 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
   };
   const driver = (async (spec: Spec): Promise<Handle> => {
     const { choice, model } = effective(spec.name);
+    const level = choice.thinking ?? "low";
     let fallback = resolve(choice.fallbackModel);
     if (!model) throw new Block("model", "Select a Pi model or set model in pi-worq.json");
     if (fallback && fallback.provider === model.provider && fallback.id === model.id) fallback = undefined;

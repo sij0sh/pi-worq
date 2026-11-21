@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Static, TSchema } from "typebox";
+import type { ModelChoice } from "./config.ts";
 import { Block, errorText, parse } from "./contracts.ts";
 
 export type Profile = "agent" | "subagent" | "reviewer";
@@ -51,6 +52,22 @@ export interface Handle {
   dispose(): void;
 }
 export type Driver = ((spec: Spec) => Promise<Handle>) & { capabilities(name: string): Capabilities };
+
+/**
+ * Judge a resolved model choice against what the harness can do. Raises Block("capability") naming
+ * the config path of the offending field; `capabilities` itself never judges.
+ */
+export function assertChoice(choice: ModelChoice, caps: Capabilities): void {
+  if (choice.fallbackModel !== undefined && !caps.fallback) {
+    throw new Block("capability", `${choice.from.fallbackModel ?? "fallbackModel"}: ${choice.harness} has no fallback model`);
+  }
+  if (choice.thinking !== undefined && !caps.thinking.includes(choice.thinking)) {
+    const where = choice.from.thinking ?? "thinking";
+    throw new Block("capability", caps.thinking.length
+      ? `${where}: ${choice.thinking} is not a ${choice.harness} thinking level (${caps.thinking.join(", ")})`
+      : `${where}: ${choice.harness} has no thinking level control`);
+  }
+}
 
 export const NUDGE = "You ended your turn without calling your finish tool. Re-ask your recursive question: if consequential work remains within your authority, do it; otherwise call the finish tool now.";
 const CONTINUE = "The previous model request failed. Continue the same assignment from the conversation and tool results so far.";
