@@ -178,6 +178,7 @@ export class Conversation<T extends TSchema> {
       const handle = await Promise.race([this.open(), aborted]);
       let next = first;
       let nudged = false;
+      let corrections = 0;
       for (;;) {
         const turn = handle.prompt(next);
         void turn.catch(() => {});        // an abandoned promise can still reject
@@ -201,6 +202,12 @@ export class Conversation<T extends TSchema> {
           continue;
         }
         if (nudged) {
+          // A rejected finish gets one further explained attempt; a bare end of turn gets one nudge.
+          if (this.rejected !== undefined && corrections < 2) {
+            corrections++;
+            next = `Your ${this.options.finish.name} call was rejected: ${this.rejected}\nCorrect it and call ${this.options.finish.name} again.`;
+            continue;
+          }
           throw this.rejected
             ? new Block("rejected", `${this.options.spec.name} submission rejected: ${this.rejected}`)
             : new Block("no-result", `${this.options.spec.name} ended without calling ${this.options.finish.name}`);

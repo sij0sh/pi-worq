@@ -108,7 +108,7 @@ export class Worq {
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.id} ${d.state}: ${one(d.question, 200)}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
-      a.reviews.length && ["Reviews:", ...reviewLines(a.reviews, 600)].join("\n"),
+      a.reviews.length && ["Reviews:", ...reviewLines(a.reviews)].join("\n"),
       ["Recent activity:", ...a.tail(20).map((h) => `  ${h.line}`)].join("\n"),
     ].filter(Boolean).join("\n");
   }

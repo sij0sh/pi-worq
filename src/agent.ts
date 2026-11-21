@@ -6,7 +6,7 @@ import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkRe
 import type { Limits } from "./config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
-import { clean, one, planMarkdown, pqMessage, reviewLines, slug, workText, type ReviewRecord } from "./render.ts";
+import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, slug, workText, type ReviewRecord } from "./render.ts";
 import { Conversation, tool, type Driver, type Tool } from "./session.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
@@ -105,7 +105,8 @@ export class Agent {
 
   log(line: string) {
     this.history.push({ seq: ++this.seq, line: one(clean(line), 400) });
-    if (this.history.length > 200) this.history.shift();
+    // Keep the opening activity as well as the tail: the start of a long run is what explains it.
+    if (this.history.length > 200) this.history.splice(40, this.history.length - 200);
   }
   tail(lines = 20, since = 0) { return this.history.filter((h) => h.seq > since).slice(-lines); }
   private set(state: AgentState) { this.state = state; this.log(`state ${state}`); this.publish(); }
@@ -221,7 +222,7 @@ export class Agent {
       this.log(`state ${this.state}`);
       this.publish();
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
-      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.branch ? `\nProgress kept on ${this.branch}.` : ""}` });
+      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
 
@@ -358,14 +359,14 @@ export class Agent {
     }
   }
 
-  /** What Main reads when a round is ready. Adjudication is Main's job. */
+  /** What Main reads when a round is ready. Adjudication is Main's job; `worq_list` holds the rest. */
   digest() {
     const write = this.kind.access === "write";
     const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready`;
     const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
     const next = write
-      ? `Adjudicate each finding (accept/reject/defer, never by count). Accepted → worq_send("${this.ref}", feedback). Passed and you agree → merge ${this.branch} by hand (git merge), then worq_cancel("${this.ref}") to close. plan-fault → spawn a new plan with @${this.ref}'s plan.`
-      : `Adjudicate each finding (accept/reject/defer, never by count). Accepted → worq_send("${this.ref}", feedback). Ready → worq_spawn("execute", "<task> @${this.ref}"), then worq_cancel("${this.ref}") to close.`;
-    return [head, one(this.submission ?? "", 600), where, "Reviews:", ...reviewLines(this.reviews), next].join("\n");
+      ? `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Passed and you agree → merge ${this.branch} by hand (git merge), then worq_cancel("${this.ref}") to close. plan-fault → spawn a new plan with @${this.ref}'s plan.`
+      : `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Ready → worq_spawn("execute", "<task> @${this.ref}"), then worq_cancel("${this.ref}") to close.`;
+    return [head, one(this.submission ?? "", 600), where, "Reviews:", ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }), next].join("\n");
   }
 }

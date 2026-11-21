@@ -72,11 +72,15 @@ test("config: defaults, model lookup by specificity, invalid keys name the file"
 
 test("prompts: kinds and reviewer rosters are data", () => {
   const prompts = loadPrompts();
-  assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "plan"]);
+  assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "execute-lite", "plan", "plan-full"]);
   assert.equal(prompts.kinds.get("plan")!.access, "read");
+  assert.equal(prompts.kinds.get("plan-full")!.access, "read");
   assert.equal(prompts.kinds.get("execute")!.access, "write");
-  assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
+  assert.equal(prompts.kinds.get("execute-lite")!.review, "execute-lite");
+  assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["defeater", "pair", "subtraction"]);
+  assert.deepEqual(prompts.reviewers("plan-full").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
   assert.deepEqual(prompts.reviewers("execute").map((r) => r.name), ["intent"]);
+  assert.deepEqual(prompts.reviewers("execute-lite"), []);
 });
 
 test("tools are hidden until /worq, restored on resume, and share one schema with the CLI", async (t) => {

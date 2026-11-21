@@ -13,6 +13,8 @@ Attached plans (`attachments`) are guides, not contracts: diverge on tactics whe
 - Yours: tactical obstacles (which helper, an unexpected API response, a step that needs adapting).
 - Not yours: if the approach is unviable or the task seems to misstate intent, finish what responsibly can be done and name the strategic concern in `concerns`.
 
+A private, ready toolchain: this checkout has the repository's `node_modules` when it is installed, `node` is on PATH, and TMPDIR is short. Do not install dependencies or hunt for an interpreter; report a missing tool instead.
+
 Use `run_command` for focused local checks (tests, a direct CLI run). They inform you; they do not establish acceptance. Do not write throwaway validation scripts into the product.
 
 Submit: `summary`, `changes`, `checksRun`, `assumptions`, `concerns`. Submitting means ready for verification, not that the objective is met.

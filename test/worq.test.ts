@@ -28,7 +28,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
     },
     subagent: async (turn) => {
       assert.match(turn.text, /Where is the greeting printed/);
-      assert.deepEqual(turn.spec.tools.map((x) => x.name).sort(), ["answer", "list_files", "read_file"]);
+      assert.deepEqual(turn.spec.tools.map((x) => x.name).sort(), ["answer", "list_files", "read_file", "search"]);
       await turn.tool("answer", { answer: "app.py:1", basis: "observed" });
     },
     reviewer: async (turn) => {
@@ -44,7 +44,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.match(agent.ref, /^[0-9a-f]{4}$/);
   const ready = await next("review-ready", agent.ref);
   assert.equal(agent.state, "review-ready");
-  assert.deepEqual(reviewers.sort(), ["reviewer.decision", "reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
+  assert.deepEqual(reviewers.sort(), ["reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
   assert.match(ready.text, /defeater: fail/);
   assert.match(ready.text, /defeater-1: Criterion D1 ignores trailing newline/);
   assert.match(ready.text, /worq_send/);
@@ -160,6 +160,8 @@ test("limits, refusals and failures", async (t) => {
   const c = await worq.spawn("execute", "Do nothing");
   await next("failed", c.ref);
   assert.match(c.error!, /ended without calling submit/);
+  const failedText = (await next("failed", c.ref)).text;
+  assert.match(failedText, /Last activity:\n/);
   assert.equal(c.work, undefined);
   await worq.cancel(a.ref);
   const d = await worq.spawn("plan", "Two");

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Block } from "./contracts.ts";
 
@@ -7,7 +8,8 @@ export class CleanupError extends Block {
 }
 export interface ProcessResult { code: number; stdout: string; stderr: string }
 const LIMIT = 128 * 1024;
-const safePath = "/usr/local/bin:/usr/bin:/bin";
+/** The interpreter that runs Worq is on PATH, so an agent finds `node` without searching for one. */
+const safePath = [dirname(process.execPath), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
 export const cleanEnv = { PATH: safePath, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
 
 function killGroup(pid: number, sig: NodeJS.Signals | 0): boolean {

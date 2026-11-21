@@ -1,5 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Block } from "./contracts.ts";
 import { cleanEnv, git } from "./process.ts";
@@ -82,7 +82,33 @@ export async function branchExists(root: string, branch: string, signal: AbortSi
 export async function worktree(project: Project, dir: string, branch: string, signal: AbortSignal) {
   const work = join(dir, "work");
   await git(project.root, signal, "worktree", "add", "-b", branch, work, project.baseline);
-  return realpath(work);
+  const checkout = await realpath(work);
+  await linkDependencies(project.root, checkout, signal);
+  return checkout;
+}
+/**
+ * Make the repository's dependencies visible in a checkout without staging them. A single
+ * `node_modules` symlink is invisible to a directory-only ignore rule (`node_modules/`); a real
+ * directory of per-entry links is not, so every git command stays blind to it. Fails closed.
+ */
+export async function linkDependencies(root: string, checkout: string, signal: AbortSignal): Promise<boolean> {
+  const source = join(root, "node_modules");
+  if (!(await lstat(source).catch(() => undefined))?.isDirectory()) return false;
+  const target = join(checkout, "node_modules");
+  if (await lstat(target).catch(() => undefined)) return false;
+  const unlink = () => rm(target, { recursive: true, force: true }).catch(() => {});
+  try {
+    await mkdir(target);
+    for (const entry of await readdir(source)) await symlink(join(source, entry), join(target, entry)).catch(() => {});
+    if (await git(checkout, signal, "status", "--porcelain=v1", "--untracked-files=all")) {
+      await unlink();
+      return false;
+    }
+    return true;
+  } catch {
+    await unlink();
+    return false;
+  }
 }
 export async function removeWorktree(root: string, work: string) {
   await git(root, AbortSignal.timeout(30_000), "worktree", "remove", "--force", work);
@@ -100,16 +126,25 @@ export async function snapshot(root: string, parent: string, commit: string, sig
   await git(stage, signal, "checkout", "--detach", commit);
   if (await git(stage, signal, "rev-parse", "HEAD") !== commit) throw new Block("candidate-id", "Review checkout does not match the candidate");
   await git(stage, signal, "remote", "remove", "origin");
+  await linkDependencies(root, stage, signal);
   return stage;
 }
 /** True when the checkout still holds exactly `commit` with no tracked changes. */
 export async function intact(stage: string, commit: string, signal: AbortSignal) {
   return await git(stage, signal, "rev-parse", "HEAD") === commit && !await git(stage, signal, "status", "--porcelain=v1", "--untracked-files=no");
 }
-export async function runtimeEnv(parent: string): Promise<NodeJS.ProcessEnv> {
+export interface Runtime { env: NodeJS.ProcessEnv; tmp: string }
+/**
+ * Environment for agent commands. TMPDIR is a short 0700 directory under the system temporary
+ * directory, because unix socket paths are limited to ~108 bytes, so it is not covered by the
+ * state directory's privacy guarantee. The caller removes `tmp` when the box closes.
+ */
+export async function runtimeEnv(parent: string): Promise<Runtime> {
+  const tmp = await mkdtemp(join(tmpdir(), "worq-"));
+  await chmod(tmp, 0o700);
   const env = { ...cleanEnv, HOME: join(parent, "home"), XDG_CONFIG_HOME: join(parent, "config"), XDG_STATE_HOME: join(parent, "state"),
-    XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: join(parent, "tmp"), TERM: "xterm-256color" };
-  await Promise.all([env.HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME, env.TMPDIR]
+    XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: tmp, TERM: "xterm-256color" };
+  await Promise.all([env.HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME]
     .map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })));
-  return env;
+  return { env, tmp };
 }

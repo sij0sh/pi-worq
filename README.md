@@ -19,12 +19,22 @@ Tools stay hidden until you run `/worq` in a session (zero context cost otherwis
 /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>
 ```
 
+Choose the route by the ask:
+
+| Route | Kind | Reviewers |
+|---|---|---|
+| small, plainly verifiable change | `execute-lite` | none; Main reads the diff |
+| open work | `plan` → `execute` | three lenses, then the verifier |
+| user-owned choices, broad scope | `plan-full` | four lenses, including `decision` |
+
 Standard recipe (state it in AGENTS.md to make it a convention):
 
 1. `worq_spawn("plan", task)` → plan saved to `.agents/plans/<ref>-<slug>.md`.
 2. Review digest arrives as `[worq <ref>]`. Adjudicate each finding: accept, reject or defer. Accepted → `worq_send(ref, feedback)` starts another round.
 3. `worq_spawn("execute", "<task> @<plan-ref>")` → works in its own worktree on `worq/<ref>`.
 4. Verifier passes and you agree → `git merge worq/<ref>` by hand, then `worq_cancel(ref)` to close.
+
+A digest carries the four most consequential findings per reviewer; `worq_list <ref>` carries all of them with full text.
 
 ## Vocabulary
 

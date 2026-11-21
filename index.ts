@@ -18,9 +18,9 @@ const ENABLED = "worq-enabled";
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background Pi SDK agent of a kind (plan: read-only, writes .agents/plans/; execute: edits its own worktree on branch worq/<ref>). Returns a ref at once. Independent reviewers run automatically when it submits.",
+    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically when it submits.",
     guidelines: [
-      "Use worq_spawn for work the user hands to Worq. Plan first when the approach is open; then worq_spawn(\"execute\", \"<task> @<plan-ref>\") to implement against that plan. Worq agents cannot see this conversation: put everything they need in the task.",
+      "Use worq_spawn for work the user hands to Worq. Match the route to the ask: execute-lite for a small, plainly verifiable change; plan then worq_spawn(\"execute\", \"<task> @<plan-ref>\") for open work; plan-full only when user-owned choices or broad scope need the full roster. Worq agents cannot see this conversation: put everything they need in the task.",
       "Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
     ],
   },
@@ -33,7 +33,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "send",
     description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
     guidelines: [
-      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. Send accepted findings with worq_send as concrete feedback. Escalate to the user only what changes their intent or scope.",
+      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. The digest carries the four most consequential per reviewer; worq_list(<ref>) carries all of them with full text. Send accepted findings with worq_send as concrete feedback. Escalate to the user only what changes their intent or scope.",
     ],
   },
   worq_cancel: {
@@ -50,6 +50,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
   return function worq(pi: ExtensionAPI) {
     const prompts = loadPrompts();
     const table = ops([...prompts.kinds.keys()]);
+    const kinds = [...prompts.kinds.values()].map((kind) => `${kind.name}: ${kind.description}`).join("; ");
     let instance: Worq | undefined;
     let socket: Awaited<ReturnType<typeof serve>> | undefined;
     let closing = false;
@@ -82,9 +83,10 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     // Hidden until /worq: zero context cost in sessions that never use Worq.
     for (const name of TOOLS) {
       const { op, description, guidelines } = descriptions[name];
+      const body = name === "worq_spawn" ? `${description} Kinds — ${kinds}` : description;
       const parameters: TSchema = table[op];
       pi.registerTool({
-        name, label: name, description, parameters, promptSnippet: description, defaultActive: false,
+        name, label: name, description: body, parameters, promptSnippet: body, defaultActive: false,
         ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
         async execute(_id, params, _signal, _update, ctx) {
           const { text } = await run(ctx, op, params);

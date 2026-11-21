@@ -1,14 +1,66 @@
 import { constants } from "node:fs";
-import { lstat, open, readdir, rm, unlink } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { lstat, open, readFile, readdir, realpath, rm, stat, unlink } from "node:fs/promises";
+import { basename, join, relative } from "node:path";
 import { Type } from "typebox";
-import { array, Block, command, obj, PtyAction, text } from "./contracts.ts";
+import { array, Block, command, errorText, obj, PtyAction, text } from "./contracts.ts";
 import { CleanupError, launch, runProcess } from "./process.ts";
 import { observePty } from "./pty.ts";
+import { one } from "./render.ts";
 import { tool, type Tool } from "./session.ts";
-import { readSmall, runtimeEnv, scoped, writeScoped } from "./workspace.ts";
+import { readSmall, runtimeEnv, scoped, writeScoped, type Runtime } from "./workspace.ts";
 
 const path = text(1024);
+const SEARCH = { hits: 200, bytes: 64_000, files: 4_000, file: 2 * 1024 * 1024 };
+
+/**
+ * Bounded content search: `read_file` shows 160 lines per call, so locating a symbol otherwise costs
+ * a dozen calls. Symlinks are refused, except the dependency links a checkout is given.
+ */
+function searchTool(cwd: string): Tool {
+  return tool("search", "Search file contents for a regular expression; returns path:line:text, bounded",
+    obj({ pattern: text(200), path: Type.Optional(path) }), async ({ pattern, path: at = "." }) => {
+      let match: RegExp;
+      try { match = new RegExp(pattern); } catch (error) { throw new Block("pattern", `Invalid regular expression: ${errorText(error)}`); }
+      const start = await realpath(await scoped(cwd, at, { root: true }));
+      const lines: string[] = [];
+      let bytes = 0, files = 0, capped = false;
+      const read = async (file: string) => {
+        const info = await stat(file).catch(() => undefined);
+        if (!info?.isFile() || info.size > SEARCH.file) return;
+        files++;
+        const raw = await readFile(file, "utf8").catch(() => undefined);
+        if (raw === undefined || raw.includes("\0")) return;
+        const rows = raw.split("\n");
+        for (let i = 0; i < rows.length; i++) {
+          if (!match.test(rows[i])) continue;
+          const line = `${relative(cwd, file)}:${i + 1}:${one(rows[i].trim(), 300)}`;
+          if (lines.length >= SEARCH.hits || bytes + line.length > SEARCH.bytes) { capped = true; return; }
+          lines.push(line);
+          bytes += line.length + 1;
+        }
+      };
+      const walk = async (dir: string, modules: boolean): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          if (files >= SEARCH.files || capped) return;
+          if (entry.name === ".git") continue;
+          const full = join(dir, entry.name);
+          if (entry.isSymbolicLink()) {
+            if (!modules) continue;
+            const real = await realpath(full).catch(() => undefined);
+            const info = real ? await stat(real).catch(() => undefined) : undefined;
+            if (real && info?.isDirectory()) await walk(real, false);
+            else if (real && info?.isFile()) await read(real);
+            continue;
+          }
+          if (entry.isDirectory()) await walk(full, entry.name === "node_modules");
+          else await read(full);
+        }
+      };
+      await walk(start, false);
+      if (!lines.length) return `No matches in ${files} files${capped ? " (search stopped at a cap)" : ""}`;
+      return lines.join("\n") + (capped ? `\n(${files} files scanned; results capped)` : "");
+    });
+}
 
 /** Read-only repository tools. Every profile gets these. */
 export function readTools(cwd: string): Tool[] {
@@ -23,6 +75,7 @@ export function readTools(cwd: string): Tool[] {
       if (raw.includes("\0")) throw new Block("binary", "Binary files are not exposed");
       return raw.split("\n").slice(offset - 1, offset + 159).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
     }),
+    searchTool(cwd),
   ];
 }
 
@@ -33,7 +86,7 @@ export function writeTools(cwd: string): Tool[] {
       await writeScoped(cwd, path, content);
       return `Wrote ${path}`;
     }),
-    tool("edit_file", "Replace one exact, unique text region in a file", obj({ path, old: text(25_000), replacement: Type.String({ maxLength: 40_000 }) }), async ({ path, old, replacement }) => {
+    tool("edit_file", "Replace one exact, unique text region in a file (parameters: path, old, replacement)", obj({ path, old: text(25_000), replacement: Type.String({ maxLength: 40_000 }) }), async ({ path, old, replacement }) => {
       const before = await readSmall(await scoped(cwd, path), 256 * 1024);
       const at = before.indexOf(old);
       if (at === -1 || before.indexOf(old, at + 1) !== -1) throw new Block("edit-match", "Old text must match exactly once");
@@ -62,12 +115,12 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
     return pending;
   };
   const sig = (signal: AbortSignal) => AbortSignal.any([options.signal, signal]);
-  let env: Promise<NodeJS.ProcessEnv> | undefined;
+  let env: Promise<Runtime> | undefined;
   const environment = () => env ??= runtimeEnv(runtime);
   const tools: Tool[] = [
     tool("run_command", "Run a trusted local command in this checkout; no shell parsing. Returns exit code and output tails.",
       obj({ ...command, stdin: Type.Optional(Type.String({ maxLength: 8192 })) }), async ({ executable, args, stdin }, signal) => {
-        const out = await track(runProcess(executable, args, { cwd, env: await environment(), signal: sig(signal), ms: 120_000, stdin }));
+        const out = await track(runProcess(executable, args, { cwd, env: (await environment()).env, signal: sig(signal), ms: 120_000, stdin }));
         return `Exit ${out.code}\nstdout:\n${out.stdout.slice(-6000)}\nstderr:\n${out.stderr.slice(-6000)}`;
       }),
   ];
@@ -79,7 +132,7 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
       tool("start_service", "Launch a local test server from this checkout, bound to loopback. Stopped when you finish.", obj(command), async ({ executable, args }) => {
         if (services.length >= max) throw new Block("service-limit", `At most ${max} services`);
         const service = { output: "", status: "running" };
-        const child = launch(executable, args, { cwd, env: await environment(), signal: options.signal, ms: 600_000,
+        const child = launch(executable, args, { cwd, env: (await environment()).env, signal: options.signal, ms: 600_000,
           stdout: (chunk) => { service.output = (service.output + chunk.toString()).slice(-4000); } });
         services.push(service);
         void track(child.done).then(({ code, stderr }) => { service.status = `Exit ${code}\n${stderr.slice(-1500)}`; }, (error) => { service.status = String(error); });
@@ -92,7 +145,7 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
       }),
       tool("observe_terminal", "Launch an interactive terminal app, drive inputs, and return rendered screens at observe steps",
         obj({ ...command, actions: array(PtyAction, 16, 1) }), async ({ executable, args, actions }, signal) => {
-          const screens = await track(observePty(executable, args, actions, cwd, await environment(), sig(signal)));
+          const screens = await track(observePty(executable, args, actions, cwd, (await environment()).env, sig(signal)));
           return screens.map(({ step, screen }) => `Step ${step}:\n${screen}`).join("\n\n").slice(-12_000) || "No screens requested";
         }),
       tool("save_artifact", "Keep a screenshot or text observation from this checkout as evidence", obj({ path }), async ({ path }) => {
@@ -125,7 +178,8 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
     /** Wait for every owned process; rethrow if one could not be confirmed stopped. */
     async close() {
       await Promise.allSettled(running);
-      if (env) await rm(runtime, { recursive: true, force: true });
+      const box = await env?.catch(() => undefined);
+      if (box) await Promise.all([rm(runtime, { recursive: true, force: true }), rm(box.tmp, { recursive: true, force: true })]);
       if (cleanupError) throw cleanupError;
     },
   };
