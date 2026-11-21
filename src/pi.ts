@@ -47,16 +47,16 @@ function sdkTool(tool: Tool) {
 
 /** Pi SDK sessions in memory, one per Worq conversation. Models come from pi-worq.json, else Main's model. */
 export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">, config: Config): Driver {
-  const resolve = (ref?: string) => {
+  const resolve = (ref?: string, key?: string) => {
     if (!ref) return undefined;
     const slash = ref.indexOf("/");
     const model = ctx.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
-    if (!model) throw new Block("config", `${config.path}: Pi does not know model ${ref}`);
+    if (!model) throw new Block("config", `${config.path}: Pi does not know model ${ref}${key ? ` (${key})` : ""}`);
     return model;
   };
   const effective = (name: string) => {
     const choice = config.model(name);
-    return { choice, model: resolve(choice.model) ?? ctx.model };
+    return { choice, model: resolve(choice.model, choice.from.model) ?? ctx.model };
   };
   const capabilities = (name: string): Capabilities => {
     const { model } = effective(name);

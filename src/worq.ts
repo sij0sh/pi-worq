@@ -32,9 +32,13 @@ export class Worq {
   private readonly check = (role: string): void => {
     assertChoice(this.deps.config.model(role), this.deps.driver.capabilities(role));
   };
-  /** Every role one kind's agent will use: its own, the subagent it may delegate to, and its reviewers. */
+  /** Every role an agent may use: its own, the subagent it may delegate to, and every kind's reviewers. */
   private roles(kind: Kind): string[] {
-    return [`agent.${kind.name}`, "subagent", ...this.deps.prompts.reviewers(kind.review).map((r) => `reviewer.${r.name}`)];
+    const reviewers = new Set<string>();
+    for (const other of this.deps.prompts.kinds.values()) {
+      for (const r of this.deps.prompts.reviewers(other.review)) reviewers.add(`reviewer.${r.name}`);
+    }
+    return [`agent.${kind.name}`, "subagent", ...reviewers];
   }
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
