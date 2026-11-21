@@ -128,6 +128,17 @@ test("config: every refusal carries one of the five stable codes", async () => {
   await assert.rejects(driver(spec), byCode("model"));
 });
 
+/** A ref the harness accepts by shape but its registry does not know names the JSON key, not only the value. */
+test("config: an unknown model ref names the key it came from", async () => {
+  const config = await configOf({ harness: "pi", models: { "agent.plan": { model: "openai/gpt-5" } } });
+  const driver = piDriver({ model: undefined, modelRegistry: { find: () => undefined } } as never, config);
+  const spec: Spec = { id: "x", profile: "agent", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} };
+  await assert.rejects(driver(spec), (error: unknown) =>
+    error instanceof Block && error.code === "config"
+    && error.message.includes("openai/gpt-5")
+    && error.message.includes("/models/agent.plan/model"));
+});
+
 test("config: nothing to resolve is Block(model)", async () => {
   const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", from: {} }) };
   const driver = piDriver({ model: undefined, modelRegistry: { find: () => undefined } } as never, config);
