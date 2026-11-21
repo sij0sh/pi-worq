@@ -45,6 +45,8 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
+  /** Judge one role's model choice before any work; built in Worq.spawn over the config and the driver. */
+  check(role: string): void;
 }
 
 /**
@@ -241,6 +243,7 @@ export class Agent {
     let conversation: Conversation<typeof PqAnswer> | undefined;
     let release: (() => void) | undefined;
     try {
+      this.deps.check("subagent");
       release = await semaphore.acquire(signal);
       conversation = new Conversation({
         driver, signal, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
@@ -321,6 +324,7 @@ export class Agent {
     let conversation: Conversation<typeof ReviewReport> | undefined;
     let release: (() => void) | undefined;
     try {
+      this.deps.check(`reviewer.${name}`);
       release = await semaphore.acquire(signal);
       let cwd = root;
       if (write) {

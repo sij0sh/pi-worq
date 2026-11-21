@@ -67,9 +67,14 @@ Adding a kind or reviewer = adding one Markdown file.
 
 ```json
 {
-  "model": "provider/model",
+  "harness": "pi",
   "fallbackModel": "provider/model",
-  "models": { "agent.execute": { "model": "provider/model" }, "reviewer": { "model": "provider/model" } },
+  "harnesses": { "pi": { "model": "provider/model", "thinking": "medium" } },
+  "models": {
+    "agent.execute": { "thinking": "high" },
+    "reviewer": { "model": "provider/model", "thinking": "high" },
+    "subagent": { "model": "provider/model", "thinking": "low" }
+  },
   "limits": {
     "agents": 4, "subagents": 6, "parallel": 4, "rounds": 3, "asks": 3,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
@@ -79,7 +84,11 @@ Adding a kind or reviewer = adding one Markdown file.
 }
 ```
 
-Model keys: `agent`, `agent.<kind>`, `subagent`, `reviewer`, `reviewer.<name>`; most specific wins, else Main's model.
+Model keys: `agent`, `agent.<kind>`, `subagent`, `reviewer`, `reviewer.<name>`. `models.<key>.harness` picks the backend (absent inherits the top-level `harness`, absent there means `pi`); then `model`, `fallbackModel` and `thinking` each inherit **independently**: the role's own layer, its profile layer, `harnesses.<resolved harness>`, then the top level. `harnesses.<h>.model` therefore shadows the top-level `model` for every role resolved to that harness — do not set both.
+
+One behaviour change versus 0.0.8: a more specific layer that sets only one field no longer discards an inherited field, so `models.reviewer.model` now reaches `reviewer.intent`. A missing model is not an error: the role uses Main's model.
+
+See `docs/harness.md` for the adapter contract, the capabilities and the per-harness config example.
 
 ## CLI
 
@@ -91,7 +100,7 @@ Talks to `<state>/ctl/<pid>.sock`. State: `$WORQ_STATE_DIR` or `~/.local/state/p
 
 ## Limits
 
-Linux only. Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Pi sessions are not a security sandbox. Reviewer and agent judgement quality is not proven by the test suite, which uses a scripted driver.
+Linux only. One backend ships today (Pi); a second is one adapter file plus one registry line, documented in `docs/harness.md`. Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Pi sessions are not a security sandbox. Reviewer and agent judgement quality is not proven by the test suite, which uses a scripted driver.
 
 ## Develop
 

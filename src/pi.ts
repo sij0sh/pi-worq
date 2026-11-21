@@ -4,7 +4,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Block, parse } from "./contracts.ts";
 import type { Config } from "./config.ts";
-import type { Driver, Handle, Spec, Tool } from "./session.ts";
+import type { Capabilities, Driver, Handle, Spec, Tool } from "./session.ts";
+
+const CORE_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+const EXTRA_LEVELS = ["xhigh", "max"] as const;
+/** The level strings Pi accepts; Pi clamps a level the chosen model does not support. */
+type Level = (typeof CORE_LEVELS)[number] | (typeof EXTRA_LEVELS)[number];
+type Leveled = { reasoning?: boolean; thinkingLevelMap?: Partial<Record<string, string | null>> };
+/** The same list `getSupportedThinkingLevels` derives: ["off"] when the model cannot reason, [] when it cannot be told. */
+export function thinkingLevels(model: Leveled | undefined): string[] {
+  if (!model) return [];
+  if (!model.reasoning) return ["off"];
+  const map = model.thinkingLevelMap ?? {};
+  return [...CORE_LEVELS.filter((level) => map[level] !== null), ...EXTRA_LEVELS.filter((level) => level in map)];
+}
 
 /** Only Worq's own system prompt and tools: no extensions, skills, AGENTS.md or prompt templates. */
 function resources(prompt: string): ResourceLoader {
@@ -34,22 +47,34 @@ function sdkTool(tool: Tool) {
 
 /** Pi SDK sessions in memory, one per Worq conversation. Models come from pi-worq.json, else Main's model. */
 export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">, config: Config): Driver {
-  const resolve = (ref?: string) => {
+  const resolve = (ref?: string, key?: string) => {
     if (!ref) return undefined;
     const slash = ref.indexOf("/");
     const model = ctx.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
-    if (!model) throw new Block("config", `${config.path}: Pi does not know model ${ref}`);
+    if (!model) throw new Block("config", `${config.path}: Pi does not know model ${ref}${key ? ` (${key})` : ""}`);
     return model;
   };
-  return async (spec: Spec): Promise<Handle> => {
-    const choice = config.model(spec.name);
-    const model = resolve(choice.model) ?? ctx.model;
+  const effective = (name: string) => {
+    const choice = config.model(name);
+    return { choice, model: resolve(choice.model, choice.from.model) ?? ctx.model };
+  };
+  const capabilities = (name: string): Capabilities => {
+    const { model } = effective(name);
+    return {
+      fallback: true,
+      thinking: thinkingLevels(model),
+      context: { system: "replace", ambientInstructions: false },
+    };
+  };
+  const driver = (async (spec: Spec): Promise<Handle> => {
+    const { choice, model } = effective(spec.name);
+    const level: Level = (choice.thinking as Level | undefined) ?? "low";
     let fallback = resolve(choice.fallbackModel);
     if (!model) throw new Block("model", "Select a Pi model or set model in pi-worq.json");
     if (fallback && fallback.provider === model.provider && fallback.id === model.id) fallback = undefined;
     const tools = spec.tools.map(sdkTool);
     const { session } = await createAgentSession({
-      cwd: spec.cwd, model, thinkingLevel: "low", resourceLoader: resources(spec.system),
+      cwd: spec.cwd, model, thinkingLevel: level, resourceLoader: resources(spec.system),
       tools: tools.map((t) => t.name), customTools: tools,
       sessionManager: SessionManager.inMemory(spec.cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
@@ -77,7 +102,10 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
         catch (error) { if (started) throw error; return true; } // preflight failed (e.g. credentials): try the fallback
         return failed;
       },
-      async steer(text) { await session.steer(text, undefined, { source: "extension" }); },
+      async steer(text) {
+        const outcome = await session.steer(text, undefined, { source: "extension" });
+        if (outcome !== "queued") throw new Block("steer", `Pi did not queue the message (${outcome})`);
+      },
       get streaming() { return session.isStreaming; },
       abort: () => session.abort(),
       async fallback() {
@@ -85,10 +113,15 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
         const next = fallback;
         fallback = undefined;
         await session.setModel(next);
-        session.setThinkingLevel("low");
+        session.setThinkingLevel(level);
+        // A fallback model that cannot take the level is a documented degradation, not an error.
+        const supported = thinkingLevels(next);
+        if (!supported.includes(level)) spec.log(`thinking level ${level} is not supported by fallback model ${next.provider}/${next.id} (${supported.join(", ")}); Pi clamps it`);
         return true;
       },
       dispose() { unsubscribe(); session.dispose(); },
     };
-  };
+  }) as Driver;
+  driver.capabilities = capabilities;
+  return driver;
 }

@@ -5,7 +5,7 @@ import type { AgentEvent } from "./src/agent.ts";
 import { loadConfig } from "./src/config.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
-import { piDriver } from "./src/pi.ts";
+import { createDriver } from "./src/harness.ts";
 import { loadPrompts } from "./src/prompts.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/session.ts";
@@ -69,7 +69,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       ui = ctx;
       if (instance) return instance;
       const config = loadConfig(options.agentDir?.() ?? getAgentDir());
-      const driver = options.driver?.(ctx) ?? piDriver(ctx, config);
+      const driver = options.driver?.(ctx) ?? createDriver({ host: ctx }, config);
       instance = new Worq({ driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
       return instance;
     };
