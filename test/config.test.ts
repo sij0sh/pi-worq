@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { Agent, type Semaphore } from "../src/agent.ts";
 import { DEFAULT_LIMITS, loadConfig, type Config } from "../src/config.ts";
 import { Block } from "../src/contracts.ts";
 import { piDriver } from "../src/pi.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import { assertChoice, type Spec } from "../src/session.ts";
 import { Worq } from "../src/worq.ts";
-import { fakeHarness, MINIMAL_CAPS } from "./fake.ts";
+import { fakeDriver, fakeHarness, FULL_CAPS, MINIMAL_CAPS, pass, repo } from "./fake.ts";
 
 async function configOf(value: unknown, harnesses?: string[]): Promise<Config> {
   const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
@@ -161,4 +164,66 @@ test("config: spawn validates the agent role, the subagent and every reviewer", 
   await spawnFailure({ model: "a/m", models: { "agent.plan": { thinking: "high" } } }, "/models/agent.plan/thinking");
   await spawnFailure({ model: "a/m", models: { subagent: { fallbackModel: "a/b" } } }, "/models/subagent/fallbackModel");
   await spawnFailure({ model: "a/m", models: { "reviewer.pair": { thinking: "high" } } }, "/models/reviewer.pair/thinking");
+});
+
+/**
+ * The reviewer's role check runs before any of its work (src/agent.ts:327-333): a denial costs no
+ * semaphore slot, no scratch directory and no snapshot checkout. Spawn checks every reviewer up
+ * front, so a check that fails only at review time is injected through the one seam that can differ
+ * per role: the Agent's own `check` dependency, built in Worq.spawn as assertChoice over config+driver.
+ */
+test("agent: a reviewer whose role check fails takes no semaphore slot and no snapshot", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const prompts = loadPrompts();
+  const kind = prompts.kinds.get("execute")!;
+  const seen: Spec[] = [];
+  const acquires: string[] = [];
+  const checks: string[] = [];
+  /** Every reviewer's cwd: a snapshot checkout ends in review-<round>-<name>/product (src/agent.ts:332). */
+  const cwds: string[] = [];
+  const semaphore = { acquire: async () => { acquires.push("acquire"); return () => {}; } } as unknown as Semaphore;
+  /** One execute agent; `deny` names the single reviewer role whose harness cannot honour its choice. */
+  const run = async (ref: string, deny?: string) => {
+    const agent = new Agent({
+      driver: fakeDriver({
+        "agent.execute": (turn) => turn.tool("submit", { summary: "Uppercased the greeting", changes: ["app.py"] }).then(() => {}),
+        reviewer: (turn) => { cwds.push(turn.spec.cwd); return turn.tool("report", pass).then(() => {}); },
+      }, seen),
+      prompts, limits: DEFAULT_LIMITS, state, root, semaphore, notify() {},
+      check(role) {
+        checks.push(role);
+        assertChoice({ harness: "pi", thinking: "high", from: { thinking: "/models/reviewer.intent/thinking" } }, role === deny ? MINIMAL_CAPS : FULL_CAPS);
+      },
+    }, { ref, kind, task: "Uppercase the greeting", attachments: [] });
+    agent.launch();
+    const deadline = Date.now() + 20_000;
+    while (agent.state !== "review-ready") {
+      if (agent.ended || Date.now() > deadline) throw new Error(`agent ${ref} ended ${agent.state}: ${agent.error}`);
+      await sleep(5);
+    }
+    return agent;
+  };
+
+  // Control: when the check passes, the semaphore is taken and the reviewer is handed a snapshot checkout,
+  // so the zeros asserted below come from the check, not from an inert double.
+  const control = await run("abce");
+  assert.deepEqual(control.reviews.map((r) => [r.name, r.verdict]), [["intent", "pass"]]);
+  assert.deepEqual(acquires, ["acquire"], "a passing check reaches semaphore.acquire once");
+  assert.match(cwds[0], /review-1-intent[/\\]product$/, "a passing check reaches snapshot");
+  acquires.length = 0;
+  cwds.length = 0;
+  seen.length = 0;
+
+  const denied = await run("abcd", "reviewer.intent");
+  assert.deepEqual(denied.reviews.map((r) => [r.name, r.verdict]), [["intent", "unknown"]], "a denied role is recorded as unknown, never pass");
+  assert.match(denied.reviews[0].error ?? "", /thinking/, "the record carries the real capability refusal");
+  assert.ok(checks.includes("reviewer.intent"), "the check ran");
+  assert.deepEqual(acquires, [], "the denied reviewer never reaches semaphore.acquire");
+  // mkdir(scratch) and snapshot() both sit behind that acquire (src/agent.ts:328-332), so no checkout can exist.
+  assert.ok(!cwds.some((cwd) => /review-1-intent/.test(cwd)), "no reviewer cwd, so snapshot never ran");
+  assert.ok(!existsSync(join(state, denied.id, "review-1-intent")), "no scratch directory either");
+  assert.ok(!seen.some((spec) => spec.name === "reviewer.intent"), "the driver never opened the denied reviewer's session");
+  await control.cancel();
+  await denied.cancel();
 });
