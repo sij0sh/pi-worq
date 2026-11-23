@@ -20,8 +20,8 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "spawn",
     description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit unless the spawn sets verify:false.",
     guidelines: [
-      "Simple, bounded work: execute directly with mode fast. For complex or ambiguous work use mode thorough and delegate decision-changing questions; plan first only when a plan changes the decision. Mode never changes the review roster or explicit settings.",
-      "One plan round is the norm; a second only for a finding that changes criteria or scope and cannot be folded into the execute task — never to collect more findings. Put the user's ask in the execute task verbatim: Worq agents cannot see this conversation. Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
+      "For small, deterministic edits, prefer doing the edit directly and checking the exact diff unless the user requested Worq. If asked to use Worq, call worq_spawn and confirm the returned ref; never substitute a direct answer. Use mode fast for bounded Worq work and thorough for consequential ambiguity; neither mode changes the review roster.",
+      "Put the user's ask in the worq_spawn task verbatim. A plan or review is not permission to execute, write, repair, or merge. Stop at the requested deliverable. Worq displays completion without waking Main; use worq_list for the full result when asked to assess or continue it.",
     ],
   },
   worq_list: {
@@ -33,14 +33,14 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "send",
     description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
     guidelines: [
-      "On a [worq] review digest, adjudicate every finding as accept, reject (with reason) or defer; never by count. Fold accepted plan findings into the execute task; worq_send starts another round, so use it only for a finding that changes the plan's criteria or scope. worq_list(<ref>) carries every finding in full. Escalate to the user only what changes their intent or scope.",
+      "Before delivering a Worq result, read the findings with worq_list. Adjudicate material findings on evidence, never by count. Correct them within authorized scope or explicitly report them as unresolved. worq_send on a review-ready ref starts another round; do not use it without authority to continue.",
     ],
   },
   worq_cancel: {
     op: "cancel",
     description: "Close or cancel an agent (or all): stops it, its PQ subagents and reviewers, removes its worktree and keeps its branch.",
     guidelines: [
-      "Worq never merges. When an execute agent's reviews pass and you agree, merge its branch by hand (git merge worq/<ref>), then worq_cancel it to close.",
+      "Worq never merges. If the user authorized landing, verify the candidate before merging it by hand; close or cancel with worq_cancel.",
     ],
   },
 };
@@ -63,7 +63,10 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     };
     const notify = (event: AgentEvent) => {
       if (closing) return;
-      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, { triggerTurn: true, deliverAs: "followUp" });
+      const actionable = event.type === "ask" || event.type === "checkpoint";
+      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, actionable
+        ? { triggerTurn: true, deliverAs: "followUp" }
+        : { triggerTurn: false });
       status();
     };
     const ensure = (ctx: ExtensionContext) => {
@@ -89,8 +92,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         name, label: name, description: body, parameters, promptSnippet: body, defaultActive: false,
         ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
         async execute(_id, params, _signal, _update, ctx) {
-          const { text } = await run(ctx, op, params);
-          return { content: [{ type: "text", text: clean(text) }], details: undefined };
+          const { text, data } = await run(ctx, op, params);
+          return { content: [{ type: "text", text: clean(text) }], details: data };
         },
       });
     }
@@ -104,8 +107,18 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       else process.stderr.write(`${clean(text)}\n`);
     };
 
+    // Terminal notices are visible and persisted, but never steer an unrelated Main turn.
+    pi.on("context", (event) => {
+      const messages = event.messages.filter((message) => {
+        if (message.role !== "custom" || message.customType !== "worq") return true;
+        const type = (message.details as Partial<AgentEvent> | undefined)?.type;
+        return type === "ask" || type === "checkpoint";
+      });
+      if (messages.length !== event.messages.length) return { messages };
+    });
+
     pi.registerCommand("worq", {
-      description: "Enable Worq tools: /worq [request] · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
+      description: "Enable tools or spawn: /worq [plan|execute] <request> · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
       async handler(args, ctx) {
         if (closing) return;
         const value = args.trim();
@@ -124,9 +137,18 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           }
           enable(true);
           pi.appendEntry(ENABLED, { on: true });
-          ensure(ctx);
-          if (value) pi.sendUserMessage(`Use Worq for this: ${value}`);
-          else say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}.`);
+          if (!value) {
+            ensure(ctx);
+            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}.`);
+            return;
+          }
+          const explicit = prompts.kinds.has(word);
+          // A bare request is read-only; only an explicit write kind authorizes worktree writes.
+          const kind = explicit ? word : "plan";
+          const task = explicit ? value.slice(word.length).trimStart() : value;
+          if (!task) { say(ctx, `Usage: /worq ${kind} <request>`, "error"); return; }
+          const result = await run(ctx, "spawn", { kind, task });
+          pi.sendMessage({ customType: "worq", content: clean(result.text), display: true, details: result.data }, { triggerTurn: false });
         } catch (error) { say(ctx, errorText(error), "error"); }
       },
     });

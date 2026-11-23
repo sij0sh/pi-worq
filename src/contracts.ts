@@ -28,8 +28,8 @@ const basis = literals(["observed", "documented", "assumed"] as const);
 /** Agent submission for read-access kinds (plan). Rendered to <repo>/.agents/plans/. */
 export const PlanReport = obj({
   summary: text(2400),
-  criteria: array(text(400), 12, 1),
-  decisions: array(obj({ id: Type.String({ pattern: "^D\\d{1,2}$" }), choice: text(800), basis: text(800), alternative: text(500), tradeoff: text(500), revisit: text(400) }), 12),
+  criteria: Type.Optional(array(text(400), 12, 1)),
+  decisions: Type.Optional(array(obj({ id: Type.String({ pattern: "^D\\d{1,2}$" }), choice: text(800), basis: text(800), alternative: text(500), tradeoff: text(500), revisit: text(400) }), 12)),
   assumptions: notes(),
   tree: Type.Optional(text(6000)),
   document: Type.Optional(text(60_000)),
@@ -50,7 +50,13 @@ export const PqAnswer = obj({ answer: text(1400), basis, unresolved: notes(4), n
 export type PqAnswer = Static<typeof PqAnswer>;
 
 export const verdicts = ["pass", "fail", "inconclusive", "plan-fault", "not-applicable"] as const;
-export const Finding = obj({ witness: text(800), basis: text(400), consequence: text(500), change: text(500), need: Type.Optional(Type.Boolean({ description: "true when only the requester can settle it" })) });
+export const Finding = obj({
+  witness: Type.String({ minLength: 1, maxLength: 800, description: "Specific counterexample or gap, with evidence and impact if not given separately" }),
+  basis: Type.Optional(text(400)),
+  consequence: Type.Optional(text(500)),
+  change: Type.Optional(text(500)),
+  need: Type.Optional(Type.Boolean({ description: "true when only the requester can settle it" })),
+});
 /** Reviewer report. A crash, timeout or invalid report is recorded as unknown, never pass. */
 export const ReviewReport = obj({ verdict: literals(verdicts), summary: text(1600), findings: array(Finding, 12), artifacts: notes(6) });
 export type ReviewReport = Static<typeof ReviewReport>;

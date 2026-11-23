@@ -5,7 +5,7 @@ import { Agent, ENDED, Semaphore, type AgentEvent, type Attachment } from "./age
 import { Block } from "./contracts.ts";
 import type { Config } from "./config.ts";
 import type { Prompts } from "./prompts.ts";
-import { one, reviewLines } from "./render.ts";
+import { one, reviewLines, reviewStatus } from "./render.ts";
 import { assertChoice, type Driver } from "./session.ts";
 import { branchExists, repository } from "./workspace.ts";
 
@@ -109,7 +109,8 @@ export class Worq {
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.id} ${d.state}: ${one(d.question, 200)}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
-      a.reviews.length && ["Reviews:", ...reviewLines(a.reviews)].join("\n"),
+      (a.state === "review-ready" || a.reviews.length > 0 || (a.state === "closed" && (a.plan || a.candidate))) &&
+        [`Reviews: ${reviewStatus(a.reviews)}`, ...reviewLines(a.reviews)].join("\n"),
       ["Recent activity:", ...a.tail(20).map((h) => `  ${h.line}`)].join("\n"),
     ].filter(Boolean).join("\n");
   }

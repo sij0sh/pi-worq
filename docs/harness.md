@@ -90,7 +90,7 @@ export async function adapterConformance(name: string, make: (caps: Capabilities
 
 The suite runs MINIMAL (no fallback, `thinking: []`, append/ambient) and FULL (fallback, full level list, replace/isolated); ambient context must be rejected; remaining checks require isolation. MINIMAL proves the required capability set is sufficient and that denials are honest — a configured fallback or level on MINIMAL is `Block("capability")` naming the config path.
 
-The suite is **Conversation-level**: a `Driver` plus an `AbortSignal`, no workspace, no `Agent`. Agent-level behaviour (review-ready, the merge line, the round loop, the reviewer-throw `unknown` record, every worktree behaviour) belongs to `test/worq.test.ts` and is covered once, there. Role→adapter routing, unknown harness and `capabilities` passthrough are asserted against `createDriver` in the same conformance file.
+The suite is **Conversation-level**: a `Driver` plus an `AbortSignal`, no workspace, no `Agent`. Agent-level behaviour (review-ready, unresolved issues, the round loop, the reviewer-throw `unknown` record, and worktree behaviour) belongs to `test/worq.test.ts` and is covered once, there. Role→adapter routing, unknown harness and `capabilities` passthrough are asserted against `createDriver` in the same conformance file.
 
 New adapters call `adapterConformance` from their own test file. The live Pi run is opt-in: `WORQ_CONFORMANCE_PI=1 WORQ_CONFORMANCE_MODEL=<provider>/<model> npm test` — unset, that case skips cleanly.
 

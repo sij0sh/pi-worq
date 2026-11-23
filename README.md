@@ -1,6 +1,6 @@
 # pi-worq
 
-Background Pi SDK agents that Main (your Pi session) spawns, steers and adjudicates. Each agent works through a thought tree of probing questions, may delegate questions to read-only subagents, and ends with independent reviewers. Main decides what happens next. Worq never merges.
+Background Pi SDK agents you or Main (your Pi session) can spawn. Agents can delegate read-only questions and run independent reviews. A review reports findings; it does not authorize more work. Worq never merges.
 
 ## Install
 
@@ -14,27 +14,18 @@ Tools stay hidden until you run `/worq` in a session (zero context cost otherwis
 
 ```
 /worq                         enable the tools
-/worq <request>               enable and hand the request to Main
-/worq off                     hide the tools (agents keep running)
+/worq plan <request>           spawn a read-only plan and return its ref
+/worq execute <request>        spawn a write agent in its own worktree and return its ref
+/worq <request>                shorthand for /worq plan <request>
+/worq off                      hide the tools (agents keep running)
 /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>
 ```
 
-Choose the route by the ask:
+The slash commands dispatch without asking Main to choose a route. A successful spawn shows a ref; an error does not fall back to a direct answer. For API or shell automation use `worq spawn <kind> <task>`. For a natural-language request to Main, confirm it actually called `worq_spawn` and returned a ref.
 
-| Route | Spawn | Reviewers |
-|---|---|---|
-| small, plainly verifiable, no behaviour change | `execute`, `mode: "fast"` | normal verifier unless explicitly skipped |
-| open work with one visible route | `plan` → `execute` | four lenses, then the verifier |
-| user-facing behaviour, broad scope, a user-owned choice | `plan`, read it → `execute` | four lenses, then the verifier |
-
-Standard recipe (state it in AGENTS.md to make it a convention):
-
-1. `worq_spawn("plan", task)` → plan saved to `.agents/plans/<ref>-<slug>.md`.
-2. Review digest arrives as `[worq <ref>]`. Adjudicate each finding: accept, reject or defer. Accepted → put the correction in the execute task; `worq_send` starts another round, so use it only for a finding that changes the plan's criteria or scope.
-3. `worq_spawn("execute", "<the user's ask verbatim> @<plan-ref>", verify?)` → works in its own worktree on `worq/<ref>`. Attach a plan only when one exists; `verify:false` skips the verifier.
-4. Verifier passes (or you have read the diff) and you agree → `git merge worq/<ref>` by hand, then `worq_cancel(ref)` to close.
-
-A digest carries the four most consequential findings per reviewer; `worq_list <ref>` carries all of them with full text.
+- **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
+- **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice does not start a Main turn. Use `/worq list <ref>` for all findings. Correct material issues within the authorized scope or explicitly flag them as unresolved before delivery.
+- **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, use `/worq execute <request> @<plan-ref>`. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
 
 ## Vocabulary
 
@@ -68,6 +59,8 @@ Verdicts: `pass · fail · inconclusive · plan-fault · not-applicable · unkno
 | Writes | execute: own worktree · plan: none (Worq saves plan) | none | none (fresh clone of the pinned commit) |
 | Delegate / ask Main | yes / yes | no / no | no / no |
 | Finish tool | `submit` | `answer` | `report` |
+
+Read tools: `search` accepts a relative file or directory path; `read_file` accepts a 1-based `offset` and a `limit` of 1–160 lines. For factual lookups, a short `submit` summary with source citations is enough.
 
 Adding a kind or reviewer = adding one Markdown file.
 
@@ -118,7 +111,7 @@ Linux only. One backend ships today (Pi); a second is one adapter file plus one 
 npm run check && npm test
 ```
 
-Use execute directly for simple reversible work. For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.
+For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.
 
 ### Routes, checkpoints and trusted Pi resources
 

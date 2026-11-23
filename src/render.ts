@@ -7,13 +7,13 @@ const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${i
 
 export function planMarkdown(input: { ref: string; kind: string; round: number; task: string; report: PlanReport }) {
   const { ref, kind, round, task, report } = input;
-  const decisions = report.decisions.length
-    ? report.decisions.map((d) => `### ${d.id}\n\n- **Choice:** ${d.choice}\n- **Basis:** ${d.basis}\n- **Alternative:** ${d.alternative}\n- **Tradeoff:** ${d.tradeoff}\n- **Revisit:** ${d.revisit}`).join("\n\n")
-    : "None consequential.";
+  const decisions = report.decisions?.map((d) => `### ${d.id}\n\n- **Choice:** ${d.choice}\n- **Basis:** ${d.basis}\n- **Alternative:** ${d.alternative}\n- **Tradeoff:** ${d.tradeoff}\n- **Revisit:** ${d.revisit}`).join("\n\n");
   return [
     `# Plan ${ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
-    "## Request", "", task, "", "## Summary", "", report.summary, "", "## Criteria", "", bullets(report.criteria), "",
-    "## Decisions", "", decisions, "", "## Assumptions", "", bullets(report.assumptions),
+    "## Request", "", task, "", "## Summary", "", report.summary,
+    ...(report.criteria?.length ? ["", "## Criteria", "", bullets(report.criteria)] : []),
+    ...(decisions ? ["", "## Decisions", "", decisions] : []),
+    ...(report.assumptions?.length ? ["", "## Assumptions", "", bullets(report.assumptions)] : []),
     ...(report.tree ? ["", "## Thought tree", "", report.tree] : []),
     ...(report.document ? ["", "## Detail", "", report.document] : []),
     "",
@@ -56,6 +56,14 @@ function keep(findings: NonNullable<ReviewReport["findings"]>, limit?: number) {
   return [...slots].sort((a, b) => a - b).map((i) => ({ f: findings[i], i }));
 }
 
+export function reviewStatus(reviews: ReviewRecord[]) {
+  if (reviews.some((r) => r.findings?.length || (r.verdict !== "pass" && r.verdict !== "not-applicable"))) {
+    return "unresolved review issues";
+  }
+  if (!reviews.some((r) => r.verdict === "pass")) return "unverified";
+  return "no review issues reported";
+}
+
 export function reviewLines(reviews: ReviewRecord[], caps: ReviewCaps = DETAIL) {
   if (!reviews.length) return ["No reviewers ran: this result is unverified."];
   return reviews.flatMap((r) => {
@@ -64,7 +72,10 @@ export function reviewLines(reviews: ReviewRecord[], caps: ReviewCaps = DETAIL) 
     const dropped = findings.length - shown.length;
     return [
       `${r.name}: ${r.verdict}${r.error ? ` (${one(r.error, 200)})` : ""}${r.summary ? ` — ${one(r.summary, caps.summary)}` : ""}`,
-      ...shown.map(({ f, i }) => `  ${r.name}-${i + 1}${f.need ? " [need: requester]" : ""}: ${one(f.witness, caps.witness)} → ${one(f.change, caps.change)} (${one(f.basis, caps.basis)})`),
+      ...shown.flatMap(({ f, i }) => [
+        `  ${r.name}-${i + 1}${f.need ? " [need: requester]" : ""}: ${one(f.witness, caps.witness)}${f.change ? ` → ${one(f.change, caps.change)}` : ""}${f.basis ? ` (${one(f.basis, caps.basis)})` : ""}`,
+        ...(caps.limit === undefined && f.consequence ? [`    Consequence: ${one(f.consequence, 500)}`] : []),
+      ]),
       ...(dropped > 0 ? [`  (${dropped} more: ${caps.label ?? "worq_list"})`] : []),
       ...(r.artifacts ?? []).map((a) => `  artifact: ${a}`),
     ];

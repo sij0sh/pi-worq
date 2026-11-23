@@ -48,9 +48,9 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.deepEqual(reviewers.sort(), ["reviewer.decision", "reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
   assert.match(ready.text, /defeater: fail/);
   assert.match(ready.text, /defeater-1: Criterion D1 ignores trailing newline/);
-  assert.match(ready.text, /worq_send/);
-  assert.match(ready.text, /Ready → fold what you accept into the execute task/);
-  assert.match(ready.text, /only when a finding changes the plan's criteria or scope/);
+  assert.match(ready.text, /review-ready · unresolved review issues/);
+  assert.match(ready.text, /does not authorize further action/);
+  assert.doesNotMatch(ready.text, /worq_spawn|worq_send|git merge/);
   assert.ok(agent.plan);
   assert.match(agent.plan.path, new RegExp(`^\\.agents/plans/${agent.ref}-uppercase-the-greeting\\.md$`));
   const saved = await readFile(join(root, agent.plan.path), "utf8");
@@ -62,7 +62,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.equal(seen.find((s) => s.name === "agent.plan")?.profile, "agent");
 
   assert.match(worq.send(agent.ref, "Accept defeater-1: state the newline"), /Round 2 started/);
-  await next("review-ready", agent.ref, 2);
+  assert.match((await next("review-ready", agent.ref, 2)).text, /unresolved review issues/, "a repair attempt does not clear a repeated finding");
   assert.equal(agent.round, 2);
   assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline/);
   assert.match(worq.list(), new RegExp(`${agent.ref} · plan · review-ready · round 2`));
@@ -73,6 +73,32 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.throws(() => worq.send(agent.ref, "more"), /closed/);
   const record = JSON.parse(await readFile(join(state, agent.id, "record.json"), "utf8"));
   assert.equal(record.state, "closed");
+});
+
+test("a compact factual answer can be submitted, and compact findings still flag a wrong claim", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { worq, next } = setup(root, state, {
+    "agent.plan": (turn) => turn.tool("submit", { summary: "The app prints goodbye (app.py:1)." }).then(() => {}),
+    "reviewer.defeater": async (turn) => {
+      assert.match(turn.text, /The app prints goodbye/);
+      assert.match(await turn.tool("read_file", { path: "app.py" }), /print\('hello'\)/);
+      const out = await turn.tool("report", {
+        verdict: "fail", summary: "Greeting is incorrect.",
+        findings: [{ witness: "app.py:1 prints hello, not goodbye; the answer reports the wrong greeting." }],
+      });
+      assert.equal(out, "Submitted.");
+    },
+    reviewer: (turn) => turn.tool("report", pass).then(() => {}),
+  });
+  const agent = await worq.spawn("plan", "What does the app print? Cite source.");
+  const ready = await next("review-ready", agent.ref);
+  assert.match(ready.text, /unresolved review issues/);
+  assert.match(worq.list(agent.ref), /defeater-1: app.py:1 prints hello, not goodbye/);
+  const saved = await readFile(join(root, agent.plan!.path), "utf8");
+  assert.match(saved, /## Summary\n\nThe app prints goodbye \(app.py:1\)\./);
+  assert.doesNotMatch(saved, /## (Criteria|Decisions|Thought tree)/);
+  await worq.cancel(agent.ref);
 });
 
 test("execute agent: @plan attached, own worktree and branch, verifier sees pinned commit, Main merges by hand", async (t) => {
@@ -105,7 +131,9 @@ test("execute agent: @plan attached, own worktree and branch, verifier sees pinn
   assert.match(attached, /"verify": true/);
   assert.match(verifierSaw, /HELLO/);
   assert.match(ready.text, /intent: pass/);
-  assert.match(ready.text, new RegExp(`merge worq/${exec.ref} by hand`));
+  assert.match(ready.text, /review-ready · no review issues reported/);
+  assert.match(ready.text, new RegExp(`Branch worq/${exec.ref}`));
+  assert.doesNotMatch(ready.text, /git merge|worq_spawn|worq_send/);
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "baseline untouched: Worq never merges");
   const work = exec.work!;
   assert.ok(existsSync(work));
@@ -132,8 +160,8 @@ test("execute with verify:false: no reviewer runs and the digest says the diff i
   assert.match(texts[0], /"verify": false/);
   assert.equal(seen.filter((s) => s.profile === "reviewer").length, 0, "no reviewer ran");
   assert.match(ready.text, /No reviewers ran: this result is unverified/);
-  assert.match(ready.text, /No verifier ran: read git diff/);
-  assert.doesNotMatch(ready.text, /Adjudicate each finding/);
+  assert.match(ready.text, /review-ready · unverified/);
+  assert.match(worq.list(exec.ref), /Reviews: unverified/);
   assert.match(exec.diffstat!, /app\.py/);
   await worq.cancel(exec.ref);
 });
@@ -171,7 +199,9 @@ test("limits, refusals and failures", async (t) => {
   }, { rounds: 1, agents: 2 });
   const a = await worq.spawn("plan", "One");
   const ready = await next("review-ready", a.ref);
+  assert.match(ready.text, /review-ready · unresolved review issues/);
   assert.match(ready.text, /pair: unknown \(reviewer crashed\)/);
+  assert.match(worq.list(a.ref), /Reviews: unresolved review issues/);
   assert.throws(() => worq.send(a.ref, "again"), /used its 1 rounds/);
   await assert.rejects(worq.spawn("plan", "Needs @ffff"), /names no agent/);
   await assert.rejects(worq.spawn("review", "x"), /Unknown kind/);

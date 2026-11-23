@@ -89,7 +89,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   let command: Function | undefined;
   let active = ["read", "bash"];
   const entries: { type: string; customType: string; data: unknown }[] = [];
-  const userMessages: string[] = [];
+  const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean } }[] = [];
+  const alerts: string[] = [];
   const pi = {
     registerTool: (tool: never) => tools.push(tool),
     registerCommand: (_name: string, options: { handler: Function }) => { command = options.handler; },
@@ -98,21 +99,37 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     getActiveTools: () => active,
     setActiveTools: (names: string[]) => { active = names; },
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
-    sendUserMessage: (text: string) => userMessages.push(text),
-    sendMessage() {},
+    sendUserMessage: () => assert.fail("a /worq request must not start a Main run"),
+    sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
-  const scripts = { "agent.plan": (turn: { tool: Function }) => turn.tool("submit", planSubmission), reviewer: (turn: { tool: Function }) => turn.tool("report", pass) };
+  const scripts = {
+    "agent.plan": (turn: { tool: Function }) => turn.tool("submit", planSubmission),
+    "agent.execute": (turn: { tool: Function }) => turn.tool("submit", { summary: "No changes" }),
+    reviewer: (turn: { tool: Function }) => turn.tool("report", pass),
+  };
   createWorq({ driver: () => fakeDriver(scripts as never), agentDir: () => agentDir })(pi as never);
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
   assert.ok(tools.every((x) => x.defaultActive === false));
   assert.ok(!active.some((name) => name.startsWith("worq_")));
-  const ctx = { mode: "print", cwd: root, ui: { notify() {}, setStatus() {} }, sessionManager: { getBranch: () => entries } };
+  const ctx = { mode: "tui", cwd: root, ui: { notify(text: string) { alerts.push(text); }, setStatus() {} }, sessionManager: { getBranch: () => entries } };
   await command!("", ctx);
   assert.ok(TOOLS.every((name) => active.includes(name)));
   await command!("off", ctx);
   assert.ok(!active.some((name) => name.startsWith("worq_")));
-  await command!("make the greeting louder", ctx);
-  assert.match(userMessages[0], /Use Worq for this: make the greeting louder/);
+  await command!("describe the greeting", ctx);
+  const defaultSpawn = notices.find(({ message }) => /^Spawned plan agent/.test(message.content))!;
+  assert.match(defaultSpawn.message.details.ref, /^[0-9a-f]{4}$/);
+  assert.equal(defaultSpawn.options.triggerTurn, false);
+  await command!("plan", ctx);
+  assert.match(alerts.at(-1)!, /Usage: \/worq plan <request>/);
+  const missingRef = defaultSpawn.message.details.ref === "ffff" ? "aaaa" : "ffff";
+  await command!(`plan Read @${missingRef}`, ctx);
+  assert.match(alerts.at(-1)!, /names no agent/);
+  assert.equal(notices.filter(({ message }) => /^Spawned/.test(message.content)).length, 1, "failed spawns do not acknowledge success");
+  await command!("execute Check the greeting in a worktree", ctx);
+  const executeSpawn = notices.find(({ message }) => /^Spawned execute agent/.test(message.content))!;
+  assert.match(executeSpawn.message.details.ref, /^[0-9a-f]{4}$/);
+  assert.equal(executeSpawn.options.triggerTurn, false);
   active = ["read"];
   await handlers.session_start({}, ctx);
   assert.ok(TOOLS.every((name) => active.includes(name)), "resume restores /worq");
@@ -120,12 +137,22 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const spawn = tools.find((x) => x.name === "worq_spawn")!;
   const result = await spawn.execute("id", { kind: "plan", task: "Plan it" }, undefined, undefined, ctx);
   const ref = /agent ([0-9a-f]{4})/.exec(result.content[0].text)![1];
+  assert.deepEqual(result.details, { ref });
   // The CLI reaches the same operations through the control socket.
   const run = promisify(execFile);
   const cli = join(import.meta.dirname, "..", "bin", "worq.mjs");
   const env = { ...process.env, WORQ_STATE_DIR: state };
-  for (let i = 0; i < 100 && !(await run(process.execPath, [cli, "list"], { env })).stdout.includes("review-ready"); i++) await new Promise((r) => setTimeout(r, 50));
+  const ready = () => notices.find(({ message }) => message.details.type === "review-ready" && message.details.ref === ref);
+  for (let i = 0; i < 100 && !ready(); i++) await new Promise((r) => setTimeout(r, 25));
+  assert.ok(ready(), "the requested plan reached review-ready");
+  assert.equal(ready()!.options.triggerTurn, false, "a terminal notice must not start or steer a Main run");
+  const assistant = { role: "assistant" };
+  const ask = { role: "custom", customType: "worq", details: { type: "ask" } };
+  const review = { ...ready()!.message, role: "custom" };
+  assert.deepEqual(handlers.context({ messages: [assistant, review, ask] }).messages, [assistant, ask]);
+  assert.equal(handlers.context({ messages: [assistant, ask] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
+  assert.match((await run(process.execPath, [cli, "list", executeSpawn.message.details.ref], { env })).stdout, /Task: Check the greeting in a worktree/);
   assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /closed/);
   await handlers.session_shutdown({}, ctx);
   delete process.env.WORQ_STATE_DIR;

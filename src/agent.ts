@@ -7,7 +7,7 @@ import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkRe
 import type { Limits } from "./config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
-import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, slug, workText, type ReviewRecord } from "./render.ts";
+import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, slug, workText, type ReviewRecord } from "./render.ts";
 import { Conversation, tool, type Driver, type Tool } from "./session.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
@@ -412,16 +412,14 @@ export class Agent {
     }
   }
 
-  /** What Main reads when a round is ready. Adjudication is Main's job; `worq_list` holds the rest. */
+  /** Display-only round notice; `worq_list` holds the full findings. */
   digest() {
     const write = this.kind.access === "write";
-    const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready`;
+    const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
     const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    const next = write
-      ? this.verify
-        ? `Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest with full text. Accepted → worq_send("${this.ref}", "<witness as worq_list shows it> — <the change>"). Passed and you agree → merge ${this.branch} by hand (git merge), then worq_cancel("${this.ref}") to close. plan-fault → spawn a new plan with @${this.ref}'s plan.`
-        : `No verifier ran: read git diff ${this.project!.baseline.slice(0, 10)}..${this.branch} yourself, then merge it by hand (git merge) or worq_send("${this.ref}", "<the change>") for one repair round, then worq_cancel("${this.ref}") to close.`
-      : `Ready → fold what you accept into the execute task and worq_spawn("execute", "<task> @${this.ref}"), then worq_cancel("${this.ref}") to close. Adjudicate each finding (accept/reject/defer, never by count); the digest carries the four most consequential per reviewer, worq_list("${this.ref}") the rest. worq_send("${this.ref}", "<witness as worq_list shows it> — <change>") only when a finding changes the plan's criteria or scope.`;
-    return [head, one(this.submission ?? "", 600), where, "Reviews:", ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }), next].join("\n");
+    return [head, where, "Reviews:",
+      ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }),
+      `Full findings: worq_list(${this.ref}). This notice does not authorize further action.`,
+    ].join("\n");
   }
 }
