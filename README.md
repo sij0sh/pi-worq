@@ -14,17 +14,17 @@ Tools stay hidden until you run `/worq` in a session (zero context cost otherwis
 
 ```
 /worq                         enable the tools
-/worq plan <request>           spawn a read-only plan and return its ref
-/worq execute <request>        spawn a write agent in its own worktree and return its ref
-/worq <request>                shorthand for /worq plan <request>
-/worq off                      hide the tools (agents keep running)
+/worq plan <request>           ask Main for a reviewed plan
+/worq execute <request>        ask Main to execute
+/worq <request>                give Main the request
+/worq off                      block new launches, not cancellation; active refs remain serviceable
 /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>
 ```
 
-The slash commands dispatch without asking Main to choose a route. A successful spawn shows a ref; an error does not fall back to a direct answer. For API or shell automation use `worq spawn <kind> <task>`. For a natural-language request to Main, confirm it actually called `worq_spawn` and returned a ref.
+Main answers bounded factual lookups with primary-source citations unless delegation is requested. Main drives substantive agents through questions, review and authorized repairs. Even “plan and execute” pauses after the reviewed plan for direction: execute only (verified candidate, no merge), or execute and merge (verify before landing). A changed candidate needs fresh verification. Bare `/worq` or an explicit task re-enables launches.
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
-- **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice does not start a Main turn. Use `/worq list <ref>` for all findings. Correct material issues within the authorized scope or explicitly flag them as unresolved before delivery.
+- **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. Correct material issues within the authorized scope or explicitly flag them as unresolved before delivery.
 - **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, use `/worq execute <request> @<plan-ref>`. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
 
 ## Vocabulary

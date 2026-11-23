@@ -14,21 +14,24 @@ import { Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
 const ENABLED = "worq-enabled";
-const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "checkpoint";
+const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "checkpoint" || type === "failed" || type === "review-ready";
 
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
     description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit unless the spawn sets verify:false.",
     guidelines: [
-      "For small, deterministic edits, prefer doing the edit directly and checking the exact diff unless the user requested Worq. If asked to use Worq, call worq_spawn and confirm the returned ref; never substitute a direct answer. Use mode fast for bounded Worq work and thorough for consequential ambiguity; neither mode changes the review roster.",
-      "Put the user's ask in the worq_spawn task verbatim. A plan or review is not permission to execute, write, repair, or merge. Stop at the requested deliverable. Worq displays completion without waking Main; use worq_list for the full result when asked to assess or continue it.",
+      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with the original request and independent review. Do not infer write permission from a bare request.",
     ],
   },
   worq_list: {
     op: "list",
     description: "List Worq agents (no ref) or show one agent in full: plan path, branch, PQs, reviews and recent activity.",
-    guidelines: [],
+    guidelines: [
+      "Drive asks, checkpoints, review and authorized repair without polling. During planning answer from evidence or use conservative provisional assumptions or alternatives; surface unresolved preferences with the reviewed plan.",
+      "Even for ‘plan and execute’, present the reviewed plan before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
+      "Review-ready is not a pass. Obtain affirmative verification of the exact candidate before reporting execution success, including execute only. Reverify after changes. Without verification report unverified and leave unmerged; Main merges manually only with explicit merge authority.",
+    ],
   },
   worq_send: {
     op: "send",
@@ -54,10 +57,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     const kinds = [...prompts.kinds.values()].map((kind) => `${kind.name}: ${kind.description}`).join("; ");
     let instance: Worq | undefined;
     let socket: Awaited<ReturnType<typeof serve>> | undefined;
+    let off = false;
     let closing = false;
     let ui: ExtensionContext | undefined;
 
     const status = () => {
+      if (off) enable(false);
       if (ui?.mode !== "tui" || !instance) return;
       const live = instance.all().filter((a) => !a.ended);
       ui.ui.setStatus("worq", live.length ? `worq ${live.map((a) => `${a.ref}:${a.state}`).join(" ")}` : undefined);
@@ -78,6 +83,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return instance;
     };
     const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
+      if (off && op === "spawn") throw new Error("Worq is off; re-enable with /worq.");
       const result = await dispatch(ensure(ctx), table, op, args);
       status();
       return result;
@@ -98,8 +104,10 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       });
     }
     const enable = (on: boolean) => {
+      off = !on;
+      const servicing = instance?.all().some(a => !a.ended);
       const active = new Set(pi.getActiveTools());
-      for (const name of TOOLS) { if (on) active.add(name); else active.delete(name); }
+      for (const name of TOOLS) { if (on || (servicing && name !== "worq_spawn")) active.add(name); else active.delete(name); }
       pi.setActiveTools([...active]);
     };
     const say = (ctx: ExtensionContext, text: string, level: "info" | "warning" | "error" = "info") => {
@@ -118,7 +126,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
 
     pi.registerCommand("worq", {
-      description: "Enable tools or spawn: /worq [plan|execute] <request> · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
+      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
       async handler(args, ctx) {
         if (closing) return;
         const value = args.trim();
@@ -127,7 +135,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           if (word === "off") {
             enable(false);
             pi.appendEntry(ENABLED, { on: false });
-            say(ctx, "Worq tools hidden. Running agents continue; /worq cancel all stops them.");
+            say(ctx, "New launches disabled. Running agents continue; /worq cancel all stops them.");
             return;
           }
           if (word === "list" || word === "send" || word === "cancel") {
@@ -142,13 +150,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
             say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}.`);
             return;
           }
-          const explicit = prompts.kinds.has(word);
-          // A bare request is read-only; only an explicit write kind authorizes worktree writes.
-          const kind = explicit ? word : "plan";
-          const task = explicit ? value.slice(word.length).trimStart() : value;
-          if (!task) { say(ctx, `Usage: /worq ${kind} <request>`, "error"); return; }
-          const result = await run(ctx, "spawn", { kind, task });
-          pi.sendMessage({ customType: "worq", content: clean(result.text), display: true, details: result.data }, { triggerTurn: false });
+          if (prompts.kinds.has(value)) { say(ctx, `Usage: /worq ${value} <request>`, "error"); return; }
+          pi.sendUserMessage(value, { deliverAs: "followUp" });
         } catch (error) { say(ctx, errorText(error), "error"); }
       },
     });
@@ -164,7 +167,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       ui = ctx;
       // Resume/fork: restore the last /worq choice on this branch.
       const last = ctx.sessionManager.getBranch().filter((e) => e.type === "custom" && e.customType === ENABLED).at(-1);
-      if (last && last.type === "custom" && (last.data as { on?: boolean } | undefined)?.on) enable(true);
+      if (last && last.type === "custom") enable(Boolean((last.data as { on?: boolean } | undefined)?.on));
       if (socket) return;
       try { socket = await serve(statePath(), (op, args) => run(ctx, op, args)); }
       catch (error) { if (ctx.mode === "tui") say(ctx, `Worq control socket unavailable: ${errorText(error)}`, "warning"); }

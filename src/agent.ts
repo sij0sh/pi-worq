@@ -337,7 +337,7 @@ export class Agent {
             timer = setTimeout(() => resolve(UNANSWERED), this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            this.deps.notify({ type: "ask", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; otherwise ask the user first.` });
+            this.deps.notify({ type: "ask", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
           });
         } finally {
           clearTimeout(timer);

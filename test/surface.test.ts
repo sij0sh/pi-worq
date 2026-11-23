@@ -93,7 +93,9 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const entries: { type: string; customType: string; data: unknown }[] = [];
   const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean; deliverAs?: string } }[] = [];
   const alerts: string[] = [];
+  const requests: string[] = [];
   const pi = {
+    sendUserMessage: (text: string) => requests.push(text),
     registerTool: (tool: never) => tools.push(tool),
     registerCommand: (_name: string, options: { handler: Function }) => { command = options.handler; },
     registerMessageRenderer() {},
@@ -101,7 +103,6 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     getActiveTools: () => active,
     setActiveTools: (names: string[]) => { active = names; },
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
-    sendUserMessage: () => assert.fail("a /worq request must not start a Main run"),
     sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
   const scripts: Record<string, Script> = {
@@ -124,19 +125,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   await command!("off", ctx);
   assert.ok(!active.some((name) => name.startsWith("worq_")));
   await command!("describe the greeting", ctx);
-  const defaultSpawn = notices.find(({ message }) => /^Spawned plan agent/.test(message.content))!;
-  assert.match(defaultSpawn.message.details.ref, /^[0-9a-f]{4}$/);
-  assert.equal(defaultSpawn.options.triggerTurn, false);
-  await command!("plan", ctx);
-  assert.match(alerts.at(-1)!, /Usage: \/worq plan <request>/);
-  const missingRef = defaultSpawn.message.details.ref === "ffff" ? "aaaa" : "ffff";
-  await command!(`plan Read @${missingRef}`, ctx);
-  assert.match(alerts.at(-1)!, /names no agent/);
-  assert.equal(notices.filter(({ message }) => /^Spawned/.test(message.content)).length, 1, "failed spawns do not acknowledge success");
-  await command!("execute Check the greeting in a worktree", ctx);
-  const executeSpawn = notices.find(({ message }) => /^Spawned execute agent/.test(message.content))!;
-  assert.match(executeSpawn.message.details.ref, /^[0-9a-f]{4}$/);
-  assert.equal(executeSpawn.options.triggerTurn, false);
+  assert.deepEqual(requests, ["describe the greeting"]);
+  assert.equal(notices.length, 0);
   active = ["read"];
   await handlers.session_start({}, ctx);
   assert.ok(TOOLS.every((name) => active.includes(name)), "resume restores /worq");
@@ -158,9 +148,12 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   };
   const asked = await waitFor("ask");
   assert.deepEqual(asked.options, { triggerTurn: true, deliverAs: "followUp" });
+  await command!("off", ctx);
+  assert.ok(active.includes("worq_send") && !active.includes("worq_spawn"));
+  await assert.rejects(spawn.execute("id", { kind: "plan", task: "blocked" }, undefined, undefined, ctx), /off/);
   await command!(`send ${ref} Use HELLO`, ctx);
   const ready = await waitFor("review-ready");
-  assert.deepEqual(ready.options, { triggerTurn: false });
+  assert.deepEqual(ready.options, { triggerTurn: true, deliverAs: "followUp" });
   const warnings = notices.filter(({ message }) => message.details.ref === ref && message.details.type === "warning");
   assert.ok(warnings.some(({ message }) => /one further turn remains/.test(message.content)));
   assert.ok(warnings.some(({ message }) => /no additional turns can be granted/.test(message.content)));
@@ -169,12 +162,14 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const assistant = { role: "assistant" };
   const ask = { ...asked.message, role: "custom" };
   const grant = { role: "custom", customType: "worq", details: { type: "checkpoint" } };
-  const passive = [ready, ...warnings].map(({ message }) => ({ ...message, role: "custom" }));
+  const passive = warnings.map(({ message }) => ({ ...message, role: "custom" }));
   assert.deepEqual(handlers.context({ messages: [assistant, ...passive, ask, grant] }).messages, [assistant, ask, grant]);
   assert.equal(handlers.context({ messages: [assistant, ask, grant] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
-  assert.match((await run(process.execPath, [cli, "list", executeSpawn.message.details.ref], { env })).stdout, /Task: Check the greeting in a worktree/);
   assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /closed/);
+  assert.ok(!active.some(name => name.startsWith("worq_")));
+  await command!("", ctx);
+  assert.ok(active.includes("worq_spawn"));
   await handlers.session_shutdown({}, ctx);
   delete process.env.WORQ_STATE_DIR;
 });
