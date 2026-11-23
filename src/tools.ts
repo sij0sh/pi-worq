@@ -17,7 +17,7 @@ const SEARCH = { hits: 200, bytes: 64_000, files: 4_000, file: 2 * 1024 * 1024 }
  * a dozen calls. Symlinks are refused, except the dependency links a checkout is given.
  */
 function searchTool(cwd: string): Tool {
-  return tool("search", "Search file contents for a regular expression; returns path:line:text, bounded",
+  return tool("search", "Search a file or directory for a regular expression; returns path:line:text, bounded",
     obj({ pattern: text(200), path: Type.Optional(path) }), async ({ pattern, path: at = "." }) => {
       let match: RegExp;
       try { match = new RegExp(pattern); } catch (error) { throw new Block("pattern", `Invalid regular expression: ${errorText(error)}`); }
@@ -56,7 +56,10 @@ function searchTool(cwd: string): Tool {
           else await read(full);
         }
       };
-      await walk(start, false);
+      const info = await stat(start);
+      // Do not grant the dependency-link exception to an explicitly selected starting directory.
+      if (info.isDirectory()) await walk(start, false);
+      else if (info.isFile()) await read(start);
       if (!lines.length) return `No matches in ${files} files${capped ? " (search stopped at a cap)" : ""}`;
       return lines.join("\n") + (capped ? `\n(${files} files scanned; results capped)` : "");
     });
@@ -70,10 +73,12 @@ export function readTools(cwd: string): Tool[] {
       return entries.filter((e) => e.name !== ".git" && !e.isSymbolicLink()).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 250)
         .map((e) => e.name + (e.isDirectory() ? "/" : "")).join("\n") || "(empty)";
     }),
-    tool("read_file", "Read a text file, at most 160 lines per call", obj({ path, offset: Type.Optional(Type.Integer({ minimum: 1 })) }), async ({ path, offset = 1 }) => {
+    tool("read_file", "Read a text file with a 1-based offset and an optional line limit (1–160, default 160)", obj({
+      path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 160 })),
+    }), async ({ path, offset = 1, limit = 160 }) => {
       const raw = await readSmall(await scoped(cwd, path), 256 * 1024);
       if (raw.includes("\0")) throw new Block("binary", "Binary files are not exposed");
-      return raw.split("\n").slice(offset - 1, offset + 159).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
+      return raw.split("\n").slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
     }),
     searchTool(cwd),
   ];
