@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
 import { lstat, open, readFile, readdir, realpath, rm, stat, unlink } from "node:fs/promises";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { Type } from "typebox";
 import { array, Block, command, errorText, obj, PtyAction, text } from "./contracts.ts";
 import { CleanupError, launch, runProcess } from "./process.ts";
+import { windows } from "./platform.mjs";
 import { observePty } from "./pty.ts";
 import { one } from "./render.ts";
 import { tool, type Tool } from "./session.ts";
@@ -30,10 +31,10 @@ function searchTool(cwd: string): Tool {
         files++;
         const raw = await readFile(file, "utf8").catch(() => undefined);
         if (raw === undefined || raw.includes("\0")) return;
-        const rows = raw.split("\n");
+        const rows = raw.split(/\r?\n/);
         for (let i = 0; i < rows.length; i++) {
           if (!match.test(rows[i])) continue;
-          const line = `${relative(cwd, file)}:${i + 1}:${one(rows[i].trim(), 300)}`;
+          const line = `${relative(cwd, file).split(sep).join("/")}:${i + 1}:${one(rows[i].trim(), 300)}`;
           if (lines.length >= SEARCH.hits || bytes + line.length > SEARCH.bytes) { capped = true; return; }
           lines.push(line);
           bytes += line.length + 1;
@@ -42,7 +43,7 @@ function searchTool(cwd: string): Tool {
       const walk = async (dir: string, modules: boolean): Promise<void> => {
         for (const entry of await readdir(dir, { withFileTypes: true })) {
           if (files >= SEARCH.files || capped) return;
-          if (entry.name === ".git") continue;
+          if (entry.name.toLowerCase() === ".git") continue;
           const full = join(dir, entry.name);
           if (entry.isSymbolicLink()) {
             if (!modules) continue;
@@ -71,7 +72,7 @@ export function readTools(cwd: string): Tool[] {
   return [
     tool("list_files", "List a directory (relative path, . for root)", obj({ path }), async ({ path }) => {
       const entries = await readdir(await scoped(cwd, path, { root: true }), { withFileTypes: true });
-      return entries.filter((e) => e.name !== ".git" && !e.isSymbolicLink()).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 250)
+      return entries.filter((e) => e.name.toLowerCase() !== ".git" && !e.isSymbolicLink()).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 250)
         .map((e) => e.name + (e.isDirectory() ? "/" : "")).join("\n") || "(empty)";
     }),
     tool("read_file", "Read a text file with a 1-based offset and an optional line limit (1–160, default 160)", obj({
@@ -79,7 +80,7 @@ export function readTools(cwd: string): Tool[] {
     }), async ({ path, offset = 1, limit = 160 }) => {
       const raw = await readSmall(await scoped(cwd, path), 256 * 1024);
       if (raw.includes("\0")) throw new Block("binary", "Binary files are not exposed");
-      return raw.split("\n").slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
+      return raw.split(/\r?\n/).slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
     }),
     searchTool(cwd),
   ];
@@ -94,6 +95,12 @@ export function writeTools(cwd: string): Tool[] {
     }),
     tool("edit_file", "Replace one exact, unique text region in a file (parameters: path, old, replacement)", obj({ path, old: text(25_000), replacement: Type.String({ maxLength: 40_000 }) }), async ({ path, old, replacement }) => {
       const before = await readSmall(await scoped(cwd, path), 256 * 1024);
+      // read_file renders CRLF as lines. Match LF input against a CRLF file without changing its EOL style.
+      if (before.includes("\r\n") && !before.replaceAll("\r\n", "").includes("\n")) {
+        const crlf = (value: string) => value.replace(/\r?\n/g, "\r\n");
+        old = crlf(old);
+        replacement = crlf(replacement);
+      }
       const at = before.indexOf(old);
       if (at === -1 || before.indexOf(old, at + 1) !== -1) throw new Block("edit-match", "Old text must match exactly once");
       await writeScoped(cwd, path, before.slice(0, at) + replacement + before.slice(at + old.length));
@@ -150,11 +157,11 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
         if (!service) throw new Block("no-service", `No service ${id}`);
         return `${service.status}\n${service.output}`;
       }),
-      tool("observe_terminal", "Launch an interactive terminal app, drive inputs, and return rendered screens at observe steps",
+      ...(!windows ? [tool("observe_terminal", "Launch an interactive terminal app, drive inputs, and return rendered screens at observe steps",
         obj({ ...command, actions: array(PtyAction, 16, 1) }), async ({ executable, args, actions }, signal) => {
           const screens = await track(observePty(executable, args, actions, cwd, (await environment()).env, sig(signal)));
           return screens.map(({ step, screen }) => `Step ${step}:\n${screen}`).join("\n\n").slice(-12_000) || "No screens requested";
-        }),
+        })] : []),
       tool("save_artifact", "Keep a screenshot or text observation from this checkout as evidence", obj({ path }), async ({ path }) => {
         const name = basename(path);
         if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(name) || !/\.(png|jpe?g|webp|txt|md|log)$/i.test(name)) throw new Block("artifact-path", "Use a screenshot or text filename");

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Inspect, steer and stop Worq agents from any terminal. Talks to <state>/ctl/<pid>.sock (JSON lines).
-import { readdirSync } from "node:fs";
+// Inspect, steer and stop Worq agents from any terminal.
+import { readdirSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { controlExtension, controlPipe, statePath, windows } from "../src/platform.mjs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const usage = `Usage: worq [--pid N] <command>
@@ -13,30 +13,46 @@ const usage = `Usage: worq [--pid N] <command>
   spawn <kind> [--mode fast|thorough] <task>         start an agent
   send <ref> <text>           steer, answer, or start the next round
   cancel <ref|all>            close or cancel; branch kept`;
-const state = resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq"));
-const ctl = join(state, "ctl");
+const ctl = join(statePath(), "ctl");
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; } };
-const sockets = () => { try { return readdirSync(ctl).filter((n) => /^\d+\.sock$/.test(n)).map((n) => Number(n.slice(0, -5))).filter(alive); } catch { return []; } };
+const sockets = () => {
+  try {
+    return readdirSync(ctl).filter(n => n.endsWith(controlExtension)).map(n => n.slice(0, -controlExtension.length))
+      .filter(n => /^[1-9][0-9]*$/.test(n)).map(Number).filter(n => n <= 0x7fffffff && alive(n));
+  } catch { return []; }
+};
 function call(pid, op, args = {}) {
   return new Promise((ok, fail) => {
-    const socket = connect(join(ctl, `${pid}.sock`));
+    const marker = join(ctl, `${pid}${controlExtension}`);
+    let path = marker, token;
+    if (windows) {
+      const entry = JSON.parse(readFileSync(marker, "utf8"));
+      if (typeof entry.token !== "string" || !/^[0-9a-f]{64}$/.test(entry.token)) throw new Error("Invalid Worq endpoint");
+      path = controlPipe(entry.id);
+      token = entry.token;
+    }
+    const socket = connect(path);
     let buffer = "";
     socket.setEncoding("utf8");
-    socket.on("connect", () => socket.write(JSON.stringify({ op, args }) + "\n"));
+    socket.on("connect", () => socket.write(JSON.stringify({ op, args, token }) + "\n"));
     socket.on("data", (chunk) => {
       buffer += chunk;
       const i = buffer.indexOf("\n");
       if (i === -1) return;
       socket.end();
-      const reply = JSON.parse(buffer.slice(0, i));
-      reply.ok ? ok(reply) : fail(new Error(reply.error));
+      try {
+        const reply = JSON.parse(buffer.slice(0, i));
+        reply.ok ? ok(reply) : fail(new Error(reply.error));
+      } catch (error) { fail(error); }
     });
     socket.on("error", fail);
+    socket.on("close", () => fail(new Error("Worq disconnected without a reply")));
   });
 }
 async function main(argv) {
   const at = argv.indexOf("--pid");
   const pinned = at === -1 ? undefined : Number(argv.splice(at, 2)[1]);
+  if (at !== -1 && (!Number.isInteger(pinned) || pinned < 1 || pinned > 0x7fffffff)) throw new Error("Invalid --pid");
   const [command, first, ...rest] = argv;
   if (!command || command === "-h" || command === "--help") { console.log(usage); return; }
   const live = sockets();

@@ -1,8 +1,10 @@
-import { chmod, mkdir, rm } from "node:fs/promises";
-import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Block, errorText, literals, obj, parse, text } from "./contracts.ts";
+import { controlExtension, controlPipe, windows } from "./platform.mjs";
 import type { Worq } from "./worq.ts";
 
 const ref = Type.String({ pattern: "^@?[0-9a-fA-F]{4}$", description: "Agent ref from worq_spawn or worq_list" });
@@ -49,14 +51,20 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown)
   throw new Block("op", `Unhandled operation ${op}`);
 }
 
-/** JSON-lines control socket at <state>/ctl/<pid>.sock (dir 0700, socket 0600). */
+/** Unix socket or authenticated Windows named pipe, discovered in the state directory. */
 export async function serve(state: string, handle: (op: string, args: unknown) => Promise<{ text: string; data?: unknown }>) {
   const dir = join(state, "ctl");
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await chmod(dir, 0o700);
-  const path = join(dir, `${process.pid}.sock`);
-  await rm(path, { force: true });
+  if (!windows) await chmod(dir, 0o700);
+  const marker = join(dir, `${process.pid}${controlExtension}`);
+  const id = windows ? randomBytes(16).toString("hex") : undefined;
+  const token = windows ? randomBytes(32).toString("hex") : undefined;
+  const path = id ? controlPipe(id) : marker;
+  if (!windows) await rm(marker, { force: true });
+  const connections = new Set<Socket>();
   const server = createServer((socket) => {
+    connections.add(socket);
+    socket.once("close", () => connections.delete(socket));
     let buffer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
@@ -68,8 +76,9 @@ export async function serve(state: string, handle: (op: string, args: unknown) =
         buffer = buffer.slice(at + 1);
         void (async () => {
           try {
-            const { op, args } = JSON.parse(line) as { op: string; args?: unknown };
-            socket.write(JSON.stringify({ ok: true, ...(await handle(op, args)) }) + "\n");
+            const request = JSON.parse(line) as { op: string; args?: unknown; token?: string };
+            if (token && request.token !== token) { socket.destroy(); return; }
+            socket.write(JSON.stringify({ ok: true, ...(await handle(request.op, request.args)) }) + "\n");
           } catch (error) {
             socket.write(JSON.stringify({ ok: false, error: errorText(error) }) + "\n");
           }
@@ -80,6 +89,14 @@ export async function serve(state: string, handle: (op: string, args: unknown) =
   });
   server.unref();
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(path, () => resolve()); });
-  await chmod(path, 0o600);
-  return { path, close: async () => { await new Promise<void>((resolve) => server.close(() => resolve())); await rm(path, { force: true }); } };
+  const close = async () => {
+    for (const socket of connections) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(marker, { force: true });
+  };
+  try {
+    if (windows) await writeFile(marker, JSON.stringify({ id, token }));
+    else await chmod(marker, 0o600);
+  } catch (error) { await close(); throw error; }
+  return { path, close };
 }

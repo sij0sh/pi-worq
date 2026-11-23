@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { repo } from "./fake.ts";
 
@@ -11,9 +11,11 @@ test("documented exact-diff check passes the expected edit and rejects plausible
   const file = join(root, "app.py");
   const expected = join(dir, "expected.patch");
   const script = join(import.meta.dirname, "..", "docs", "examples", "check-exact-diff.sh");
+  const bash = process.platform === "win32"
+    ? resolve(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(), "..", "..", "..", "bin", "bash.exe") : "bash";
   const correct = "print('HELLO')\n";
   const check = () => {
-    const result = spawnSync("bash", [script, expected], { cwd: root, encoding: "utf8" });
+    const result = spawnSync(bash, [script, expected], { cwd: root, encoding: "utf8" });
     assert.ifError(result.error);
     assert.equal(result.signal, null);
     return result.status;

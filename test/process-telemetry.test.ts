@@ -17,7 +17,7 @@ test('native process metadata comes from the failure boundary, preserving reject
     [join(process.cwd(), 'nonexistent-command'), [], 'launch', 2000],
     [process.execPath, ['-e', 'setInterval(()=>{},1000)'], 'timeout', 60],
     [process.execPath, ['-e', 'process.stdout.write("x".repeat(256000))'], 'output-limit', 2000],
-    [process.execPath, ['-e', 'process.kill(process.pid,"SIGTERM")'], 'process-exit', 2000],
+    ...(process.platform === "win32" ? [] : [[process.execPath, ['-e', 'process.kill(process.pid,"SIGTERM")'], 'process-exit', 2000] as const]),
   ] as const) {
     const r = run(executable, [...args], signal, ms);
     await assert.rejects(r.result, { code: kind });

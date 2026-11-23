@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, readFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join, basename } from "node:path";
 import { test } from "node:test";
 import { processTools, readTools, writeTools } from "../src/tools.ts";
 
@@ -22,7 +22,7 @@ test("search: one bounded call finds matches and refuses .git, binaries and stra
   await writeFile(join(root, "blob.bin"), Buffer.from([0, 110, 101, 101, 100, 108, 101]));
   await mkdir(join(dir, "outside"));
   await writeFile(join(dir, "outside", "secret.ts"), "needle\n");
-  await symlink(join(dir, "outside"), join(root, "link"));
+  await symlink(join(dir, "outside"), join(root, "link"), process.platform === "win32" ? "junction" : "dir");
   const tools = readTools(root);
   assert.deepEqual(tools.map((tool) => tool.name).sort(), ["list_files", "read_file", "search"]);
   const out = await call(tools, "search", { pattern: "needle" });
@@ -42,7 +42,7 @@ test("search: one bounded call finds matches and refuses .git, binaries and stra
 
   await mkdir(join(root, "node_modules"));
   await writeFile(join(root, "node_modules", "local.txt"), "needle");
-  await symlink(join(dir, "outside"), join(root, "node_modules", "dep"));
+  await symlink(join(dir, "outside"), join(root, "node_modules", "dep"), process.platform === "win32" ? "junction" : "dir");
   assert.match(await search("."), /secret\.ts:1:needle/);
   assert.equal(await search("node_modules"), "node_modules/local.txt:1:needle");
   await assert.rejects(search("node_modules/dep/secret.ts"), /Symbolic link is not allowed/);
@@ -85,12 +85,28 @@ test("process tools: a private short TMPDIR, the interpreter on PATH, and both r
   const dir = await mkdtemp(join(tmpdir(), "worq-box-"));
   try {
     const box = processTools(dir, join(dir, "runtime"), { signal });
-    const env = await box.tools.find((tool) => tool.name === "run_command")!.run({ executable: "/usr/bin/env", args: [] } as never, signal) as string;
-    const tmp = /^TMPDIR=(.+)$/m.exec(env)![1];
-    assert.ok(tmp.startsWith("/tmp/worq-"), tmp);
+    const env = await box.tools.find((tool) => tool.name === "run_command")!.run({
+      executable: "node", args: ["-e", "console.log(JSON.stringify(process.env))"],
+    } as never, signal) as string;
+    const vars = JSON.parse(env.split("\n")[2]);
+    const tmp = vars.TMPDIR;
+    assert.equal(dirname(tmp), tmpdir());
+    assert.match(basename(tmp), /^worq-/);
     assert.ok((await lstat(tmp)).isDirectory());
-    assert.match(env, new RegExp(`^PATH=${dirname(process.execPath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`, "m"));
+    assert.equal(vars.PATH.split(delimiter)[0], dirname(process.execPath));
+    if (process.platform === "win32") assert.equal(vars.TEMP, tmp);
     await box.close();
     await assert.rejects(lstat(tmp), /ENOENT/);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+
+test("CRLF text reads and edits without rewriting line endings", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "worq-crlf-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "text.txt");
+  await writeFile(file, "first\r\nsecond\r\nlast\r\n");
+  assert.equal(await call(readTools(root), "read_file", { path: "text.txt", limit: 2 }), "1: first\n2: second");
+  await call(writeTools(root), "edit_file", { path: "text.txt", old: "first\nsecond", replacement: "one\ntwo" });
+  assert.equal(await readFile(file, "utf8"), "one\r\ntwo\r\nlast\r\n");
 });

@@ -247,6 +247,8 @@ test("resource lists replace family settings; approved bytes only, no checkout o
   await writeFile(join(root, pin.path), data); await apply();
   assert.match(loader.getSystemPrompt()!, /operator skill/);
   await writeFile(join(root, pin.path), "changed"); await assert.rejects(apply(), /Changed resource/);
-  await rm(join(root, pin.path)); await symlink(config.path, join(root, pin.path)); await assert.rejects(apply(), /Untrusted/);
+  // A directory junction exercises realpath escapes on Windows without Developer Mode.
+  await symlink(dir, join(root, "outside"), process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(applyResources(loader, "base", config.path, { skills: [{ ...pin, path: "outside/pi-worq.json" }] }), /Untrusted/);
   await rm(join(root, pin.path)); await writeFile(join(root, pin.path), data); await mkdir(join(dir, ".git")); await assert.rejects(apply(), /Repository resource/);
 });

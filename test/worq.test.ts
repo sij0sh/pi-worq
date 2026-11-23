@@ -111,13 +111,13 @@ test("execute agent: @plan attached, own worktree and branch, verifier sees pinn
     "agent.execute": async (turn) => {
       attached = turn.text;
       assert.match(await turn.tool("write_file", { path: "app.py", content: "print('HELLO')\n" }), /Wrote/);
-      assert.match(await turn.tool("run_command", { executable: "/usr/bin/cat", args: ["app.py"] }), /HELLO/);
+      assert.match(await turn.tool("run_command", { executable: "node", args: ["-e", "process.stdout.write(require('node:fs').readFileSync('app.py'))"] }), /HELLO/);
       await turn.tool("submit", { summary: "Uppercased", changes: ["app.py"] });
     },
     "reviewer.intent": async (turn) => {
       const { commit } = JSON.parse(turn.text) as { commit: string };
       assert.match(commit, /^[0-9a-f]{40}$/);
-      verifierSaw = await turn.tool("run_command", { executable: "/usr/bin/cat", args: ["app.py"] });
+      verifierSaw = await turn.tool("run_command", { executable: "node", args: ["-e", "process.stdout.write(require('node:fs').readFileSync('app.py'))"] });
       await turn.tool("report", pass);
     },
     reviewer: (turn) => turn.tool("report", pass).then(() => {}),

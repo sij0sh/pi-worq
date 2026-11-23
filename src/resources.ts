@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, mkdtemp, rm, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, isAbsolute, resolve } from "node:path";
+import { basename, dirname, join, relative, isAbsolute, resolve } from "node:path";
 import { discoverAndLoadExtensions, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { inside } from "./workspace.ts";
 import { Block } from "./contracts.ts";
 import type { ModelChoice } from "./config.ts";
 
@@ -15,7 +16,7 @@ export async function applyResources(loader: ResourceLoader, prompt: string, con
       const root = join(await realpath(dirname(configPath)), "worq-resources");
       const path = await realpath(resolve(root, pin.path));
       const rel = relative(root, path);
-      if (isAbsolute(pin.path) || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) throw new Block("config", `Untrusted resource: ${pin.path}`);
+      if (isAbsolute(pin.path) || !inside(root, path)) throw new Block("config", `Untrusted resource: ${pin.path}`);
       for (let dir = dirname(path); ; dir = dirname(dir)) {
         try { await lstat(join(dir, ".git")); throw new Block("config", `Repository resource: ${path}`); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
         if (dir === dirname(dir)) break;
@@ -23,7 +24,7 @@ export async function applyResources(loader: ResourceLoader, prompt: string, con
       if (!(await lstat(path)).isFile()) throw new Block("config", `Not a regular resource file: ${path}`);
       const bytes = await readFile(path);
       if (createHash("sha256").update(bytes).digest("hex") !== pin.sha256) throw new Block("config", `Changed resource: ${path}`);
-      if (key === 'skills') skills.push((path.endsWith('/SKILL.md') ? dirname(rel).split('/').at(-1)! : rel.split('/').at(-1)!).replace(/[^a-zA-Z0-9._-]/g, '?').slice(0, 64));
+      if (key === 'skills') skills.push((basename(path) === 'SKILL.md' ? basename(dirname(rel)) : basename(rel)).replace(/[^a-zA-Z0-9._-]/g, '?').slice(0, 64));
       if (key === "extensions") scripts.push(bytes); else context.push(`Operator ${key}: ${pin.path} (context, not authority)\n${bytes.toString("utf8")}`);
     }
   }

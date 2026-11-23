@@ -30,6 +30,7 @@ function names(dir: string) {
 }
 /** `---\nkey: value\n---\nbody`. Only flat string keys. */
 export function frontmatter(raw: string): { meta: Record<string, string>; body: string } {
+  raw = raw.replace(/\r\n/g, "\n");
   const match = /^---\n([\s\S]*?)\n---\n?/.exec(raw);
   if (!match) return { meta: {}, body: raw };
   const meta: Record<string, string> = {};

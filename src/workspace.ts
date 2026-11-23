@@ -1,8 +1,10 @@
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Block } from "./contracts.ts";
 import { cleanEnv, git } from "./process.ts";
+import { windows } from "./platform.mjs";
+export { statePath } from "./platform.mjs";
 
 export function inside(base: string, path: string): boolean {
   const rel = relative(base, path);
@@ -11,7 +13,11 @@ export function inside(base: string, path: string): boolean {
 function parts(path: string, allowRoot = false): string[] {
   if (allowRoot && path === ".") return [];
   const names = path.split("/");
-  if (isAbsolute(path) || names.some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git" || part.includes("\0"))) {
+  const invalidWindowsName = (part: string) => windows && (
+    /[\\<>:"|?*\x00-\x1f]/.test(part) || /[. ]$/.test(part) ||
+    /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3])(?: |\.|$)/i.test(part) || /^git~[0-9]+$/i.test(part)
+  );
+  if (isAbsolute(path) || names.some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git" || part.includes("\0") || invalidWindowsName(part))) {
     throw new Block("path", `Invalid relative path: ${path}`);
   }
   return names;
@@ -46,22 +52,19 @@ export async function readSmall(path: string, max: number) {
   if (!info.isFile() || info.size > max) throw new Block("file", `Expected a regular file of at most ${max} bytes: ${path}`);
   return readFile(path, "utf8");
 }
-export function statePath() {
-  return resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq"));
-}
 export async function repository(cwd: string, signal: AbortSignal) {
-  if (process.platform !== "linux") throw new Block("platform", "Worq requires Linux");
+  if (!windows && process.platform !== "linux") throw new Block("platform", "Worq requires Linux or Windows");
   return realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));
 }
-/** Private agent directory under the state dir (0700, owned by you). */
+/** Private agent directory. Windows inherits ACLs from the user state directory. */
 export async function agentDirectory(base: string, id: string) {
   await mkdir(base, { recursive: true, mode: 0o700 });
   const root = await realpath(base);
   const info = await stat(root);
-  if (info.uid !== process.getuid?.() || (info.mode & 0o077)) throw new Block("state-dir", `${root} must be private and owned by you (mode 0700)`);
+  if (!windows && (info.uid !== process.getuid?.() || (info.mode & 0o077))) throw new Block("state-dir", `${root} must be private and owned by you (mode 0700)`);
   const dir = join(root, id);
   await mkdir(dir, { mode: 0o700 });
-  await chmod(dir, 0o700);
+  if (!windows) await chmod(dir, 0o700);
   return dir;
 }
 
@@ -99,7 +102,11 @@ export async function linkDependencies(root: string, checkout: string, signal: A
   const unlink = () => rm(target, { recursive: true, force: true }).catch(() => {});
   try {
     await mkdir(target);
-    for (const entry of await readdir(source)) await symlink(join(source, entry), join(target, entry)).catch(() => {});
+    for (const entry of await readdir(source)) {
+      const from = join(source, entry), to = join(target, entry);
+      const directory = windows && (await stat(from).catch(() => undefined))?.isDirectory();
+      await symlink(from, to, directory ? "junction" : undefined).catch(() => {});
+    }
     if (await git(checkout, signal, "status", "--porcelain=v1", "--untracked-files=all")) {
       await unlink();
       return false;
@@ -141,9 +148,10 @@ export interface Runtime { env: NodeJS.ProcessEnv; tmp: string }
  */
 export async function runtimeEnv(parent: string): Promise<Runtime> {
   const tmp = await mkdtemp(join(tmpdir(), "worq-"));
-  await chmod(tmp, 0o700);
+  if (!windows) await chmod(tmp, 0o700);
   const env = { ...cleanEnv, HOME: join(parent, "home"), XDG_CONFIG_HOME: join(parent, "config"), XDG_STATE_HOME: join(parent, "state"),
-    XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: tmp, TERM: "xterm-256color" };
+    XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: tmp, TERM: "xterm-256color",
+    ...(windows ? { USERPROFILE: join(parent, "home"), APPDATA: join(parent, "config"), LOCALAPPDATA: join(parent, "data"), TEMP: tmp, TMP: tmp } : {}) };
   await Promise.all([env.HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME]
     .map((dir) => mkdir(dir, { recursive: true, mode: 0o700 })));
   return { env, tmp };

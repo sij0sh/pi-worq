@@ -7,7 +7,8 @@ import type { Action } from '../src/contracts.ts';
 import { observePty } from '../src/pty.ts';
 
 test('offline native Pi inspector opens, tabs, resizes, and restores the editor', {
-  skip: process.env.WORQ_NATIVE_INSPECTOR !== '1' && 'set WORQ_NATIVE_INSPECTOR=1 to run Linux PTY smoke',
+  skip: process.platform !== 'linux' ? 'PTY smoke requires Linux' :
+    process.env.WORQ_NATIVE_INSPECTOR !== '1' && 'set WORQ_NATIVE_INSPECTOR=1 to run Linux PTY smoke',
 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wi-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

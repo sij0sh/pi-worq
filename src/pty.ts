@@ -8,6 +8,7 @@ const helper = fileURLToPath(new URL("./pty_bridge.py", import.meta.url));
 const keys: Record<string, string> = { enter: "\r", escape: "\x1b", tab: "\t", backspace: "\x7f", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", "ctrl-c": "\x03" };
 
 export async function observePty(executable: string, args: string[], actions: Action[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal) {
+  if (process.platform !== "linux") throw new Block("pty-platform", "Terminal observation requires Linux");
   const terminal = new xterm.Terminal({ cols: 80, rows: 24, scrollback: 0, allowProposedApi: true });
   let pending = "", ready = false, exit: number | undefined, lastData = performance.now();
   let processed = Promise.resolve();

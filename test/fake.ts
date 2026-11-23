@@ -138,6 +138,7 @@ export async function repo() {
   const root = join(dir, "repo");
   const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
   execFileSync("git", ["init", "-q", "-b", "main", root]);
+  git("config", "core.autocrlf", "false");
   await writeFile(join(root, "app.py"), "print('hello')\n");
   await writeFile(join(root, ".gitignore"), ".agents/\n");
   git("add", "-A");
