@@ -98,7 +98,7 @@ Model keys: `agent`, `agent.<kind>`, `subagent`, `subagent.<name>`, `reviewer`, 
 
 One behaviour change versus 0.0.8: a more specific layer that sets only one field no longer discards an inherited field, so `models.reviewer.model` now reaches `reviewer.intent`. A missing model is not an error: the role uses Main's model.
 
-See `docs/harness.md` for the adapter contract, the capabilities and the per-harness config example.
+See `docs/configuration.md` for every key, inheritance, limits, pinned resources and failure codes, and `docs/harness.md` for the adapter contract, the capabilities and the per-harness config example.
 
 ## CLI
 
