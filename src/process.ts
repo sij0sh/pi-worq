@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { observe, type Outcome } from './telemetry.ts';
 import { Block } from "./contracts.ts";
 
 export class CleanupError extends Block {
@@ -19,11 +20,17 @@ function killGroup(pid: number, sig: NodeJS.Signals | 0): boolean {
 
 /** Own the whole process group, not just the launched program or inherited pipes. */
 export function launch(executable: string, args: string[], options: {
-  cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; stdout?: (chunk: Buffer) => void;
+  cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; report?: (value: Outcome) => void; stdout?: (chunk: Buffer) => void;
 }) {
+  if (options.signal.aborted) observe(options.report, { kind: 'cancelled' });
   options.signal.throwIfAborted();
-  const child = spawn(executable, args, { cwd: options.cwd, env: options.env, detached: true, stdio: "pipe" });
+  const child = (() => {
+    try { return spawn(executable, args, { cwd: options.cwd, env: options.env, detached: true, stdio: "pipe" }); }
+    catch (error) { observe(options.report, { kind: 'launch' }); throw error; }
+  })();
   let failure: unknown;
+  let cancelled = false;
+  let abortWasCause = false;
   let cleanup: Promise<void> | undefined;
   let stdout: Buffer[] = [], stderr: Buffer[] = [];
   let outBytes = 0, errBytes = 0;
@@ -47,7 +54,7 @@ export function launch(executable: string, args: string[], options: {
       abandon(error);
     });
   };
-  const abort = () => stop(options.signal.reason);
+  const abort = () => { cancelled = true; abortWasCause = failure == null; stop(options.signal.reason); };
   options.signal.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => stop(new Block("timeout", `Process timed out: ${executable}`)), options.ms);
   child.stdin.on("error", (error) => {
@@ -79,12 +86,18 @@ export function launch(executable: string, args: string[], options: {
       }, reject);
     });
   });
-  const done = Promise.race([closed, unsafe]);
+  const done = Promise.race([closed, unsafe]).catch((error: unknown) => {
+    const code = error instanceof Block ? error.code : undefined;
+    if (error instanceof CleanupError) observe(options.report, { kind: 'cleanup-unconfirmed', cancelled });
+    else if (abortWasCause) observe(options.report, { kind: 'cancelled' });
+    else if (code === 'timeout' || code === 'launch' || code === 'output-limit' || code === 'process-exit') observe(options.report, { kind: code });
+    throw error;
+  });
   void done.catch(() => {}); // interactive callers may still be setting up controls
   return { done, input: child.stdin, stop };
 }
 
-export async function runProcess(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; stdin?: string }): Promise<ProcessResult> {
+export async function runProcess(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; report?: (value: Outcome) => void; stdin?: string }): Promise<ProcessResult> {
   const child = launch(executable, args, options);
   child.input.end(options.stdin ?? "");
   return child.done;

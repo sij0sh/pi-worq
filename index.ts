@@ -1,4 +1,6 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { glance, Inspector } from './src/inspector.ts';
+import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type { AgentEvent } from "./src/agent.ts";
@@ -10,7 +12,7 @@ import { loadPrompts } from "./src/prompts.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/session.ts";
 import { statePath } from "./src/workspace.ts";
-import { Worq } from "./src/worq.ts";
+import { isRef, Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
 const ENABLED = "worq-enabled";
@@ -61,11 +63,43 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     let closing = false;
     let ui: ExtensionContext | undefined;
 
+    const telemetry = new Telemetry();
+    let closeInspector: (() => void) | undefined;
+    let redrawWidget: (() => void) | undefined;
+    let redrawInspector: (() => void) | undefined;
+    let dirty = false;
+    let widget = false;
+    const stop = telemetry.subscribe(() => {
+      if (dirty || closing) return;
+      dirty = true;
+      queueMicrotask(() => {
+        dirty = false;
+        if (closing) return;
+        try { syncWidget(); redrawWidget?.(); redrawInspector?.(); } catch { /* display only */ }
+      });
+    });
+    const syncWidget = () => {
+      if (ui?.mode !== 'tui') return;
+      const live = !!instance?.all().some(a => !a.ended);
+      if (live === widget) return;
+      widget = live;
+      redrawWidget = undefined;
+      ui.ui.setWidget?.('worq', live ? (tui, theme) => {
+        let cached: { width: number; second: number; lines: string[] } | undefined;
+        redrawWidget = () => { cached = undefined; tui.requestRender(); };
+        return {
+          render(width) {
+            const second = Math.floor(Date.now() / 1000);
+            if (!cached || cached.width !== width || cached.second !== second) cached = { width, second, lines: glance(telemetry, width, theme) };
+            return cached.lines;
+          },
+          invalidate() { cached = undefined; },
+        };
+      } : undefined);
+    };
     const status = () => {
       if (off) enable(false);
-      if (ui?.mode !== "tui" || !instance) return;
-      const live = instance.all().filter((a) => !a.ended);
-      ui.ui.setStatus("worq", live.length ? `worq ${live.map((a) => `${a.ref}:${a.state}`).join(" ")}` : undefined);
+      try { syncWidget(); } catch { /* display only */ }
     };
     const notify = (event: AgentEvent) => {
       if (closing) return;
@@ -79,7 +113,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       if (instance) return instance;
       const config = loadConfig(options.agentDir?.() ?? getAgentDir());
       const driver = options.driver?.(ctx) ?? createDriver({ host: ctx }, config);
-      instance = new Worq({ driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
+      instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
       return instance;
     };
     const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
@@ -156,10 +190,30 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       },
     });
 
+    pi.registerCommand('worq-inspect', {
+      description: 'Read-only session inspector: /worq-inspect [ref]',
+      async handler(args, ctx) {
+        if (closing || closeInspector) return;
+        const ref = args.trim().replace(/^@/, '').toLowerCase();
+        if (args.trim() && !isRef(ref)) { say(ctx, 'Usage: /worq-inspect [ref]', 'error'); return; }
+        if (ctx.mode !== 'tui') { say(ctx, 'Inspector requires a TUI. Use /worq list [ref].'); return; }
+        if (ref && ![...telemetry.rows.values()].some(row => row.ref === ref)) { say(ctx, 'No such Worq ref in this session.', 'warning'); return; }
+        try {
+          await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+            redrawInspector = () => tui.requestRender();
+            closeInspector = () => { closeInspector = undefined; redrawInspector = undefined; done(undefined); };
+            return new Inspector(telemetry, ref || undefined, theme, () => tui.terminal.rows, redrawInspector, closeInspector);
+          });
+        } finally { closeInspector = undefined; redrawInspector = undefined; }
+      },
+    });
+
     pi.registerMessageRenderer("worq", (message, options, theme) => {
       const body = clean(typeof message.content === "string" ? message.content : message.content.map((c) => c.type === "text" ? c.text : "").join(""));
       const [head = "", ...rest] = body.split("\n");
-      const line = `${theme.fg("accent", "◆")} ${theme.fg("muted", head.replace(/^\[worq ([0-9a-f]{4})\] /, "worq $1 · "))}`;
+      const type = (message.details as Partial<AgentEvent> | undefined)?.type;
+      const tone = type === 'failed' ? 'error' : actionable(type) || type === 'warning' ? 'warning' : 'accent';
+      const line = `${theme.fg(tone, "◆")} ${theme.fg(tone, head.replace(/^\[worq ([0-9a-f]{4})\] /, "worq $1 · "))}`;
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });
 
@@ -174,10 +228,13 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
     pi.on("session_shutdown", async (_event, ctx) => {
       closing = true;
+      stop();
+      closeInspector?.();
+      redrawWidget = undefined;
       await instance?.shutdown();
       await socket?.close().catch(() => {});
       socket = undefined;
-      if (ctx.mode === "tui") ctx.ui.setStatus("worq", undefined);
+      if (ctx.mode === "tui") ctx.ui.setWidget?.('worq', undefined);
     });
   };
 }

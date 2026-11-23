@@ -1,3 +1,4 @@
+import { label, observe, type Outcome } from './telemetry.ts';
 import { applyResources } from "./resources.ts";
 import {
   createAgentSession, createExtensionRuntime, defineTool, SessionManager, SettingsManager,
@@ -31,13 +32,14 @@ function resources(prompt: string): ResourceLoader {
     getAppendSystemPrompt: () => [], getAppendSystemPromptSources: () => [], extendResources: () => {}, reload: async () => {},
   };
 }
-function sdkTool(tool: Tool) {
+function sdkTool(tool: Tool, outcomes: Map<string, Outcome>) {
   return defineTool({
     name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters, executionMode: "sequential",
-    async execute(_id, params, signal) {
+    async execute(id, params, signal) {
       const live = signal ?? new AbortController().signal;
+      if (live.aborted) outcomes.set(id, { kind: 'cancelled' });
       live.throwIfAborted();
-      const out = await tool.run(parse(tool.parameters, params, tool.name), live);
+      const out = await tool.run(parse(tool.parameters, params, tool.name), live, value => { outcomes.set(id, value); });
       const value = typeof out === "string" ? { text: out } : out;
       const content: ({ type: "text"; text: string } | { type: "image"; mimeType: string; data: string })[] = [{ type: "text", text: value.text }];
       if (value.image) content.push({ type: "image", ...value.image });
@@ -73,9 +75,14 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
     let fallback = resolve(choice.fallbackModel);
     if (!model) throw new Block("model", "Select a Pi model or set model in pi-worq.json");
     if (fallback && fallback.provider === model.provider && fallback.id === model.id) fallback = undefined;
-    const tools = spec.tools.map(sdkTool);
+    let nextCall = 0;
+    const calls = new Map<string, string>();
+    const outcomes = new Map<string, Outcome>();
+    const tools = spec.tools.map(tool => sdkTool(tool, outcomes));
+    const names = new Set(tools.map(tool => tool.name));
+    const report = (value: import('./telemetry.ts').Observation) => observe(spec.observe, value);
     const loader = resources(spec.system);
-    await applyResources(loader, spec.system, config.path, choice.resources);
+    const skills = await applyResources(loader, spec.system, config.path, choice.resources);
     spec.log(`Role ${spec.name}: ${model.provider}/${model.id}, thinking ${level}; sources ${JSON.stringify(choice.from)}`);
     const { session } = await createAgentSession({
       cwd: spec.cwd, model, thinkingLevel: level, resourceLoader: loader,
@@ -83,8 +90,37 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
       sessionManager: SessionManager.inMemory(spec.cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
     });
+    const setup = () => { try { report({ setup: { model: label(session.model && session.model.provider + '/' + session.model.id), thinking: label(session.thinkingLevel), skills } }); } catch { /* display only */ } };
+    const context = () => {
+      if (!spec.observe) return;
+      try {
+        const percent = session.getContextUsage()?.percent;
+        report({ context: typeof percent === 'number' && Number.isFinite(percent) ? percent : undefined });
+      } catch { report({ context: undefined }); }
+    };
+    const seen = new WeakSet<object>();
+    setup();
     let failed = false;
     const unsubscribe = session.subscribe((event) => {
+      if (event.type === 'turn_start') { report({ phase: 'request' }); context(); }
+      if (event.type === 'tool_execution_start') {
+        const id = String(++nextCall);
+        calls.set(event.toolCallId, id);
+        report({ start: id, name: names.has(event.toolName) ? event.toolName : 'unknown tool' });
+      }
+      if (event.type === 'tool_execution_end') {
+        const id = calls.get(event.toolCallId);
+        if (id) report({ end: id, outcome: outcomes.get(event.toolCallId) ?? { kind: event.isError ? 'sdk-error' : 'ok' } });
+        calls.delete(event.toolCallId);
+        outcomes.delete(event.toolCallId);
+      }
+      if (event.type === 'message_end' && event.message.role === 'assistant' && !seen.has(event.message)) {
+        seen.add(event.message);
+        const { usage, stopReason } = event.message;
+        if (stopReason !== 'error' && stopReason !== 'aborted') report({ cache: { read: usage?.cacheRead, write: usage?.cacheWrite } });
+      }
+      if (event.type === 'agent_end') { outcomes.clear(); calls.clear(); }
+      if (event.type === 'agent_end' || event.type === 'compaction_end') { report({ phase: 'idle' }); context(); }
       if (event.type === "turn_start") spec.turn();
       else if (event.type === "tool_execution_start") spec.log(`→ ${event.toolName} ${JSON.stringify(event.args ?? {}).slice(0, 200)}`);
       else if (event.type === "tool_execution_end" && event.isError) {
@@ -118,12 +154,13 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
         fallback = undefined;
         await session.setModel(next);
         session.setThinkingLevel(level);
+        setup(); report({ context: undefined });
         // A fallback model that cannot take the level is a documented degradation, not an error.
         const supported = thinkingLevels(next);
         if (!supported.includes(level)) spec.log(`thinking level ${level} is not supported by fallback model ${next.provider}/${next.id} (${supported.join(", ")}); Pi clamps it`);
         return true;
       },
-      dispose() { unsubscribe(); session.dispose(); },
+      dispose() { report({ phase: 'closed' }); outcomes.clear(); calls.clear(); unsubscribe(); session.dispose(); },
     };
   }) as Driver;
   driver.capabilities = capabilities;

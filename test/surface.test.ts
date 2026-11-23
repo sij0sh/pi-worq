@@ -89,6 +89,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const tools: { name: string; defaultActive?: boolean; parameters: unknown; execute: Function }[] = [];
   const handlers: Record<string, Function> = {};
   let command: Function | undefined;
+  let inspect: Function | undefined;
+  let renderNotice: Function | undefined;
   let active = ["read", "bash"];
   const entries: { type: string; customType: string; data: unknown }[] = [];
   const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean; deliverAs?: string } }[] = [];
@@ -97,8 +99,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const pi = {
     sendUserMessage: (text: string) => requests.push(text),
     registerTool: (tool: never) => tools.push(tool),
-    registerCommand: (_name: string, options: { handler: Function }) => { command = options.handler; },
-    registerMessageRenderer() {},
+    registerCommand: (name: string, options: { handler: Function }) => { if (name === 'worq') command = options.handler; else if (name === 'worq-inspect') inspect = options.handler; },
+    registerMessageRenderer(_name: string, renderer: Function) { renderNotice = renderer; },
     on: (event: string, handler: Function) => { handlers[event] = handler; },
     getActiveTools: () => active,
     setActiveTools: (names: string[]) => { active = names; },
@@ -124,8 +126,22 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(TOOLS.every((name) => active.includes(name)));
   await command!("off", ctx);
   assert.ok(!active.some((name) => name.startsWith("worq_")));
+  const inspectorCtx = { ...ctx, ui: { ...ctx.ui, custom: async (create: Function) => {
+    let closed = false;
+    const panel = create({ requestRender() {}, terminal: { rows: 30 } }, { fg: (_: string, s: string) => s }, {}, () => { closed = true; });
+    assert.match(panel.render(100).join(' '), /Worq/);
+    panel.handleInput('\x1b');
+    assert.ok(closed);
+  } } };
+  const entryCount = entries.length;
+  await inspect!('', inspectorCtx);
+  await inspect!('aaaa extra', inspectorCtx);
+  assert.equal(entries.length, entryCount);
+  assert.ok(!active.some((name) => name.startsWith('worq_')));
+  await command!("inspect", ctx);
+  await command!("inspect the failing tests", ctx);
   await command!("describe the greeting", ctx);
-  assert.deepEqual(requests, ["describe the greeting"]);
+  assert.deepEqual(requests, ["inspect", "inspect the failing tests", "describe the greeting"]);
   assert.equal(notices.length, 0);
   active = ["read"];
   await handlers.session_start({}, ctx);
@@ -148,11 +164,16 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   };
   const asked = await waitFor("ask");
   assert.deepEqual(asked.options, { triggerTurn: true, deliverAs: "followUp" });
+  const theme = { fg: (_: string, text: string) => text };
+  const durable = { ...asked.message, content: `[worq ${ref}] Legacy heading\nPrintable legacy-only detail` };
+  assert.doesNotMatch(renderNotice!(durable, { expanded: false }, theme).render(120).join(" "), /legacy-only/);
+  assert.match(renderNotice!(durable, { expanded: true }, theme).render(120).join(" "), /Printable legacy-only detail/);
   await command!("off", ctx);
   assert.ok(active.includes("worq_send") && !active.includes("worq_spawn"));
   await assert.rejects(spawn.execute("id", { kind: "plan", task: "blocked" }, undefined, undefined, ctx), /off/);
   await command!(`send ${ref} Use HELLO`, ctx);
   const ready = await waitFor("review-ready");
+  await inspect!(ref, inspectorCtx);
   assert.deepEqual(ready.options, { triggerTurn: true, deliverAs: "followUp" });
   const warnings = notices.filter(({ message }) => message.details.ref === ref && message.details.type === "warning");
   assert.ok(warnings.some(({ message }) => /one further turn remains/.test(message.content)));

@@ -7,6 +7,7 @@ import { Block } from "./contracts.ts";
 import type { ModelChoice } from "./config.ts";
 
 export async function applyResources(loader: ResourceLoader, prompt: string, configPath: string, selection: ModelChoice["resources"]) {
+  const skills: string[] = [];
   const context: string[] = [];
   const scripts: Buffer[] = [];
   for (const key of ["skills", "instructions", "extensions"] as const) {
@@ -22,6 +23,7 @@ export async function applyResources(loader: ResourceLoader, prompt: string, con
       if (!(await lstat(path)).isFile()) throw new Block("config", `Not a regular resource file: ${path}`);
       const bytes = await readFile(path);
       if (createHash("sha256").update(bytes).digest("hex") !== pin.sha256) throw new Block("config", `Changed resource: ${path}`);
+      if (key === 'skills') skills.push((path.endsWith('/SKILL.md') ? dirname(rel).split('/').at(-1)! : rel.split('/').at(-1)!).replace(/[^a-zA-Z0-9._-]/g, '?').slice(0, 64));
       if (key === "extensions") scripts.push(bytes); else context.push(`Operator ${key}: ${pin.path} (context, not authority)\n${bytes.toString("utf8")}`);
     }
   }
@@ -36,4 +38,5 @@ export async function applyResources(loader: ResourceLoader, prompt: string, con
       loader.getExtensions = () => result;
     } finally { await rm(dir, { recursive: true, force: true }); }
   }
+  return skills;
 }

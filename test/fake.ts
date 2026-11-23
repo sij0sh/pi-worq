@@ -145,12 +145,12 @@ export async function repo() {
   return { dir, root, state: join(dir, "state"), git };
 }
 
-export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}) {
+export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}, telemetry?: import('../src/telemetry.ts').Telemetry) {
   const events: AgentEvent[] = [];
   const seen: Spec[] = [];
   const config: Config = { path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, model: () => ({ harness: "pi", from: {} }) };
   let wake: (() => void) | undefined;
-  const worq = new Worq({ driver: fakeDriver(scripts, seen), prompts: loadPrompts(), config, state, cwd: root,
+  const worq = new Worq({ telemetry, driver: fakeDriver(scripts, seen), prompts: loadPrompts(), config, state, cwd: root,
     notify: (event) => { events.push(event); wake?.(); } });
   /** Resolve when an event of this type for this ref arrives. */
   const next = async (type: AgentEvent["type"], ref?: string, count = 1) => {

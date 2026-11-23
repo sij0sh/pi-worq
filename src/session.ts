@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Static, TSchema } from "typebox";
+import type { Observation, Outcome } from './telemetry.ts';
 import type { ModelChoice } from "./config.ts";
 import { Block, errorText, parse } from "./contracts.ts";
 
@@ -9,7 +10,7 @@ export interface Tool<T extends TSchema = TSchema> {
   name: string;
   description: string;
   parameters: T;
-  run(params: Static<T>, signal: AbortSignal): Promise<ToolOutput> | ToolOutput;
+  run(params: Static<T>, signal: AbortSignal, report?: (outcome: Outcome) => void): Promise<ToolOutput> | ToolOutput;
 }
 export const tool = <T extends TSchema>(name: string, description: string, parameters: T, run: Tool<T>["run"]): Tool => ({ name, description, parameters, run } as Tool);
 
@@ -35,6 +36,7 @@ export interface Spec {
   cwd: string;
   system: string;
   tools: Tool[];
+  observe?(value: Observation): void;
   log(line: string): void;
   turn(): void;
   /** A tool call failed (including SDK-side argument validation, which runs before Tool.run). */

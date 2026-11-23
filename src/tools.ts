@@ -18,7 +18,7 @@ const SEARCH = { hits: 200, bytes: 64_000, files: 4_000, file: 2 * 1024 * 1024 }
  */
 function searchTool(cwd: string): Tool {
   return tool("search", "Search a file or directory for a regular expression; returns path:line:text, bounded",
-    obj({ pattern: text(200), path: Type.Optional(path) }), async ({ pattern, path: at = "." }) => {
+    obj({ pattern: text(200), path: Type.Optional(path) }), async ({ pattern, path: at = "." }, _signal, report) => {
       let match: RegExp;
       try { match = new RegExp(pattern); } catch (error) { throw new Block("pattern", `Invalid regular expression: ${errorText(error)}`); }
       const start = await realpath(await scoped(cwd, at, { root: true }));
@@ -60,6 +60,7 @@ function searchTool(cwd: string): Tool {
       // Do not grant the dependency-link exception to an explicitly selected starting directory.
       if (info.isDirectory()) await walk(start, false);
       else if (info.isFile()) await read(start);
+      report?.({ kind: 'search', count: lines.length, capped: capped || files >= SEARCH.files });
       if (!lines.length) return `No matches in ${files} files${capped ? " (search stopped at a cap)" : ""}`;
       return lines.join("\n") + (capped ? `\n(${files} files scanned; results capped)` : "");
     });
@@ -124,8 +125,9 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
   const environment = () => env ??= runtimeEnv(runtime);
   const tools: Tool[] = [
     tool("run_command", "Run a trusted local command in this checkout; no shell parsing. Returns exit code and output tails.",
-      obj({ ...command, stdin: Type.Optional(Type.String({ maxLength: 8192 })) }), async ({ executable, args, stdin }, signal) => {
-        const out = await track(runProcess(executable, args, { cwd, env: (await environment()).env, signal: sig(signal), ms: 120_000, stdin }));
+      obj({ ...command, stdin: Type.Optional(Type.String({ maxLength: 8192 })) }), async ({ executable, args, stdin }, signal, report) => {
+        const out = await track(runProcess(executable, args, { cwd, env: (await environment()).env, signal: sig(signal), ms: 120_000, stdin, report }));
+        report?.({ kind: 'exit', code: out.code, stdout: !!out.stdout, stderr: !!out.stderr });
         return `Exit ${out.code}\nstdout:\n${out.stdout.slice(-6000)}\nstderr:\n${out.stderr.slice(-6000)}`;
       }),
   ];

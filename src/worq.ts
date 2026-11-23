@@ -10,6 +10,7 @@ import { assertChoice, type Driver } from "./session.ts";
 import { branchExists, repository } from "./workspace.ts";
 
 export interface WorqDeps {
+  telemetry?: import('./telemetry.ts').Telemetry;
   driver: Driver;
   prompts: Prompts;
   config: Config;
@@ -59,7 +60,7 @@ export class Worq {
       if (!this.agents.has(candidate) && !(await branchExists(root, `worq/${candidate}`, AbortSignal.timeout(10_000)))) ref = candidate;
     }
     if (!ref) throw new Block("ref", "Could not allocate a free agent ref");
-    const agent = new Agent({ driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
+    const agent = new Agent({ telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
       { ref, kind, task, attachments, verify, mode, reason });
     this.agents.set(ref, agent);
     agent.launch();
