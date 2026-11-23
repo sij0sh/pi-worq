@@ -11,6 +11,14 @@ const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
 export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
 const priority = (r: Row) => active(r) ? (r.actor ? 0 : 2) : 1;
 const compact = (r: Row) => `@${r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
+const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}.${review.slot}`;
+function childIdentity(row: Row, width: number) {
+  if (!row.review) return `${row.role} ${row.state}`;
+  const id = reviewId(row.review);
+  const nameWidth = width - visibleWidth(`${id} ${row.state}`) - 1;
+  const name = nameWidth > 0 ? truncateToWidth(row.role.slice('reviewer '.length), nameWidth, '') : '';
+  return `${id}${name ? ' ' + name : ''} ${row.state}`;
+}
 const identity = (r: Row, width: number) => width < 34 ? compact(r) : headline(r);
 export function glance(data: Telemetry, width: number, theme: Theme) {
   const rows = [...data.rows.values()].filter(displayable).sort((a, b) => priority(a) - priority(b));
@@ -103,7 +111,7 @@ export class Inspector {
     if (!row) return ['No Worq agents observed in this session.'];
     if (this.tab === 0) {
       const c = row.cache;
-      return [headline(row), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of @' + row.ref : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
+      return [headline(row), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of @' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
         `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
         `Injected pinned skills: ${row.setup ? row.setup.skills.join(', ') || 'none' : 'unavailable'}`,
         `Child context estimate: ${row.context?.percent == null ? 'unavailable' : `${row.context.percent.toFixed(1)}%${row.phase === 'closed' || Date.now() - row.context.at > 60_000 ? ' (stale)' : ''}`}`,
@@ -138,7 +146,13 @@ export class Inspector {
     const hint = fit(width < 56 ? `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · ↵ · Tab · Esc` : `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`, width);
     const start = Math.max(0, index - height + 1);
     const left = Math.min(40, Math.floor(width * .4));
-    const roster = rows.slice(start, start + height).map(r => ({ r, text: `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}${identity(r, wide ? left - 2 : width - (r.parent ? 4 : 2))}` }));
+    const rosterWidth = wide ? left : width;
+    const roster = rows.slice(start, start + height).map(r => {
+      const prefix = `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}`;
+      const budget = rosterWidth - visibleWidth(prefix);
+      const text = r.parent ? childIdentity(r, budget) : identity(r, budget);
+      return { r, text: fit(prefix + text, rosterWidth) };
+    });
     const detailWidth = wide ? width - left - 3 : width;
     const detail = this.detail(selected).flatMap(line => {
       // Preserve exact revision IDs and diagnostics even in a narrow detail pane.

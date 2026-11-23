@@ -114,7 +114,7 @@ test('inspector groups interleaved children under owners and preserves selection
   panel.handleInput('\x1b[B');
   data.add('a2', 'aaaa', 'PQ d2', 'a');
   const roster = panel.render(65).slice(2).join('\n');
-  assert.match(roster, /@aaaa.*plan[\s\S]*↳ @aaaa.*d1[\s\S]*↳ @aaaa.*d2[\s\S]*› @bbbb.*execute[\s\S]*↳ @bbbb.*d1/);
+  assert.match(roster, /@aaaa.*plan[\s\S]*↳ PQ d1[\s\S]*↳ PQ d2[\s\S]*› @bbbb.*execute[\s\S]*↳ PQ d1/);
   data.sink('b')({ cache: { read: 0 } });
   panel.handleInput('\r');
   const details = panel.render(65).join('\n');

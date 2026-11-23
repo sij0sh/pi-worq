@@ -413,7 +413,7 @@ export class Agent {
   private async reviewer(name: string, prompt: string, slot: number, artifacts: (count: number) => void): Promise<ReviewRecord> {
     const { driver, prompts, limits, root, semaphore } = this.deps;
     const key = this.id + ':r' + this.round + ':' + slot;
-    this.deps.telemetry?.add(key, this.ref, 'reviewer ' + label(name), this.id);
+    this.deps.telemetry?.add(key, this.ref, 'reviewer ' + label(name), this.id, { round: this.round, slot: slot + 1 });
     const own = new AbortController();
     const signal = AbortSignal.any([this.signal, own.signal]);
     const write = this.kind.access === "write";

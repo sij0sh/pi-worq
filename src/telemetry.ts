@@ -16,8 +16,9 @@ export interface Revision {
   reviews: { name: string; verdict: Verdict | "unknown"; findings: boolean[]; artifacts: number }[];
 }
 export interface Call { name: string; at: number; outcome?: Outcome }
+export interface ReviewIdentity { round: number; slot: number }
 export interface Row {
-  key: string; ref: string; role: string; parent?: string; born: number; since: number;
+  key: string; ref: string; role: string; parent?: string; review?: ReviewIdentity; born: number; since: number;
   state: AgentState | "queued" | "answered" | "done"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
   phase?: "request" | "idle" | "closed"; setup?: Setup; context?: { percent?: number; at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
   current: Map<string, Call>; last?: Call;
@@ -36,9 +37,9 @@ export class Telemetry {
     this.activity.push({ key, at: Date.now(), text, outcome });
     if (this.activity.length > 240) { this.activity.shift(); this.activityGap++; }
   }
-  add(key: string, ref: string, role: string, parent?: string) {
+  add(key: string, ref: string, role: string, parent?: string, review?: ReviewIdentity) {
     const now = Date.now();
-    this.rows.set(key, { key, ref, role, parent, born: now, since: now, state: parent ? "queued" : "starting", current: new Map(), cache: { responses: 0, read: 0, write: 0, reads: 0, writes: 0 } });
+    this.rows.set(key, { key, ref, role, parent, review, born: now, since: now, state: parent ? "queued" : "starting", current: new Map(), cache: { responses: 0, read: 0, write: 0, reads: 0, writes: 0 } });
     this.event(key, parent ? "queued" : "starting"); this.changed();
   }
   state(key: string, state: Row["state"], blocker?: Row["blocker"]) {
