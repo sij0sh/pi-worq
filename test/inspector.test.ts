@@ -113,6 +113,24 @@ test('inspector groups interleaved children under owners and preserves selection
   panel.handleInput('\x1b[B');
   panel.handleInput('\x1b[B');
   data.add('a2', 'aaaa', 'PQ d2', 'a');
+  data.add('r11', 'aaaa', 'reviewer same-long-name', 'a', { round: 1, slot: 1 });
+  data.add('r12', 'aaaa', 'reviewer same-long-prefix', 'a', { round: 1, slot: 2 });
+  data.add('r21', 'aaaa', 'reviewer same-long-name', 'a', { round: 2, slot: 1 });
+  for (const width of [20, 40, 80, 81, 120]) {
+    const lines = panel.render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width), `bounded at ${width}`);
+    const roster = lines.slice(2).map(line => line.split(' │ ')[0]!.trimEnd());
+    assert.deepEqual(roster.filter(line => line.includes('↳')).map(line => line.trim()), [
+      '↳ PQ d1 queued', '↳ PQ d2 queued',
+      ...['R1.1', 'R1.2', 'R2.1'].map(id => {
+        const label = roster.find(line => line.includes(`↳ ${id} `))?.trim();
+        assert.match(label ?? '', /^↳ R\d+\.\d+ (?:same\S* )?queued$/);
+        return label;
+      }),
+      '↳ PQ d1 queued',
+    ], `child labels and order at ${width}`);
+    assert.match(roster.filter(line => line.startsWith('›')).join('\n'), /^› @bbbb\b/);
+  }
   const roster = panel.render(65).slice(2).join('\n');
   assert.match(roster, /@aaaa.*plan[\s\S]*↳ PQ d1[\s\S]*↳ PQ d2[\s\S]*› @bbbb.*execute[\s\S]*↳ PQ d1/);
   data.sink('b')({ cache: { read: 0 } });
