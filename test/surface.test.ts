@@ -109,6 +109,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   };
   const scripts: Record<string, Script> = {
     "agent.plan": async turn => {
+      if (JSON.parse(turn.text).task === "Fail it") throw new Error("Fixture failure");
       if (JSON.parse(turn.text).task === "Plan it") {
         assert.match(await turn.tool("ask_main", { question: "Which greeting?" }), /Use HELLO/);
       }
@@ -121,7 +122,13 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
   assert.ok(tools.every((x) => x.defaultActive === false));
   assert.ok(!active.some((name) => name.startsWith("worq_")));
-  const ctx = { mode: "tui", cwd: root, ui: { notify(text: string) { alerts.push(text); }, setStatus() {} }, sessionManager: { getBranch: () => entries } };
+  let widget: { render(width: number): string[] } | undefined;
+  const ctx = { mode: "tui", cwd: root, ui: { notify(text: string) { alerts.push(text); }, setStatus() {},
+    setWidget(key: string, factory?: Function) {
+      assert.equal(key, "worq");
+      widget = factory?.({ requestRender() {} }, { fg: (_: string, value: string) => value });
+    },
+  }, sessionManager: { getBranch: () => entries } };
   await command!("", ctx);
   assert.ok(TOOLS.every((name) => active.includes(name)));
   await command!("off", ctx);
@@ -191,7 +198,13 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(!active.some(name => name.startsWith("worq_")));
   await command!("", ctx);
   assert.ok(active.includes("worq_spawn"));
+  const failedRun = await spawn.execute("id", { kind: "plan", task: "Fail it" }, undefined, undefined, ctx);
+  for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
+  assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
+  assert.match(widget?.render(20).join("\n") ?? "", new RegExp(`@${failedRun.details.ref} failed Main`));
+  assert.match(widget?.render(20)[0] ?? "", /0 live/);
   await handlers.session_shutdown({}, ctx);
+  assert.equal(widget, undefined);
   delete process.env.WORQ_STATE_DIR;
 });
 

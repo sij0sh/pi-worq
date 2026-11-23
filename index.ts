@@ -1,5 +1,5 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { glance, Inspector } from './src/inspector.ts';
+import { glance, hasGlance, Inspector } from './src/inspector.ts';
 import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
@@ -80,7 +80,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
     const syncWidget = () => {
       if (ui?.mode !== 'tui') return;
-      const live = !!instance?.all().some(a => !a.ended);
+      const live = hasGlance(telemetry);
       if (live === widget) return;
       widget = live;
       redrawWidget = undefined;

@@ -7,13 +7,29 @@ const active = (r: Row) => !['closed', 'failed', 'cancelled', 'done', 'answered'
 const headline = (r: Row) => `@${r.ref} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
 const fit = (s: string, w: number) => w > 0 ? truncateToWidth(s, w, w >= 3 ? '…' : '') : '';
 const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' : active(r) ? 'accent' : 'muted';
+const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
+export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
+const priority = (r: Row) => active(r) ? (r.actor ? 0 : 2) : 1;
+const compact = (r: Row) => `@${r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
+const identity = (r: Row, width: number) => width < 34 ? compact(r) : headline(r);
 export function glance(data: Telemetry, width: number, theme: Theme) {
-  const rows = [...data.rows.values()].filter(r => !r.parent && active(r)).sort((a, b) => Number(!!b.blocker) - Number(!!a.blocker));
+  const rows = [...data.rows.values()].filter(displayable).sort((a, b) => priority(a) - priority(b));
   if (!rows.length || width <= 0) return [];
+  const live = rows.filter(active).length;
+  const failed = rows.length - live;
   const overflow = rows.length > 2 ? ` +${rows.length - 2}` : '';
-  return [theme.fg('accent', fit(`Worq ${rows.length} live${overflow} · ${rows.filter(r => r.blocker).length} need Main`, width)),
-    ...rows.slice(0, 2).map(r => theme.fg(tone(r), fit(`${headline(r)} · ${r.current.values().next().value?.name ?? r.phase ?? ''} ${age(r.since)}`, width))),
-    theme.fg('muted', fit('/worq-inspect', width))];
+  const compactHeader = `${live} live${failed ? ` ${failed} fail` : ''}${overflow}`;
+  const narrowHeader = `${overflow.trim()}${overflow ? ' · ' : ''}${live}L${failed ? ` ${failed}F` : ''}`;
+  const fullHeader = `Worq ${live} live${failed ? ` · ${failed} failed` : ''}${overflow} · ${rows.filter(r => r.blocker).length} need Main`;
+  const header = [fullHeader, compactHeader, narrowHeader].find(s => visibleWidth(s) <= width) ?? (overflow.trim() || narrowHeader);
+  return [theme.fg('accent', fit(header, width)),
+    ...rows.slice(0, 2).map(r => {
+      const line = identity(r, width);
+      const activity = r.current.values().next().value?.name ?? r.phase;
+      const detail = `${line}${activity ? ` · ${activity}` : ''} ${age(r.since)}`;
+      return theme.fg(tone(r), fit(width >= 34 ? detail : line, width));
+    }),
+    ...(width >= '/worq-inspect'.length ? [theme.fg('muted', '/worq-inspect')] : [])];
 }
 export function outcome(o?: Outcome): string {
   if (!o) return 'outcome not recorded';
@@ -52,7 +68,20 @@ export class Inspector {
     this.redraw = redraw;
     this.close = close;
   }
-  private roster() { return [...this.data.rows.values()].filter(r => !this.ref || r.ref === this.ref); }
+  private roster() {
+    const owners: Row[] = [];
+    const children = new Map<string, Row[]>();
+    for (const row of this.data.rows.values()) {
+      if (this.ref && row.ref !== this.ref) continue;
+      if (!row.parent) owners.push(row);
+      else {
+        let family = children.get(row.parent);
+        if (!family) children.set(row.parent, family = []);
+        family.push(row);
+      }
+    }
+    return owners.flatMap(owner => [owner, ...(children.get(owner.key) ?? [])]);
+  }
   handleInput(input: string) {
     if (matchesKey(input, 'escape')) { if (!this.focusDetail) return this.close(); this.focusDetail = false; }
     else if (matchesKey(input, 'tab') || matchesKey(input, 'shift+tab')) { this.tab = (this.tab + (matchesKey(input, 'tab') ? 1 : 2)) % tabs.length; this.offset = 0; }
@@ -78,7 +107,7 @@ export class Inspector {
         `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
         `Injected pinned skills: ${row.setup ? row.setup.skills.join(', ') || 'none' : 'unavailable'}`,
         `Child context estimate: ${row.context?.percent == null ? 'unavailable' : `${row.context.percent.toFixed(1)}%${row.phase === 'closed' || Date.now() - row.context.at > 60_000 ? ' (stale)' : ''}`}`,
-        `Cache · child session, finalized responses (${c.responses})`, `Read: ${c.reads ? c.read : 'unavailable'} · ${c.reads}/${c.responses} covered`, `Write: ${c.writes ? c.write : 'unavailable'} · ${c.writes}/${c.responses} covered`];
+        `SDK-normalized cache · child session, finalized responses (${c.responses})`, `Read: ${c.reads ? c.read : 'unavailable'} · ${c.reads}/${c.responses} with SDK field`, 'Provider coverage unverified; zero may be an SDK default.', `Write: ${c.writes ? c.write : 'unavailable'} · ${c.writes}/${c.responses} with SDK field`];
     }
     if (this.tab === 1) return [headline(row), ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
       row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
@@ -108,8 +137,8 @@ export class Inspector {
     const title = this.theme.fg('accent', fit(`Worq · ${tabs[this.tab]} · ${rows.length} roles`, width));
     const hint = fit(width < 56 ? `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · ↵ · Tab · Esc` : `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`, width);
     const start = Math.max(0, index - height + 1);
-    const roster = rows.slice(start, start + height).map(r => ({ r, text: `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}${headline(r)}` }));
     const left = Math.min(40, Math.floor(width * .4));
+    const roster = rows.slice(start, start + height).map(r => ({ r, text: `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}${identity(r, wide ? left - 2 : width - (r.parent ? 4 : 2))}` }));
     const detailWidth = wide ? width - left - 3 : width;
     const detail = this.detail(selected).flatMap(line => {
       // Preserve exact revision IDs and diagnostics even in a narrow detail pane.

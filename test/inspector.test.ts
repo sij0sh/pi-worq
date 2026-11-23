@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { test } from 'node:test';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { glance, Inspector } from '../src/inspector.ts';
+import { glance, hasGlance, Inspector } from '../src/inspector.ts';
 import { Telemetry } from '../src/telemetry.ts';
 import { pass, planSubmission, repo, setup } from './fake.ts';
 
@@ -79,4 +79,46 @@ test('bounded layouts and independent evidence retention through out-of-order to
   assert.equal(closed, false);
   panel.handleInput('\x1b');
   assert.equal(closed, true);
+});
+
+
+test('20-column glance retains actor, status and overflow without counting failures as live', () => {
+  const data = new Telemetry();
+  data.add('failed', '0000', 'plan');
+  data.state('failed', 'failed', 'failure');
+  assert.match(glance(data, 20, theme).join(' '), /0 live 1 fail.*@0000 failed Main/);
+  assert.equal(hasGlance(data), true);
+  for (let i = 1; i < 99; i++) data.add(String(i), i.toString(16).padStart(4, '0'), 'execute');
+  data.state('1', 'waiting', 'ask');
+  data.state('2', 'review-ready', 'adjudicate');
+  const narrow = glance(data, 20, theme);
+  assert.deepEqual(narrow, ['98 live 1 fail +97', '@0001 waiting Main', '@0002 rev-rdy Main', '/worq-inspect']);
+  assert.ok(narrow.every(line => visibleWidth(line) <= 20));
+  data.state('1', 'closed');
+  assert.equal(glance(data, 20, theme)[2], '@0000 failed Main');
+  const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
+  assert.match(panel.render(20).join(' '), /@0002 rev-rdy Main/);
+  assert.equal(hasGlance(new Telemetry()), false);
+});
+
+
+test('inspector groups interleaved children under owners and preserves selection identity', () => {
+  const data = new Telemetry();
+  data.add('a', 'aaaa', 'plan');
+  data.add('b', 'bbbb', 'execute');
+  data.add('b1', 'bbbb', 'PQ d1', 'b');
+  data.add('a1', 'aaaa', 'PQ d1', 'a');
+  const panel = new Inspector(data, undefined, theme, () => 24, () => {}, () => {});
+  panel.render(65);
+  panel.handleInput('\x1b[B');
+  panel.handleInput('\x1b[B');
+  data.add('a2', 'aaaa', 'PQ d2', 'a');
+  const roster = panel.render(65).slice(2).join('\n');
+  assert.match(roster, /@aaaa.*plan[\s\S]*↳ @aaaa.*d1[\s\S]*↳ @aaaa.*d2[\s\S]*› @bbbb.*execute[\s\S]*↳ @bbbb.*d1/);
+  data.sink('b')({ cache: { read: 0 } });
+  panel.handleInput('\r');
+  const details = panel.render(65).join('\n');
+  assert.match(details, /SDK-normalized cache/);
+  assert.match(details, /Read: 0 · 1\/1 with SDK field/);
+  assert.match(details, /zero may be an SDK default/);
 });
