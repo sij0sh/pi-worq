@@ -150,20 +150,20 @@ test("config: nothing to resolve is Block(model)", async () => {
 });
 
 /** A misconfigured role fails at spawn, before the repository, the ref or any worktree exists. */
-async function spawnFailure(fail: unknown, role: string): Promise<void> {
+async function spawnFailure(fail: unknown, role: string, selected = true): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "worq-spawn-"));
   const config = await configOf(fail);
   const worq = new Worq({ driver: fakeHarness(MINIMAL_CAPS, {}), prompts: loadPrompts(), config, state: join(dir, "state"), cwd: dir, notify() {} });
   // `dir` is not a git repository: reaching repository() would raise something else.
   await assert.rejects(worq.spawn("plan", "plan it"),
-    (error: unknown) => error instanceof Block && error.code === "capability" && (error as Block).message.includes(role),
+    (error: unknown) => selected ? error instanceof Block && error.code === "capability" && error.message.includes(role) : error instanceof Error && !(error instanceof Block && error.code === "capability"),
     `spawn fails on ${role} before any work`);
 }
 
-test("config: spawn validates the agent role, the subagent and every reviewer", async () => {
+test("config: spawn validates only the selected agent role", async () => {
   await spawnFailure({ model: "a/m", models: { "agent.plan": { thinking: "high" } } }, "/models/agent.plan/thinking");
-  await spawnFailure({ model: "a/m", models: { subagent: { fallbackModel: "a/b" } } }, "/models/subagent/fallbackModel");
-  await spawnFailure({ model: "a/m", models: { "reviewer.pair": { thinking: "high" } } }, "/models/reviewer.pair/thinking");
+  await spawnFailure({ model: "a/m", models: { subagent: { fallbackModel: "a/b" } } }, "/models/subagent/fallbackModel", false);
+  await spawnFailure({ model: "a/m", models: { "reviewer.pair": { thinking: "high" } } }, "/models/reviewer.pair/thinking", false);
 });
 
 /**

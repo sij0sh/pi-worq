@@ -16,7 +16,7 @@ export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
 export interface AgentEvent { type: "review-ready" | "ask" | "failed"; ref: string; text: string }
 export interface Attachment { ref: string; path?: string; text: string }
 export interface Delegation { id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
-export const UNANSWERED = "Main did not answer in time. Decide within your authority, record the assumption, and continue.";
+export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
 
 /** Bounded concurrency shared by subagents and reviewers. */
 export class Semaphore {
@@ -142,7 +142,7 @@ export class Agent {
         this.ask?.resolve(`Main: ${message}`);
         return `Answered ${this.ref}`;
       case "review-ready":
-        if (this.round >= this.deps.limits.rounds) throw new Block("round-limit", `${this.ref} used its ${this.deps.limits.rounds} rounds; spawn a new agent with @${this.ref} instead`);
+        if (this.round >= this.deps.limits.rounds) throw new Block("round-limit", `${this.ref} used its ${this.deps.limits.rounds} rounds; adjudicate the existing evidence or close the run`);
         this.next?.resolve(`Main reviewed round ${this.round} and asks for another round:\n${message}`);
         return `Round ${this.round + 1} started for ${this.ref}`;
       case "starting": case "reviewing":
@@ -217,14 +217,14 @@ export class Agent {
       await box?.close().catch((error) => { this.error ??= errorText(error); });
       if (this.work && this.project) {
         // Keep any progress on the branch; the worktree goes, the branch stays.
-        try { this.candidate = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`); } catch { /* best effort */ }
-        try { await removeWorktree(this.project.root, this.work); this.work = undefined; } catch (error) { this.log(`worktree cleanup failed: ${errorText(error)}`); }
+        try { this.candidate = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
+          await removeWorktree(this.project.root, this.work); this.work = undefined; } catch (error) { this.log(`Worktree retained at ${this.work}: ${errorText(error)}`); }
       }
       this.finished = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
-      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
+      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
 
@@ -270,7 +270,7 @@ export class Agent {
     return tool("ask_main",
       "Ask Main (the user's Pi session) one concise question about user-owned intent, scope or permission that the task and repository cannot settle. Blocks until answered.",
       obj({ question: text(1200) }), async ({ question }, toolSignal) => {
-        if (++this.asks > this.deps.limits.asks) return "Ask limit reached. Decide within your authority and record the assumption.";
+        if (++this.asks > this.deps.limits.asks) return "Ask limit reached. Do not assume authorization. Report the unresolved decision.";
         const signal = AbortSignal.any([this.signal, toolSignal]);
         const conversation = this.conversation;
         conversation?.pause();

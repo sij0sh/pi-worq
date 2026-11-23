@@ -117,3 +117,5 @@ Linux only. One backend ships today (Pi); a second is one adapter file plus one 
 ```sh
 npm run check && npm test
 ```
+
+Use execute directly for simple reversible work. For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.

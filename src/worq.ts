@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Agent, ENDED, Semaphore, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
 import type { Config } from "./config.ts";
-import type { Kind, Prompts } from "./prompts.ts";
+import type { Prompts } from "./prompts.ts";
 import { one, reviewLines } from "./render.ts";
 import { assertChoice, type Driver } from "./session.ts";
 import { branchExists, repository } from "./workspace.ts";
@@ -32,14 +32,6 @@ export class Worq {
   private readonly check = (role: string): void => {
     assertChoice(this.deps.config.model(role), this.deps.driver.capabilities(role));
   };
-  /** Every role an agent may use: its own, the subagent it may delegate to, and every kind's reviewers. */
-  private roles(kind: Kind): string[] {
-    const reviewers = new Set<string>();
-    for (const other of this.deps.prompts.kinds.values()) {
-      for (const r of this.deps.prompts.reviewers(other.name)) reviewers.add(`reviewer.${r.name}`);
-    }
-    return [`agent.${kind.name}`, "subagent", ...reviewers];
-  }
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
   get(ref: string) {
@@ -54,7 +46,7 @@ export class Worq {
     if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}`);
     if (kind.access !== "write" && verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
     // Fail a misconfigured role before the repository, the ref or any worktree exists.
-    for (const role of this.roles(kind)) this.check(role);
+    this.check(`agent.${kind.name}`);
     const live = this.all().filter((a) => !a.ended).length;
     if (live >= config.limits.agents) throw new Block("at-capacity", `${live} agents are live (limits.agents ${config.limits.agents}); close or cancel one first`);
     const root = await repository(this.deps.cwd, AbortSignal.timeout(10_000));
