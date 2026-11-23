@@ -39,7 +39,7 @@ async function until(check: () => boolean, deadline = 2000) {
     await sleep(5);
   }
 }
-const degraded = (logs: string[]) => logs.filter((line) => line.includes("spec.system is composed, not isolated"));
+
 
 /**
  * The exported conformance suite. A new adapter is proven by passing it for MINIMAL and FULL:
@@ -48,12 +48,13 @@ const degraded = (logs: string[]) => logs.filter((line) => line.includes("spec.s
  * surface (abort count, image payloads, reported tool errors); the caller's make() must share it.
  */
 export async function adapterConformance(name: string, make: (caps: Capabilities) => Driver, options: FakeOptions = {}): Promise<void> {
-  for (const caps of [MINIMAL_CAPS, FULL_CAPS]) await run(name, caps, make, options);
+  await assert.rejects(open(make(MINIMAL_CAPS)).run("context"), /isolated context required/);
+  for (const caps of [{ ...MINIMAL_CAPS, context: FULL_CAPS.context }, FULL_CAPS]) await run(name, caps, make, options);
 }
 
 async function run(name: string, caps: Capabilities, make: (caps: Capabilities) => Driver, options: FakeOptions): Promise<void> {
   const aborts = () => options.aborts?.n ?? 0;
-  const isolated = caps.context.system === "replace" && !caps.context.ambientInstructions;
+
 
   // tools, images, argument validation, a thrown Block
   {
@@ -100,10 +101,10 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     assert.equal(aborts(), before + 1, `${name}: a budget abort stops the turn once`);
     assert.ok(Date.now() - started < 5000, `${name}: the stop is bounded`);
   }
-  // end of run — budget: a turn limit firing after a valid submission keeps the result
+  // end of run — budget: a pre-spent turn allowance admits no prompt
   {
     const c = open(make(caps), { turns: 0 });
-    assert.deepEqual(await c.run("submit"), { value: "one" }, `${name}: a spent turn budget does not discard a submission`);
+    await assert.rejects(c.run("submit"), /turn limit/);
   }
   // end of run — budget racing a settle
   {
@@ -115,7 +116,7 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
   // end of run — terminal: a spent budget never prompts again
   {
     const prompts = (options.prompts ??= []);
-    const c = open(make(caps), { turns: 0 });
+    const c = open(make(caps), { turns: 1 });
     assert.deepEqual(await c.run("submit"), { value: "one" });
     const after = prompts.length;
     await assert.rejects(c.run("submit"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
@@ -226,9 +227,7 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     const logs: string[] = [];
     const c = open(make(caps), { logs, system: "SYSTEM-X" });
     const result = await c.run("context");
-    if (isolated) assert.equal(result.value, "SYSTEM-X", `${name}: an isolating harness sees exactly spec.system`);
-    else assert.match(result.value, /AGENTS\.md/, `${name}: a degrading harness sees ambient instructions`);
-    assert.equal(degraded(logs).length, isolated ? 0 : 1, `${name}: inline with the context capability, one degradation line`);
+    assert.equal(result.value, "SYSTEM-X", `${name}: an isolating harness sees exactly spec.system`);
   }
 
   // identity

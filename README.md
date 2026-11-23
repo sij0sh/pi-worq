@@ -23,7 +23,7 @@ Choose the route by the ask:
 
 | Route | Spawn | Reviewers |
 |---|---|---|
-| small, plainly verifiable, no behaviour change | `execute`, `verify:false` | none; Main reads the diff |
+| small, plainly verifiable, no behaviour change | `execute`, `mode: "fast"` | normal verifier unless explicitly skipped |
 | open work with one visible route | `plan` → `execute` | four lenses, then the verifier |
 | user-facing behaviour, broad scope, a user-owned choice | `plan`, read it → `execute` | four lenses, then the verifier |
 
@@ -52,7 +52,7 @@ A digest carries the four most consequential findings per reviewer; `worq_list <
 
 | Tool | Params | Effect |
 |---|---|---|
-| `worq_spawn` | `kind`, `task`, `verify?` | start an agent; `@ref` in task attaches that agent's plan; `verify:false` (execute only) skips the verifier |
+| `worq_spawn` | `kind`, `task`, `verify?`, `mode?` | start an agent; `@ref` in task attaches that agent's plan; `verify:false` (execute only) skips the verifier |
 | `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
 | `worq_send` | `ref`, `text` | running → steer · waiting → answer · review-ready → next round |
 | `worq_cancel` | `ref` or `all` | close/cancel; kills subagents, reviewers, processes; removes worktree; keeps branch |
@@ -94,7 +94,7 @@ Adding a kind or reviewer = adding one Markdown file.
 }
 ```
 
-Model keys: `agent`, `agent.<kind>`, `subagent`, `reviewer`, `reviewer.<name>`. `models.<key>.harness` picks the backend (absent inherits the top-level `harness`, absent there means `pi`); then `model`, `fallbackModel` and `thinking` each inherit **independently**: the role's own layer, its profile layer, `harnesses.<resolved harness>`, then the top level. `harnesses.<h>.model` therefore shadows the top-level `model` for every role resolved to that harness — do not set both.
+Model keys: `agent`, `agent.<kind>`, `subagent`, `subagent.<name>`, `reviewer`, `reviewer.<name>`. `models.<key>.harness` picks the backend (absent inherits the top-level `harness`, absent there means `pi`); then `model`, `fallbackModel` and `thinking` each inherit **independently**: the role's own layer, its profile layer, `harnesses.<resolved harness>`, then the top level. `harnesses.<h>.model` therefore shadows the top-level `model` for every role resolved to that harness — do not set both.
 
 One behaviour change versus 0.0.8: a more specific layer that sets only one field no longer discards an inherited field, so `models.reviewer.model` now reaches `reviewer.intent`. A missing model is not an error: the role uses Main's model.
 
@@ -119,3 +119,11 @@ npm run check && npm test
 ```
 
 Use execute directly for simple reversible work. For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.
+
+### Routes, checkpoints and trusted Pi resources
+
+Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` for costly failures and independent, decision-changing questions (`worq spawn execute --mode fast "task"`). Neither changes models, thinking, tools, caps or the required roster. The optional spawn field `reason` records why Main chose the route. Omit mode for the default. `worq list <ref>` shows route, review policy, cumulative turns and role settings with JSON sources.
+
+`limits.runTurns` (default 1000) covers the worker, retries, PQs and review roster across rounds. Near exhaustion Main sees a checkpoint with recent evidence. Only if the operator configured `limits.continuationTurns` (default 0) may Main use `worq send REF '/continue N'` at a checkpoint to allocate additional turns before exhaustion. Between requests a depleted run with available headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. The pool is cumulative. No grant raises a per-session turn/time limit, round cap, service quota or concurrency limit.
+
+In `pi-worq.json`, `models` entries may specify `skills`, `instructions` (e.g. AGENTS.md) and `extensions`. Each is an array of `{ "path": "relative/file", "sha256": "<64 lowercase hex digits>" }` under `<agentDir>/worq-resources/`, outside Git checkouts. Exact role lists replace corresponding family lists; `[]` removes the grant. No parent-role grants transfer. Configure `models["subagent.evidence"]` with its own model and skills, then delegate with `name: "evidence"`. Plain `delegate` selects `subagent`. `reviewer.intent` resolves independently. Skills and instructions contribute pinned text, not permissions. Executables require `approveExecutables: true` on the selected role and must be trusted standalone JavaScript modules: approval runs operator code in the Pi process, not a sandbox. Do not approve scripts that import candidate code. No candidate discovery is enabled.

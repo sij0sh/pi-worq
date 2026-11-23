@@ -19,14 +19,15 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
       if (turn.text.includes('"task"')) {
         assert.match(await turn.tool("read_file", { path: "app.py" }), /hello/);
         assert.match(await turn.tool("write_file", { path: "x", content: "y" }), /No tool/);
-        assert.match(await turn.tool("delegate", { question: "Where is the greeting printed?", why: "decides the edit" }), /Delegated d1/);
+        assert.match(await turn.tool("delegate", { name: "evidence", question: "Where is the greeting printed?", why: "decides the edit" }), /Delegated d1/);
         assert.match(await turn.tool("submit", planSubmission), /still open/);
         return; // end turn: wait for the PQ
       }
       if (turn.text.startsWith("[PQ d1]")) { await turn.tool("submit", planSubmission); return; }
       if (turn.text.includes("another round")) { await turn.tool("submit", { ...planSubmission, summary: "Revised: include newline" }); return; }
     },
-    subagent: async (turn) => {
+    "subagent.evidence": async (turn) => {
+      assert.equal(turn.spec.name, "subagent.evidence");
       assert.match(turn.text, /Where is the greeting printed/);
       assert.deepEqual(turn.spec.tools.map((x) => x.name).sort(), ["answer", "list_files", "read_file", "search"]);
       await turn.tool("answer", { answer: "app.py:1", basis: "observed" });
@@ -195,4 +196,40 @@ test("limits, refusals and failures", async (t) => {
   await assert.rejects(worq.spawn("plan", "Four"), /at-capacity|agents are live/);
   await worq.cancel("all");
   assert.ok([d, e].every((x) => x.ended));
+});
+
+test("run turn checkpoints share the roster budget; fast does not skip reviewers", async (t) => {
+  for (const approve of [false, true]) {
+    const { dir, root, state } = await repo();
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { worq, next } = setup(root, state, {
+      "agent.plan": async turn => { assert.match(turn.text, /"route": "fast"/); await gate; await turn.tool("submit", planSubmission); },
+      reviewer: turn => turn.tool("report", pass).then(() => {}),
+    }, { checkpointSeconds: 1, runTurns: 1, continuationTurns: 4 });
+    const agent = await worq.spawn("plan", "plan it", true, "fast");
+    await next("checkpoint", agent.ref);
+    assert.throws(() => worq.send(agent.ref, "/continue 5"));
+    release();
+    if (approve) { await next("checkpoint", agent.ref, 2); worq.send(agent.ref, "/continue 4"); }
+    if (approve) { await next("review-ready", agent.ref); assert.equal(agent.reviews.length, 4); await worq.cancel(agent.ref); }
+    else assert.match((await next("failed", agent.ref)).text, /Cumulative turn allowance exhausted/);
+  }
+});
+
+test("cancel retains uncommitted work when git cannot pin", async t => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { worq, next } = setup(root, state, { "agent.execute": async turn => {
+    const cwd = turn.spec.cwd;
+    await writeFile(join(cwd, "unfinished"), "recover me");
+    const lock = execFileSync("git", ["rev-parse", "--git-path", "index.lock"], { cwd, encoding: "utf8" }).trim();
+    await writeFile(lock, "held");
+    await turn.tool("ask_main", { question: "May I proceed?" });
+  } });
+  const agent = await worq.spawn("execute", "recoverable work");
+  await next("ask", agent.ref); await worq.cancel(agent.ref);
+  assert.equal(await readFile(join(agent.work!, "unfinished"), "utf8"), "recover me");
+  assert.match(worq.list(agent.ref), /Worktree retained/);
 });

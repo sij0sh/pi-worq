@@ -9,13 +9,16 @@ const int = (minimum: number, maximum: number) => Type.Optional(Type.Integer({ m
 const modelRef = Type.Optional(Type.String({ maxLength: 200 }));
 const name = Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9-]*$" });
 const thinking = Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z]+$" }));
-const choice = obj({ harness: Type.Optional(name), model: modelRef, fallbackModel: modelRef, thinking });
+const pin = obj({ path: Type.String({ minLength: 1 }), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }) });
+const pins = Type.Optional(Type.Array(pin, { maxItems: 32 }));
+const choice = obj({ harness: Type.Optional(name), model: modelRef, fallbackModel: modelRef, thinking, skills: pins, instructions: pins, extensions: pins, approveExecutables: Type.Optional(Type.Boolean()) });
 const harnessBlock = obj({ model: modelRef, fallbackModel: modelRef, thinking });
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
 const Limits = obj({
   agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), rounds: int(1, 20), asks: int(0, 20),
   agentTurns: int(1, 400), subagentTurns: int(1, 100), reviewerTurns: int(1, 200),
   agentMinutes: int(1, 600), subagentMinutes: int(1, 120), reviewerMinutes: int(1, 240), askMinutes: int(1, 1440),
+  checkpointSeconds: int(1, 120), runTurns: int(1, 10000), continuationTurns: int(0, 10000),
   services: int(0, 8),
 });
 const ConfigSchema = obj({
@@ -24,7 +27,7 @@ const ConfigSchema = obj({
   fallbackModel: modelRef,
   /** Per-harness defaults: the second step of the resolution walk. */
   harnesses: Type.Optional(Type.Record(name, harnessBlock)),
-  /** Keys: agent, agent.<kind>, subagent, reviewer, reviewer.<name>. Each field inherits independently. */
+  /** Keys: agent, agent.<kind>, subagent, subagent.<name>, reviewer, reviewer.<name>. Each field inherits independently. */
   models: Type.Optional(Type.Record(Type.String({ pattern: "^(agent|subagent|reviewer)(\\.[a-z][a-z0-9-]*)?$" }), choice)),
   limits: Type.Optional(Limits),
 });
@@ -32,7 +35,7 @@ export const DEFAULT_LIMITS = {
   agents: 4, subagents: 6, parallel: 4, rounds: 3, asks: 3,
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
   agentMinutes: 30, subagentMinutes: 5, reviewerMinutes: 10, askMinutes: 15,
-  services: 2,
+  checkpointSeconds: 15, runTurns: 1000, continuationTurns: 0, services: 2,
 } satisfies Required<Static<typeof Limits>>;
 export type Limits = typeof DEFAULT_LIMITS;
 
@@ -42,7 +45,8 @@ export interface ModelChoice {
   model?: string;
   fallbackModel?: string;
   thinking?: string;
-  from: Partial<Record<"harness" | "model" | "fallbackModel" | "thinking", string>>;
+  resources?: Partial<Record<"skills" | "instructions" | "extensions", Static<typeof pin>[]>>;
+  from: Partial<Record<"harness" | "model" | "fallbackModel" | "thinking" | "skills" | "instructions" | "extensions", string>>;
 }
 export interface Config { path: string; limits: Limits; model(name: string): ModelChoice }
 
@@ -56,7 +60,7 @@ export function loadConfig(agentDir: string, harnesses: string[] = KNOWN_HARNESS
   }
   const data = json(raw, path);
   const legacy = data && typeof data === "object" ? ["agents", "scq"].filter((key) => key in data) : [];
-  if (legacy.length) throw new Block("config", `${path}: ${legacy.join(" and ")} ${legacy.length > 1 ? "are" : "is"} from the old Worq format. Move model choices to "models" (keys agent, agent.<kind>, subagent, reviewer, reviewer.<name>) or delete ${legacy.length > 1 ? "them" : "it"}.`);
+  if (legacy.length) throw new Block("config", `${path}: ${legacy.join(" and ")} ${legacy.length > 1 ? "are" : "is"} from the old Worq format. Move model choices to "models" (keys agent, agent.<kind>, subagent, subagent.<name>, reviewer, reviewer.<name>) or delete ${legacy.length > 1 ? "them" : "it"}.`);
   const config = parse(ConfigSchema, data, path);
   const top = config as { harness?: string; model?: string; fallbackModel?: string };
   const models = config.models ?? {};
@@ -99,6 +103,7 @@ export function loadConfig(agentDir: string, harnesses: string[] = KNOWN_HARNESS
     path,
     limits: { ...DEFAULT_LIMITS, ...config.limits },
     model(role) {
+      if (role.startsWith("subagent.") && !Object.hasOwn(models, role)) throw new Block("config", `Unknown named child ${role}`);
       const [profile] = role.split(".");
       const layers: { path: string; layer: typeof models[string] }[] = [];
       if (models[role]) layers.push({ path: `/models/${role}`, layer: models[role] });
@@ -132,7 +137,14 @@ export function loadConfig(agentDir: string, harnesses: string[] = KNOWN_HARNESS
       if (modelFrom) from.model = modelFrom;
       if (fallbackFrom) from.fallbackModel = fallbackFrom;
       if (thinkingFrom) from.thinking = thinkingFrom;
-      return { harness, model, fallbackModel, thinking: level, from };
+      const resources: ModelChoice["resources"] = {};
+      for (const key of ["skills", "instructions", "extensions"] as const) {
+        const source = layers.find(e => (!e.layer.harness || e.layer.harness === harness) && e.layer[key] !== undefined);
+        if (!source) continue;
+        if (key === "extensions" && source.layer.extensions?.length && !models[role]?.approveExecutables) throw new Block("config", `Executable approval required on ${role}`);
+        resources[key] = source.layer[key]; from[key] = `${source.path}/${key}`;
+      }
+      return { ...(Object.keys(resources).length ? { resources } : {}), harness, model, fallbackModel, thinking: level, from };
     },
   };
 }

@@ -1,0 +1,39 @@
+import { createHash } from "node:crypto";
+import { readFile, realpath, mkdtemp, rm, writeFile, lstat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, isAbsolute, resolve } from "node:path";
+import { discoverAndLoadExtensions, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { Block } from "./contracts.ts";
+import type { ModelChoice } from "./config.ts";
+
+export async function applyResources(loader: ResourceLoader, prompt: string, configPath: string, selection: ModelChoice["resources"]) {
+  const context: string[] = [];
+  const scripts: Buffer[] = [];
+  for (const key of ["skills", "instructions", "extensions"] as const) {
+    for (const pin of selection?.[key] ?? []) {
+      const root = join(await realpath(dirname(configPath)), "worq-resources");
+      const path = await realpath(resolve(root, pin.path));
+      const rel = relative(root, path);
+      if (isAbsolute(pin.path) || rel.startsWith("../") || rel === ".." || isAbsolute(rel)) throw new Block("config", `Untrusted resource: ${pin.path}`);
+      for (let dir = dirname(path); ; dir = dirname(dir)) {
+        try { await lstat(join(dir, ".git")); throw new Block("config", `Repository resource: ${path}`); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+        if (dir === dirname(dir)) break;
+      }
+      if (!(await lstat(path)).isFile()) throw new Block("config", `Not a regular resource file: ${path}`);
+      const bytes = await readFile(path);
+      if (createHash("sha256").update(bytes).digest("hex") !== pin.sha256) throw new Block("config", `Changed resource: ${path}`);
+      if (key === "extensions") scripts.push(bytes); else context.push(`Operator ${key}: ${pin.path} (context, not authority)\n${bytes.toString("utf8")}`);
+    }
+  }
+  if (context.length) loader.getSystemPrompt = () => [prompt, ...context].join("\n\n");
+  if (scripts.length) {
+    // Pi discovers extensions relative to both arguments; neither may be an ambient directory.
+    const dir = await mkdtemp(join(tmpdir(), "worq-ext-"));
+    try {
+      const paths = await Promise.all(scripts.map(async (bytes, i) => { const path = join(dir, `${i}.mjs`); await writeFile(path, bytes); return path; }));
+      const result = await discoverAndLoadExtensions(paths, dir, dir);
+      if (result.errors.length || result.extensions.length !== paths.length) throw new Block("config", "Approved extensions could not load");
+      loader.getExtensions = () => result;
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+}

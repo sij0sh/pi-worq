@@ -10,7 +10,7 @@ const usage = `Usage: worq [--pid N] <command>
   sessions                    Pi sessions with Worq loaded
   list [ref]                  agents, or one agent in full
   log <ref> [-f]              agent activity (-f follows)
-  spawn <kind> <task>         start an agent
+  spawn <kind> [--mode fast|thorough] <task>         start an agent
   send <ref> <text>           steer, answer, or start the next round
   cancel <ref|all>            close or cancel; branch kept`;
 const state = resolve(process.env.WORQ_STATE_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "pi-worq"));
@@ -46,7 +46,10 @@ async function main(argv) {
   const print = async (op, args) => console.log((await call(pid, op, args)).text);
   switch (command) {
     case "list": return print("list", first ? { ref: first } : {});
-    case "spawn": return print("spawn", { kind: first, task: rest.join(" ") });
+    case "spawn": {
+      const mode = rest[0] === "--mode" ? rest.splice(0, 2)[1] : undefined;
+      return print("spawn", { kind: first, mode, task: rest.join(" ") });
+    }
     case "send": return print("send", { ref: first, text: rest.join(" ") });
     case "cancel": return print("cancel", { ref: first });
     case "log": {

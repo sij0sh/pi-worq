@@ -1,3 +1,4 @@
+import { applyResources } from "./resources.ts";
 import {
   createAgentSession, createExtensionRuntime, defineTool, SessionManager, SettingsManager,
   type ExtensionContext, type ResourceLoader,
@@ -61,7 +62,7 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
   const capabilities = (name: string): Capabilities => {
     const { model } = effective(name);
     return {
-      fallback: true,
+      resources: ["skills", "instructions", "extensions"], fallback: true,
       thinking: thinkingLevels(model),
       context: { system: "replace", ambientInstructions: false },
     };
@@ -73,8 +74,11 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
     if (!model) throw new Block("model", "Select a Pi model or set model in pi-worq.json");
     if (fallback && fallback.provider === model.provider && fallback.id === model.id) fallback = undefined;
     const tools = spec.tools.map(sdkTool);
+    const loader = resources(spec.system);
+    await applyResources(loader, spec.system, config.path, choice.resources);
+    spec.log(`Role ${spec.name}: ${model.provider}/${model.id}, thinking ${level}; sources ${JSON.stringify(choice.from)}`);
     const { session } = await createAgentSession({
-      cwd: spec.cwd, model, thinkingLevel: level, resourceLoader: resources(spec.system),
+      cwd: spec.cwd, model, thinkingLevel: level, resourceLoader: loader,
       tools: tools.map((t) => t.name), customTools: tools,
       sessionManager: SessionManager.inMemory(spec.cwd),
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),

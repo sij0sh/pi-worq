@@ -47,17 +47,11 @@ The core synthesizes no `unknown` review for a still-streaming or aborted handle
 |---|---|---|
 | `fallback: boolean` | `Handle.fallback()` can switch to the configured `fallbackModel` once. | `fallback: false` plus a configured `fallbackModel` raises `Block("capability")` at spawn and before each `pq`/`reviewer`. |
 | `thinking: readonly string[]` | Levels the role's chosen model accepts. `["off"]` for a non-reasoning model — never `[]`, which means the harness has no level control at all. | A configured `thinking` on `thinking: []` raises `Block("capability")`; a level outside a non-empty list does too. |
-| `context: { system: "replace" \| "append"; ambientInstructions: boolean }` | Whether the harness isolates Worq's system prompt. | Any value other than `replace`/`false` logs exactly one degradation line per session and proceeds. |
+| `context: { system: "replace" \| "append"; ambientInstructions: boolean }` | Whether the harness isolates Worq's system prompt. | Any value other than `replace`/`false` refuses the session before open. |
 
 `thinking` is derived from the effective model — `resolve(choice.model) ?? ctx.model` — so a configured level is validated even when no model is configured. Pi derives the list the way `getSupportedThinkingLevels` does: the five core levels minus those `thinkingLevelMap` maps to `null`, plus `xhigh`/`max` only where the map defines them.
 
-`Conversation.open` reads `driver.capabilities(spec.name)` exactly once. When `context` is not isolated it logs one line:
-
-```
-harness appends to its own system prompt; spec.system is composed, not isolated
-```
-
-Nothing else in the core reads `context`. A degrading harness is allowed, not rejected; the guarantee is visible in the log instead of enforced.
+Role admission and `Conversation.open` require isolated context. Nonempty requested resource lists also require advertised adapter support.
 
 ## Turn accounting
 
@@ -94,7 +88,7 @@ Exactly five, all `Block`:
 export async function adapterConformance(name: string, make: (caps: Capabilities) => Driver): Promise<void>;
 ```
 
-The suite runs MINIMAL (no fallback, `thinking: []`, append/ambient) and FULL (fallback, full level list, replace/isolated); both must pass. MINIMAL proves the required capability set is sufficient and that denials are honest — a configured fallback or level on MINIMAL is `Block("capability")` naming the config path.
+The suite runs MINIMAL (no fallback, `thinking: []`, append/ambient) and FULL (fallback, full level list, replace/isolated); ambient context must be rejected; remaining checks require isolation. MINIMAL proves the required capability set is sufficient and that denials are honest — a configured fallback or level on MINIMAL is `Block("capability")` naming the config path.
 
 The suite is **Conversation-level**: a `Driver` plus an `AbortSignal`, no workspace, no `Agent`. Agent-level behaviour (review-ready, the merge line, the round loop, the reviewer-throw `unknown` record, every worktree behaviour) belongs to `test/worq.test.ts` and is covered once, there. Role→adapter routing, unknown harness and `capabilities` passthrough are asserted against `createDriver` in the same conformance file.
 

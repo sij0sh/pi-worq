@@ -136,7 +136,7 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq } = setup(root, state, {});
   const table = ops(["plan", "execute"]);
-  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["kind", "task", "verify"]);
+  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["kind", "mode", "reason", "task", "verify"]);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", task: "x" }), /kind/);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: "no" }), /verify/);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: false }), /verify:false applies to execute only/);

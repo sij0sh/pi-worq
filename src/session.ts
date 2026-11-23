@@ -21,6 +21,7 @@ export interface Capabilities {
   fallback: boolean;
   /** Thinking levels the chosen model accepts; [] means the harness has no level control at all. */
   thinking: readonly string[];
+  resources?: readonly ("skills" | "instructions" | "extensions")[];
   context: { system: "replace" | "append"; ambientInstructions: boolean };
 }
 
@@ -58,6 +59,9 @@ export type Driver = ((spec: Spec) => Promise<Handle>) & { capabilities(name: st
  * the config path of the offending field; `capabilities` itself never judges.
  */
 export function assertChoice(choice: ModelChoice, caps: Capabilities): void {
+  for (const key of ["skills", "instructions", "extensions"] as const) {
+    if (choice.resources?.[key]?.length && !caps.resources?.includes(key)) throw new Block("capability", `${choice.from[key]}: unsupported resource ${key}`);
+  }
   if (choice.fallbackModel !== undefined && !caps.fallback) {
     throw new Block("capability", `${choice.from.fallbackModel ?? "fallbackModel"}: ${choice.harness} has no fallback model`);
   }
@@ -71,7 +75,7 @@ export function assertChoice(choice: ModelChoice, caps: Capabilities): void {
 
 export const NUDGE = "You ended your turn without calling your finish tool. Re-ask your recursive question: if consequential work remains within your authority, do it; otherwise call the finish tool now.";
 const CONTINUE = "The previous model request failed. Continue the same assignment from the conversation and tool results so far.";
-const DEGRADED = "harness appends to its own system prompt; spec.system is composed, not isolated";
+
 
 export interface ConversationOptions<T extends TSchema> {
   driver: Driver;
@@ -81,6 +85,9 @@ export interface ConversationOptions<T extends TSchema> {
   minutes: number;
   signal: AbortSignal;
   /** Open work (delegations) the session must wait for before it may stop. */
+  beforeAttempt?: (signal: AbortSignal) => Promise<void>;
+  chargeTurn?: () => void;
+  warning?: (message: string) => void;
   pending?: () => number;
 }
 
@@ -97,14 +104,17 @@ export class Conversation<T extends TSchema> {
   private readonly inbox: string[] = [];
   private wake?: () => void;
   private turns = 0;
+  private prepaid = false;
   private readonly budget = new AbortController();
   readonly signal: AbortSignal;
   private timer?: ReturnType<typeof setTimeout>;
-  private remaining = 0;
+  private remaining: number;
+  private softTimer?: ReturnType<typeof setTimeout>;
   private since = 0;
   private readonly options: ConversationOptions<T>;
 
   constructor(options: ConversationOptions<T>) {
+    this.remaining = options.minutes * 60_000;
     this.options = options;
     this.signal = AbortSignal.any([options.signal, this.budget.signal]);
   }
@@ -114,6 +124,7 @@ export class Conversation<T extends TSchema> {
     const { name, description, schema, validate } = this.options.finish;
     return tool(name, `${description} Ends your turn.`, schema, (params) => {
       try {
+        this.signal.throwIfAborted();
         const value = parse(schema, params, name);
         validate?.(value);
         this.result = value;
@@ -125,16 +136,29 @@ export class Conversation<T extends TSchema> {
       }
     });
   }
+  private charge() {
+    const { spec, turns, warning, chargeTurn } = this.options;
+    if (this.turns >= turns) {
+      this.budget.abort(new Block("turn-limit", `${spec.name} reached its turn limit (${turns})`));
+      return;
+    }
+    chargeTurn?.();
+    this.turns++;
+    if (turns - this.turns === 1) warning?.(`${spec.name}: one further turn remains; summarize evidence and unfinished work`);
+  }
   private async open() {
     if (this.handle) return this.handle;
-    const { spec, turns, driver } = this.options;
+    const { spec, driver } = this.options;
     const caps = driver.capabilities(spec.name);
-    if (caps.context.system !== "replace" || caps.context.ambientInstructions) spec.log(DEGRADED);
+    if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     this.handle = await driver({
       ...spec,
       id: this.id,
       tools: [this.finishTool(), ...spec.tools],
-      turn: () => { if (++this.turns > turns) this.budget.abort(new Block("turn-limit", `${spec.name} reached its turn limit (${turns})`)); },
+      turn: () => {
+        if (!this.prepaid) this.charge();
+        this.prepaid = false;
+      },
       toolError: (name, message) => { if (name === this.options.finish.name) this.rejected = message.slice(0, 800); },
     });
     return this.handle;
@@ -151,12 +175,15 @@ export class Conversation<T extends TSchema> {
   }
   poke() { const wake = this.wake; this.wake = undefined; wake?.(); }
   /** Pause the time budget (e.g. while Main answers). */
-  pause() { clearTimeout(this.timer); this.timer = undefined; this.remaining = Math.max(1, this.remaining - (Date.now() - this.since)); }
+  pause() { clearTimeout(this.softTimer); if (!this.timer) return; clearTimeout(this.timer); this.timer = undefined; this.remaining = Math.max(1, this.remaining - (Date.now() - this.since)); }
   resume() {
     this.since = Date.now();
     clearTimeout(this.timer);
     this.timer = setTimeout(() => this.budget.abort(new Block("time-limit", `${this.options.spec.name} ran out of time`)), this.remaining);
     this.timer.unref?.();
+    clearTimeout(this.softTimer);
+    this.softTimer = setTimeout(() => this.options.warning?.(`${this.options.spec.name}: about ${Math.ceil(this.remaining / 10000)} seconds remain; summarize unfinished work`), this.remaining * 0.9);
+    this.softTimer.unref?.();
   }
 
   async run(first: string): Promise<Static<T>> {
@@ -165,7 +192,7 @@ export class Conversation<T extends TSchema> {
     caller.throwIfAborted();                // a caller abort never prompts
     this.budget.signal.throwIfAborted();    // a spent budget is terminal: no prompt
     const gate = this.signal;
-    this.remaining = this.options.minutes * 60_000;
+
     this.resume();
     const aborted = new Promise<never>((_, reject) => {
       const fail = () => reject(gate.reason);
@@ -180,6 +207,11 @@ export class Conversation<T extends TSchema> {
       let nudged = false;
       let corrections = 0;
       for (;;) {
+        if (this.turns < this.options.turns) await this.options.beforeAttempt?.(gate);
+        gate.throwIfAborted();
+        this.charge(); // Count attempts even when preflight fails before turn_start.
+        gate.throwIfAborted();
+        this.prepaid = true;
         const turn = handle.prompt(next);
         void turn.catch(() => {});        // an abandoned promise can still reject
         const failed = await Promise.race([turn, aborted]);
@@ -221,8 +253,7 @@ export class Conversation<T extends TSchema> {
       if (this.result !== undefined) return this.result;
       throw error;
     } finally {
-      clearTimeout(this.timer);
-      this.timer = undefined;
+      this.pause();
     }
   }
   /** Abort the live turn, bounded to 5s. */
@@ -233,5 +264,5 @@ export class Conversation<T extends TSchema> {
     await Promise.race([handle.abort().catch(() => {}), new Promise<void>((resolve) => { timer = setTimeout(resolve, 5000); })]);
     clearTimeout(timer);
   }
-  dispose() { clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
+  dispose() { clearTimeout(this.softTimer); clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
 }

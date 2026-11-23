@@ -20,7 +20,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "spawn",
     description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit unless the spawn sets verify:false.",
     guidelines: [
-      "Pick the route by the ask: under ~2 files, plainly verifiable, no behaviour-surface change → worq_spawn(\"execute\", task, verify:false) (edit directly only when the user's ask says so); open work with one visible route → worq_spawn(\"plan\") then worq_spawn(\"execute\", \"<task> @<plan-ref>\"); more than ~8 files, user-facing behaviour, or a user-owned choice → plan first, read the plan, then execute.",
+      "Simple, bounded work: execute directly with mode fast. For complex or ambiguous work use mode thorough and delegate decision-changing questions; plan first only when a plan changes the decision. Mode never changes the review roster or explicit settings.",
       "One plan round is the norm; a second only for a finding that changes criteria or scope and cannot be folded into the execute task — never to collect more findings. Put the user's ask in the execute task verbatim: Worq agents cannot see this conversation. Do not poll: [worq <ref>] messages arrive when an agent asks, fails or is review-ready.",
     ],
   },

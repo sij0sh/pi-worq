@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
@@ -13,9 +14,9 @@ import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot,
 
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed";
 export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
-export interface AgentEvent { type: "review-ready" | "ask" | "failed"; ref: string; text: string }
+export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "failed"; ref: string; text: string }
 export interface Attachment { ref: string; path?: string; text: string }
-export interface Delegation { id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
+export interface Delegation { role?: string; id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
 
 /** Bounded concurrency shared by subagents and reviewers. */
@@ -61,6 +62,8 @@ export class Agent {
   readonly task: string;
   readonly attachments: Attachment[];
   readonly verify: boolean;
+  readonly reason?: string;
+  readonly mode?: "fast" | "thorough";
   readonly branch?: string;
   readonly owner = process.pid;
   state: AgentState = "starting";
@@ -85,16 +88,50 @@ export class Agent {
   private next?: { resolve(text: string): void; reject(error: unknown): void };
   private closing = false;
   private asks = 0;
+  private spent = 0;
+  private grant = 0;
+  private warned = false;
+  private warning = (message: string) => {
+    this.log(message);
+    this.deps.notify({ type: "checkpoint", ref: this.ref, text: `[worq ${this.ref}] ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
+  };
+  private readonly checkpoints = new Set<() => void>();
+  private beforeAttempt = async (signal: AbortSignal) => {
+    const { runTurns, continuationTurns, checkpointSeconds } = this.deps.limits;
+    if (this.spent < runTurns + this.grant || this.grant >= continuationTurns) return;
+    // Only wait between requests. A streaming Pi turn cannot be suspended safely.
+    this.warned = true;
+    this.warning(`No turns left. Main may approve up to ${continuationTurns - this.grant} more via /continue N within ${checkpointSeconds}s.`);
+    await new Promise<void>(resolve => {
+      const wake = () => { clearTimeout(timer); signal.removeEventListener("abort", wake); this.checkpoints.delete(wake); resolve(); };
+      const timer = setTimeout(wake, checkpointSeconds * 1000);
+      this.checkpoints.add(wake);
+      signal.addEventListener("abort", wake, { once: true });
+      if (signal.aborted || this.spent < runTurns + this.grant) wake();
+    });
+  };
+  private chargeTurn = () => {
+    const limits = this.deps.limits;
+    const left = limits.runTurns + this.grant - this.spent - 1;
+    if (left < 0) this.controller.abort(new Block("run-limit", "Cumulative turn allowance exhausted"));
+    else this.spent++;
+    if (left >= 0 && left <= Math.max(1, Math.floor(limits.runTurns / 10)) && !this.warned) {
+      this.warned = true;
+      this.warning(`${left} further run turns authorized; ${limits.continuationTurns - this.grant} available for explicit approval via /continue N.`);
+    }
+  };
   private readonly controller = new AbortController();
   private readonly deps: AgentDeps;
   private start!: () => void;
 
-  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean }) {
+  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
     this.deps = deps;
     this.ref = input.ref;
     this.kind = input.kind;
     this.task = input.task;
     this.attachments = input.attachments;
+    this.mode = input.mode;
+    this.reason = input.reason;
     this.verify = input.verify ?? true;
     if (input.kind.access === "write") this.branch = `worq/${input.ref}`;
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
@@ -123,7 +160,8 @@ export class Agent {
   view() {
     return {
       ref: this.ref, id: this.id, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
-      branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
+      worktree: this.work, branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       attachments: this.attachments.map((a) => a.ref), delegations: this.delegations.map(({ id, question, state, error }) => ({ id, question, state, error })),
       reviews: this.reviews, started: this.started, finished: this.finished,
     };
@@ -132,6 +170,14 @@ export class Agent {
   /** Main's one talk verb: steer, answer, or start the next round, depending on state. */
   send(textIn: string): string {
     const message = textIn.trim();
+    if (message.startsWith("/continue")) {
+      const count = Number(/^\/continue ([1-9]\d*)$/.exec(message)?.[1]);
+      if (this.ended || !this.warned || !Number.isSafeInteger(count) || count > this.deps.limits.continuationTurns - this.grant) throw new Block("run-limit", "No such checkpoint allowance");
+      this.grant += count; this.warned = false;
+      for (const wake of this.checkpoints) wake();
+      this.log(`Main approved ${count} more run turns`);
+      return `Cumulative allowance ${this.deps.limits.runTurns + this.grant}`;
+    }
     if (!message) throw new Block("empty", "Nothing to send");
     this.log(`← main: ${message}`);
     switch (this.state) {
@@ -183,7 +229,7 @@ export class Agent {
       }
       const write = this.kind.access === "write";
       this.conversation = new Conversation({
-        driver, signal, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
+        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
         spec: { profile: "agent", name: `agent.${this.kind.name}`, cwd, tools, system: `${prompts.protocol}\n\n${this.kind.prompt}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
@@ -191,7 +237,7 @@ export class Agent {
           validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "running").map((d) => d.id).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
-      let message = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      let message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
       for (;;) {
         this.round++;
         this.set("running");
@@ -204,9 +250,9 @@ export class Agent {
         this.next = undefined;
       }
     } catch (error) {
-      if (signal.aborted) this.state = this.closing ? "closed" : "cancelled";
+      if (signal.aborted && signal.reason?.code !== "run-limit") this.state = this.closing ? "closed" : "cancelled";
       else {
-        this.error = errorText(error);
+        this.error = errorText(signal.reason ?? error);
         this.state = "failed";
       }
     } finally {
@@ -216,9 +262,14 @@ export class Agent {
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
       if (this.work && this.project) {
-        // Keep any progress on the branch; the worktree goes, the branch stays.
-        try { this.candidate = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
-          await removeWorktree(this.project.root, this.work); this.work = undefined; } catch (error) { this.log(`Worktree retained at ${this.work}: ${errorText(error)}`); }
+        // Never remove the only copy of interrupted work.
+        try {
+          this.candidate = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
+          await removeWorktree(this.project.root, this.work);
+          this.work = undefined;
+        } catch (error) {
+          this.log(`Worktree retained at ${this.work}: ${errorText(error)}`);
+        }
       }
       this.finished = Date.now();
       this.log(`state ${this.state}`);
@@ -231,26 +282,26 @@ export class Agent {
   private delegateTool(cwd: string): Tool {
     return tool("delegate",
       "Delegate one probing question (PQ) to a fresh read-only subagent. Fire and forget: returns an id now; the answer arrives later as a [PQ dN] message. Use only for independent, bounded questions answerable by reading.",
-      obj({ question: text(800), why: text(400) }), ({ question, why }) => {
+      obj({ question: text(800), why: text(400), name: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" })) }), ({ question, why, name }) => {
         if (this.delegations.length >= this.deps.limits.subagents) throw new Block("pq-limit", `PQ limit (${this.deps.limits.subagents}) reached; investigate directly`);
-        const d: Delegation = { id: `d${this.delegations.length + 1}`, question, why, state: "running" };
+        const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "running" };
         this.delegations.push(d);
         this.log(`→ PQ ${d.id}: ${question}`);
-        void this.pq(d, cwd);
+        void this.pq(d, cwd, name ? `subagent.${name}` : "subagent");
         return `Delegated ${d.id}. Keep working, or end your turn to wait; the answer arrives as a [PQ ${d.id}] message.`;
       });
   }
-  private async pq(d: Delegation, cwd: string) {
+  private async pq(d: Delegation, cwd: string, role: string) {
     const signal = this.signal;
     const { driver, prompts, limits, semaphore } = this.deps;
     let conversation: Conversation<typeof PqAnswer> | undefined;
     let release: (() => void) | undefined;
     try {
-      this.deps.check("subagent");
+      this.deps.check(role);
       release = await semaphore.acquire(signal);
       conversation = new Conversation({
-        driver, signal, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { profile: "subagent", name: "subagent", cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`  ${d.id} ${line}`) },
+        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
+        spec: { profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`  ${d.id} ${line}`) },
         finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
       });
       d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
@@ -315,7 +366,7 @@ export class Agent {
     this.reviews = await Promise.all(roster.map((r) => this.reviewer(r.name, r.prompt)));
     signal.throwIfAborted();
     this.set("review-ready");
-    this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() });
+    this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() + `\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.` });
   }
   private async reviewer(name: string, prompt: string): Promise<ReviewRecord> {
     const { driver, prompts, limits, root, semaphore } = this.deps;
@@ -336,7 +387,7 @@ export class Agent {
         box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(this.dir!, "artifacts", `r${this.round}-${name}`), services: limits.services } });
       }
       conversation = new Conversation({
-        driver, signal, turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
+        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
         spec: { profile: "reviewer", name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
         finish: { name: "report", description: "Return your independent review.", schema: ReviewReport },
       });

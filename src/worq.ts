@@ -30,7 +30,9 @@ export class Worq {
   }
   /** Judge one role's resolved choice against what its harness can do. Fails before any work. */
   private readonly check = (role: string): void => {
-    assertChoice(this.deps.config.model(role), this.deps.driver.capabilities(role));
+    const caps = this.deps.driver.capabilities(role);
+    assertChoice(this.deps.config.model(role), caps);
+    if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${role}: isolated context required`);
   };
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
@@ -40,7 +42,7 @@ export class Worq {
     return agent;
   }
 
-  async spawn(kindName: string, task: string, verify = true): Promise<Agent> {
+  async spawn(kindName: string, task: string, verify = true, mode?: "fast" | "thorough", reason?: string): Promise<Agent> {
     const { prompts, config } = this.deps;
     const kind = prompts.kinds.get(kindName);
     if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}`);
@@ -58,7 +60,7 @@ export class Worq {
     }
     if (!ref) throw new Block("ref", "Could not allocate a free agent ref");
     const agent = new Agent({ driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
-      { ref, kind, task, attachments, verify });
+      { ref, kind, task, attachments, verify, mode, reason });
     this.agents.set(ref, agent);
     agent.launch();
     return agent;
@@ -94,6 +96,12 @@ export class Worq {
     return [
       `${a.ref} · ${a.kind.name} · ${a.state} · round ${a.round}`,
       `Task: ${a.task}`,
+      `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.verify ? "kind roster" : "explicitly skipped"}`,
+      `Run turns: ${a.view().budget.spent}/${a.view().budget.allowance}`,
+      ...[...new Set([`agent.${a.kind.name}`, ...a.delegations.map(d => d.role ?? "subagent"), ...a.reviews.map(r => `reviewer.${r.name}`)])].map(role => {
+        try { return `${role}: ${JSON.stringify(this.deps.config.model(role))}`; } catch (e) { return `${role}: ${String(e)}`; }
+      }),
+      a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => `@${x.ref}${x.path ? ` (${x.path})` : ""}`).join(", ")}`,
       a.plan && `Plan: ${a.plan.path}`,
       a.branch && `Branch: ${a.branch}${a.candidate ? ` @ ${a.candidate.slice(0, 10)}` : ""}`,
@@ -115,7 +123,7 @@ export class Worq {
     const agent = this.get(ref);
     if (agent.ended) return `${agent.ref} already ${agent.state}`;
     await agent.cancel();
-    return `${agent.ref} ${agent.state}${agent.branch ? `; branch ${agent.branch} kept` : ""}`;
+    return `${agent.ref} ${agent.state}${agent.work ? `; retained worktree ${agent.work}` : agent.branch ? `; branch ${agent.branch} kept` : ""}`;
   }
   async shutdown() { await this.cancel("all"); }
 }

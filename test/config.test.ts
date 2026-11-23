@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+import type { ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { applyResources } from "../src/resources.ts";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -153,7 +156,7 @@ test("config: nothing to resolve is Block(model)", async () => {
 async function spawnFailure(fail: unknown, role: string, selected = true): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "worq-spawn-"));
   const config = await configOf(fail);
-  const worq = new Worq({ driver: fakeHarness(MINIMAL_CAPS, {}), prompts: loadPrompts(), config, state: join(dir, "state"), cwd: dir, notify() {} });
+  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), config, state: join(dir, "state"), cwd: dir, notify() {} });
   // `dir` is not a git repository: reaching repository() would raise something else.
   await assert.rejects(worq.spawn("plan", "plan it"),
     (error: unknown) => selected ? error instanceof Block && error.code === "capability" && error.message.includes(role) : error instanceof Error && !(error instanceof Block && error.code === "capability"),
@@ -166,12 +169,7 @@ test("config: spawn validates only the selected agent role", async () => {
   await spawnFailure({ model: "a/m", models: { "reviewer.pair": { thinking: "high" } } }, "/models/reviewer.pair/thinking", false);
 });
 
-/**
- * The reviewer's role check runs before any of its work (src/agent.ts:327-333): a denial costs no
- * semaphore slot, no scratch directory and no snapshot checkout. Spawn checks every reviewer up
- * front, so a check that fails only at review time is injected through the one seam that can differ
- * per role: the Agent's own `check` dependency, built in Worq.spawn as assertChoice over config+driver.
- */
+/** A selected reviewer is checked before acquiring a slot or creating its snapshot. */
 test("agent: a reviewer whose role check fails takes no semaphore slot and no snapshot", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -226,4 +224,29 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
   assert.ok(!seen.some((spec) => spec.name === "reviewer.intent"), "the driver never opened the denied reviewer's session");
   await control.cancel();
   await denied.cancel();
+});
+
+test("resource lists replace family settings; approved bytes only, no checkout or escaping link", async t => {
+  const data = "operator skill";
+  const pin = { path: "skill.md", sha256: createHash("sha256").update(data).digest("hex") };
+  const config = await configOf({ models: { "subagent.evidence": {}, subagent: { skills: [pin] }, "subagent.empty": { skills: [] }, reviewer: { extensions: [pin] } } });
+  assert.throws(() => config.model("subagent.typo"), /Unknown named child/);
+  assert.deepEqual(config.model("subagent.empty").resources?.skills, []);
+  assert.throws(() => assertChoice(config.model("subagent.evidence"), FULL_CAPS), /unsupported resource skills/);
+  assert.throws(() => config.model("reviewer.intent"), /approval/);
+  const dir = join(config.path, ".."); t.after(() => rm(dir, { recursive: true, force: true }));
+  const root = join(dir, "worq-resources"); await mkdir(root);
+  const js = "export default function register(pi) { pi.on('session_start', () => {}); }";
+  await writeFile(join(root, "ok.mjs"), js);
+  const ext = { path: "ok.mjs", sha256: createHash("sha256").update(js).digest("hex") };
+  const approved = {} as ResourceLoader;
+  await applyResources(approved, "", config.path, { extensions: [ext] });
+  assert.equal(approved.getExtensions().extensions.length, 1);
+  const loader = {} as ResourceLoader;
+  const apply = () => applyResources(loader, "base", config.path, config.model("subagent.evidence").resources);
+  await writeFile(join(root, pin.path), data); await apply();
+  assert.match(loader.getSystemPrompt()!, /operator skill/);
+  await writeFile(join(root, pin.path), "changed"); await assert.rejects(apply(), /Changed resource/);
+  await rm(join(root, pin.path)); await symlink(config.path, join(root, pin.path)); await assert.rejects(apply(), /Untrusted/);
+  await rm(join(root, pin.path)); await writeFile(join(root, pin.path), data); await mkdir(join(dir, ".git")); await assert.rejects(apply(), /Repository resource/);
 });
