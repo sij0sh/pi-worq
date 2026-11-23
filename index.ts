@@ -14,6 +14,7 @@ import { Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
 const ENABLED = "worq-enabled";
+const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "checkpoint";
 
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
@@ -63,8 +64,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     };
     const notify = (event: AgentEvent) => {
       if (closing) return;
-      const actionable = event.type === "ask" || event.type === "checkpoint";
-      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, actionable
+      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, actionable(event.type)
         ? { triggerTurn: true, deliverAs: "followUp" }
         : { triggerTurn: false });
       status();
@@ -107,12 +107,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       else process.stderr.write(`${clean(text)}\n`);
     };
 
-    // Terminal notices are visible and persisted, but never steer an unrelated Main turn.
+    // Passive notices are visible and persisted, but never steer an unrelated Main turn.
     pi.on("context", (event) => {
       const messages = event.messages.filter((message) => {
         if (message.role !== "custom" || message.customType !== "worq") return true;
         const type = (message.details as Partial<AgentEvent> | undefined)?.type;
-        return type === "ask" || type === "checkpoint";
+        return actionable(type);
       });
       if (messages.length !== event.messages.length) return { messages };
     });

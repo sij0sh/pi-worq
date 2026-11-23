@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,7 +12,7 @@ import { dispatch, ops, serve } from "../src/control.ts";
 import { obj, text } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import { Conversation, NUDGE } from "../src/session.ts";
-import { fakeDriver, pass, planSubmission, repo, setup } from "./fake.ts";
+import { fakeDriver, pass, planSubmission, repo, setup, type Script } from "./fake.ts";
 
 const never = new AbortController().signal;
 const finish = { name: "done", description: "Finish.", schema: obj({ value: text(20) }) };
@@ -83,13 +83,15 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const { dir, root, state } = await repo();
   const agentDir = join(dir, "agent");
   t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(agentDir);
+  await writeFile(join(agentDir, "pi-worq.json"), JSON.stringify({ limits: { agentTurns: 2, reviewerTurns: 2, runTurns: 5 } }));
   process.env.WORQ_STATE_DIR = state;
   const tools: { name: string; defaultActive?: boolean; parameters: unknown; execute: Function }[] = [];
   const handlers: Record<string, Function> = {};
   let command: Function | undefined;
   let active = ["read", "bash"];
   const entries: { type: string; customType: string; data: unknown }[] = [];
-  const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean } }[] = [];
+  const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean; deliverAs?: string } }[] = [];
   const alerts: string[] = [];
   const pi = {
     registerTool: (tool: never) => tools.push(tool),
@@ -102,12 +104,17 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     sendUserMessage: () => assert.fail("a /worq request must not start a Main run"),
     sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
-  const scripts = {
-    "agent.plan": (turn: { tool: Function }) => turn.tool("submit", planSubmission),
-    "agent.execute": (turn: { tool: Function }) => turn.tool("submit", { summary: "No changes" }),
-    reviewer: (turn: { tool: Function }) => turn.tool("report", pass),
+  const scripts: Record<string, Script> = {
+    "agent.plan": async turn => {
+      if (JSON.parse(turn.text).task === "Plan it") {
+        assert.match(await turn.tool("ask_main", { question: "Which greeting?" }), /Use HELLO/);
+      }
+      await turn.tool("submit", planSubmission);
+    },
+    "agent.execute": async turn => { await turn.tool("submit", { summary: "No changes" }); },
+    reviewer: async turn => { await turn.tool("report", pass); },
   };
-  createWorq({ driver: () => fakeDriver(scripts as never), agentDir: () => agentDir })(pi as never);
+  createWorq({ driver: () => fakeDriver(scripts), agentDir: () => agentDir })(pi as never);
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
   assert.ok(tools.every((x) => x.defaultActive === false));
   assert.ok(!active.some((name) => name.startsWith("worq_")));
@@ -142,15 +149,29 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const run = promisify(execFile);
   const cli = join(import.meta.dirname, "..", "bin", "worq.mjs");
   const env = { ...process.env, WORQ_STATE_DIR: state };
-  const ready = () => notices.find(({ message }) => message.details.type === "review-ready" && message.details.ref === ref);
-  for (let i = 0; i < 100 && !ready(); i++) await new Promise((r) => setTimeout(r, 25));
-  assert.ok(ready(), "the requested plan reached review-ready");
-  assert.equal(ready()!.options.triggerTurn, false, "a terminal notice must not start or steer a Main run");
+  const waitFor = async (type: string) => {
+    const find = () => notices.find(({ message }) => message.details.type === type && message.details.ref === ref);
+    for (let i = 0; i < 100 && !find(); i++) await new Promise((r) => setTimeout(r, 25));
+    const notice = find();
+    assert.ok(notice, `expected a ${type} notice`);
+    return notice;
+  };
+  const asked = await waitFor("ask");
+  assert.deepEqual(asked.options, { triggerTurn: true, deliverAs: "followUp" });
+  await command!(`send ${ref} Use HELLO`, ctx);
+  const ready = await waitFor("review-ready");
+  assert.deepEqual(ready.options, { triggerTurn: false });
+  const warnings = notices.filter(({ message }) => message.details.ref === ref && message.details.type === "warning");
+  assert.ok(warnings.some(({ message }) => /one further turn remains/.test(message.content)));
+  assert.ok(warnings.some(({ message }) => /no additional turns can be granted/.test(message.content)));
+  assert.ok(warnings.every(({ options }) => !options.triggerTurn && options.deliverAs === undefined));
+  assert.ok(!notices.some(({ message }) => message.details.ref === ref && message.details.type === "checkpoint"));
   const assistant = { role: "assistant" };
-  const ask = { role: "custom", customType: "worq", details: { type: "ask" } };
-  const review = { ...ready()!.message, role: "custom" };
-  assert.deepEqual(handlers.context({ messages: [assistant, review, ask] }).messages, [assistant, ask]);
-  assert.equal(handlers.context({ messages: [assistant, ask] }), undefined);
+  const ask = { ...asked.message, role: "custom" };
+  const grant = { role: "custom", customType: "worq", details: { type: "checkpoint" } };
+  const passive = [ready, ...warnings].map(({ message }) => ({ ...message, role: "custom" }));
+  assert.deepEqual(handlers.context({ messages: [assistant, ...passive, ask, grant] }).messages, [assistant, ask, grant]);
+  assert.equal(handlers.context({ messages: [assistant, ask, grant] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
   assert.match((await run(process.execPath, [cli, "list", executeSpawn.message.details.ref], { env })).stdout, /Task: Check the greeting in a worktree/);
   assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /closed/);

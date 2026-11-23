@@ -14,7 +14,7 @@ import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot,
 
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed";
 export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
-export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "failed"; ref: string; text: string }
+export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed"; ref: string; text: string }
 export interface Attachment { ref: string; path?: string; text: string }
 export interface Delegation { role?: string; id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
@@ -91,17 +91,18 @@ export class Agent {
   private spent = 0;
   private grant = 0;
   private warned = false;
-  private warning = (message: string) => {
+  private warning = (message: string) => this.budgetNotice("warning", message);
+  private budgetNotice(type: "warning" | "checkpoint", message: string) {
     this.log(message);
-    this.deps.notify({ type: "checkpoint", ref: this.ref, text: `[worq ${this.ref}] ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
-  };
+    this.deps.notify({ type, ref: this.ref, text: `[worq ${this.ref}] ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
+  }
   private readonly checkpoints = new Set<() => void>();
   private beforeAttempt = async (signal: AbortSignal) => {
     const { runTurns, continuationTurns, checkpointSeconds } = this.deps.limits;
     if (this.spent < runTurns + this.grant || this.grant >= continuationTurns) return;
     // Only wait between requests. A streaming Pi turn cannot be suspended safely.
     this.warned = true;
-    this.warning(`No turns left. Main may approve up to ${continuationTurns - this.grant} more via /continue N within ${checkpointSeconds}s.`);
+    this.budgetNotice("checkpoint", `No turns left. Main may approve up to ${continuationTurns - this.grant} more via /continue N within ${checkpointSeconds}s.`);
     await new Promise<void>(resolve => {
       const wake = () => { clearTimeout(timer); signal.removeEventListener("abort", wake); this.checkpoints.delete(wake); resolve(); };
       const timer = setTimeout(wake, checkpointSeconds * 1000);
@@ -117,7 +118,10 @@ export class Agent {
     else this.spent++;
     if (left >= 0 && left <= Math.max(1, Math.floor(limits.runTurns / 10)) && !this.warned) {
       this.warned = true;
-      this.warning(`${left} further run turns authorized; ${limits.continuationTurns - this.grant} available for explicit approval via /continue N.`);
+      const headroom = limits.continuationTurns - this.grant;
+      // A grant can prevent a hard stop even if the next model turn is inside a streaming request.
+      if (headroom > 0) this.budgetNotice("checkpoint", `${left} further run turns authorized; ${headroom} available for explicit approval via /continue N.`);
+      else this.warning(`${left} further run turns authorized; no additional turns can be granted.`);
     }
   };
   private readonly controller = new AbortController();

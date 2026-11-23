@@ -239,12 +239,17 @@ test("run turn checkpoints share the roster budget; fast does not skip reviewers
       reviewer: turn => turn.tool("report", pass).then(() => {}),
     }, { checkpointSeconds: 1, runTurns: 1, continuationTurns: 4 });
     const agent = await worq.spawn("plan", "plan it", true, "fast");
-    await next("checkpoint", agent.ref);
+    assert.match((await next("checkpoint", agent.ref)).text, /4 available for explicit approval/);
     assert.throws(() => worq.send(agent.ref, "/continue 5"));
     release();
-    if (approve) { await next("checkpoint", agent.ref, 2); worq.send(agent.ref, "/continue 4"); }
-    if (approve) { await next("review-ready", agent.ref); assert.equal(agent.reviews.length, 4); await worq.cancel(agent.ref); }
-    else assert.match((await next("failed", agent.ref)).text, /Cumulative turn allowance exhausted/);
+    assert.match((await next("checkpoint", agent.ref, 2)).text, /No turns left.*within 1s/);
+    if (approve) {
+      worq.send(agent.ref, "/continue 4");
+      await next("review-ready", agent.ref);
+      assert.equal(agent.reviews.length, 4);
+      assert.match((await next("warning", agent.ref)).text, /no additional turns can be granted/);
+      await worq.cancel(agent.ref);
+    } else assert.match((await next("failed", agent.ref)).text, /Cumulative turn allowance exhausted/);
   }
 });
 

@@ -118,7 +118,7 @@ Every value is optional; absent keys use these defaults.
 
 Two separate budgets are at work. Per-session limits (`agentTurns`, `agentMinutes`, `rounds`, `asks`) are hard — no grant raises them. `runTurns` is a pool shared by everything one agent does, so a reviewer or a repair round spends from the same account.
 
-Near the pool's end Main receives a `checkpoint` notice with recent evidence and the remaining allowance. If `continuationTurns > 0`, Main may answer `worq send <ref> "/continue N"` at that checkpoint; the pool grows by `N` and the run resumes. Without configured headroom the checkpoint is advisory and the run stops at the cap. Between requests a depleted run waits up to `checkpointSeconds` for approval; a streaming turn cannot be paused, so approve before the stop. Exhaustion fails the agent with `run-limit` rather than silently continuing.
+Near the pool's end Worq reports the remaining allowance. If a grant is still available, the `checkpoint` wakes Main, which may answer `worq send <ref> "/continue N"` to grow the pool by `N`. Between requests a depleted run with headroom waits up to `checkpointSeconds` for approval; a streaming turn cannot be paused, so approve before the stop. Without grant headroom, exhaustion fails the agent with `run-limit`. Low-budget notices without headroom and per-session turn/time warnings are visible but do not wake Main or enter its model context.
 
 ## Routes
 
