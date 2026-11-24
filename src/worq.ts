@@ -3,10 +3,12 @@ import { Block } from "./contracts.ts";
 import type { Config } from "./runtime/config.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
-import { assertRuntime, type Driver } from "./sdk/contract.ts";
+import { prepareLaunch, type SelectLaunch } from './runtime/launch.ts';
+import { type Driver } from "./sdk/contract.ts";
 import { reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {
+  select?: SelectLaunch;
   telemetry?: import('./telemetry.ts').Telemetry;
   driver: Driver;
   prompts: Prompts;
@@ -28,7 +30,7 @@ function nameFrom(title: string) {
 
 /** Agents owned by this Pi session. Main is the only spawner. */
 export class Worq {
-  private starting = 0;
+  private readonly starting = new Set<{ label: string }>();
   private readonly agents = new Map<string, Agent>();
   private readonly semaphore: Semaphore;
   private readonly deps: WorqDeps;
@@ -36,10 +38,8 @@ export class Worq {
     this.deps = deps;
     this.semaphore = new Semaphore(deps.config.limits.parallel);
   }
-  /** Judge one role's resolved runtime against what its SDK can do. Fails before any work. */
-  private readonly check = (role: string): void => {
-    assertRuntime(this.deps.config.runtime(role), this.deps.driver.capabilities(role), this.deps.extensions ?? 0);
-  };
+  private admissions = new AbortController();
+  private readonly select = (role: string, title: string, signal: AbortSignal) => prepareLaunch(this.deps.config, this.deps.driver, this.deps.extensions ?? 0, role, `${role} · ${title}`, signal, this.deps.select);
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
   get(ref: string) {
@@ -49,14 +49,14 @@ export class Worq {
   }
 
   private get kinds() { return this.deps.kinds ?? this.deps.prompts.kinds; }
-  async spawn(kindName: string, task: string, opts: { title: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
+  async spawn(kindName: string, task: string, opts: { title: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }, signal?: AbortSignal): Promise<Agent> {
     const kind = this.kinds.get(kindName);
     if (kind?.workflow?.userOnly) throw new Block("invocation", `${kindName} is a user-only workflow (disable-model-invocation); launch it with /worq workflow`);
     const spawnable = [...this.kinds.values()].filter((k) => !k.workflow?.userOnly).map((k) => k.name);
     if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${spawnable.join(" | ")}`);
     if (kind.workflow && (opts.verify !== undefined || opts.mode !== undefined)) throw new Block("invalid-payload", "verify and mode do not apply to workflows (no review)");
     if (kind.access !== "write" && opts.verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
-    return this.admit(kind, task, { ...opts, base: nameFrom(opts.title) });
+    return this.admit(kind, task, { ...opts, base: nameFrom(opts.title) }, signal);
   }
   /** The user's launch path for any installed workflow. Built-in kinds stay on worq_spawn. */
   async runWorkflow(kind: Kind, direction?: string): Promise<Agent> {
@@ -66,23 +66,27 @@ export class Worq {
     const task = prompt || `Run the ${kind.name} workflow on this repository and submit its result.`;
     return this.admit(kind, task, { title: kind.name.replace(/-/g, " "), base: `${kind.name}-workflow` });
   }
-  private async admit(kind: Kind, task: string, { title, base, attach = [], verify = true, mode, reason }: { title: string; base: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
+  private async admit(kind: Kind, task: string, { title, base, attach = [], verify = true, mode, reason }: { title: string; base: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }, caller?: AbortSignal): Promise<Agent> {
     const { prompts, config } = this.deps;
-    // Fail a misconfigured role before the repository, the ref or any worktree exists.
-    this.check(`agent.${kind.name}`);
-    const live = this.all().filter((a) => !a.ended).length + this.starting;
+    const signal = caller ? AbortSignal.any([caller, this.admissions.signal]) : this.admissions.signal;
+    signal.throwIfAborted();
+    const live = this.all().filter((a) => !a.ended).length + this.starting.size;
     if (live >= config.limits.agents) throw new Block("at-capacity", `${live} agents are live (limits.agents ${config.limits.agents}); close or cancel one first`);
-    this.starting++;
+    const pending = { label: `${title} · ${kind.name} · pending launch` };
+    this.starting.add(pending);
     try {
-      const root = await repository(this.deps.cwd, AbortSignal.timeout(10_000));
+      const runtime = await this.select(`agent.${kind.name}`, title, signal);
+      const root = await repository(this.deps.cwd, AbortSignal.any([signal, AbortSignal.timeout(10_000)]));
       const attachments = await this.attachments(root, attach);
+      signal.throwIfAborted();
       const { ref, dir } = await reserveName(root, this.deps.state, base);
-      const agent = new Agent({ telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, check: this.check },
+      signal.throwIfAborted();
+      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, select: this.select },
         { ref, title: title.trim(), dir, kind, task, attachments, verify, mode, reason });
       this.agents.set(ref, agent);
       agent.launch();
       return agent;
-    } finally { this.starting--; }
+    } finally { this.starting.delete(pending); }
   }
   private async attachments(root: string, sources: string[]): Promise<Attachment[]> {
     const out = new Map<string, Attachment>();
@@ -100,13 +104,14 @@ export class Worq {
   list(ref?: string): string {
     if (ref) return this.detail(this.get(ref));
     const agents = this.all();
-    if (!agents.length) return "No Worq agents in this session.";
-    return agents.map((a) => {
+    const pending = [...this.starting].map(p => p.label);
+    if (!agents.length && !pending.length) return "No Worq agents in this session.";
+    return pending.concat(agents.map((a) => {
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
       const verdicts = a.reviews.length ? ` · ${a.reviews.map((r) => `${r.name} ${r.verdict}`).join(", ")}` : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
       return `${a.headline} · ${a.state} · round ${a.round}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
-    }).join("\n");
+    })).join("\n");
   }
   private detail(a: Agent): string {
     return [
@@ -114,9 +119,7 @@ export class Worq {
       `Task: ${a.task}`,
       `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.reviewPolicyLabel}`,
       `Run turns: ${a.view().budget.spent}/${a.view().budget.allowance}`,
-      ...[...new Set([`agent.${a.kind.name}`, ...a.delegations.map(d => d.role ?? "subagent"), ...a.reviews.map(r => `reviewer.${r.name}`)])].map(role => {
-        try { return `${role}: ${JSON.stringify(this.deps.config.runtime(role))}`; } catch (e) { return `${role}: ${String(e)}`; }
-      }),
+      ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,
       a.handoff?.path && `Unreviewed handoff: ${a.handoff.path}`,
@@ -139,15 +142,22 @@ export class Worq {
   send(ref: string, text: string) { return this.get(ref).send(text); }
   async cancel(ref: string): Promise<string> {
     if (ref === "all") {
+      const pending = this.starting.size;
+      if (!this.admissions.signal.aborted) {
+        this.admissions.abort(new Block('cancelled', 'Pending launches cancelled'));
+        this.admissions = new AbortController();
+      }
       const live = this.all().filter((a) => !ENDED.includes(a.state));
       await Promise.all(live.map((a) => a.cancel()));
-      return live.length ? `Stopped ${live.map((a) => `${a.ref} (${a.state})`).join(", ")}` : "No live agents";
+      const stopped = live.map(a => `${a.ref} (${a.state})`);
+      if (pending) stopped.push(`${pending} pending launch${pending === 1 ? '' : 'es'}`);
+      return stopped.length ? `Stopped ${stopped.join(', ')}` : 'No live agents';
     }
     const agent = this.get(ref);
     if (agent.ended) return `${agent.ref} already ${agent.state}`;
     await agent.cancel();
     return `${agent.ref} ${agent.state}${agent.work ? `; retained worktree ${agent.work}` : agent.branch ? `; branch ${agent.branch} kept` : ""}`;
   }
-  async shutdown() { await this.cancel("all"); }
+  async shutdown() { this.admissions.abort(new Block('cancelled', 'Worq closed')); await this.cancel("all"); }
 }
 export const isRef = (value: string) => REF.test(value);

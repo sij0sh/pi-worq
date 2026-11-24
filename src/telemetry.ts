@@ -4,7 +4,7 @@ import type { Verdict } from "./contracts.ts";
 export type Outcome = { kind: "exit"; code: number; stdout: boolean; stderr: boolean }
   | { kind: "search"; count: number; capped: boolean }
   | { kind: "ok" | "sdk-error" | "launch" | "timeout" | "output-limit" | "process-exit" | "cleanup-unconfirmed" | "cancelled" | "missing"; cancelled?: boolean };
-export interface Setup { model?: string; thinking?: string; skills: string[] }
+export interface Setup { sdk?: string; model?: string; thinking?: string; skills: string[] }
 interface ContextEstimate { percent?: number; contextWindow: number }
 export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Setup } | { context: ContextEstimate | undefined }
   | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };

@@ -23,6 +23,7 @@ const Limits = obj({
 const ConfigSchema = obj({
   /** Runtime used by roles with no `roles` entry. Absent = built-in "main" (Pi, Main's model). */
   default: Type.Optional(name),
+  launch: Type.Optional(obj({ countdownSeconds: int(0, 120), interactive: Type.Optional(Type.Boolean()) })),
   runtimes: Type.Optional(Type.Record(name, RuntimeSchema)),
   /** Role → runtime name. Exact role wins over its family. */
   roles: Type.Optional(Type.Record(Type.String({ pattern: ROLE }), name)),
@@ -42,6 +43,7 @@ export const MAIN: Runtime = { name: "main", sdk: "pi", path: "", via: "" };
 export interface Config {
   path: string;
   limits: Limits;
+  launch?: { countdownSeconds: number; interactive: boolean };
   approveExtensions: boolean;
   /** SDKs named by declared presets (the router preloads them). */
   sdks: string[];
@@ -87,6 +89,7 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
 
   return {
     path,
+    launch: { countdownSeconds: 5, interactive: true, ...config.launch },
     limits: { ...DEFAULT_LIMITS, ...config.limits },
     approveExtensions: config.approveExtensions ?? false,
     sdks: [...new Set([...resolved.values()].map((r) => r.sdk))],

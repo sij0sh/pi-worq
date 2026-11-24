@@ -56,6 +56,7 @@ export type SessionEvent =
 
 /** Role-level session request: what the core asks the router for. */
 export interface Spec {
+  runtime?: Runtime;
   /** One identity per Conversation. */
   id: string;
   /** Role key: agent.<kind>, subagent[.<name>], reviewer.<name>. */
@@ -98,12 +99,16 @@ export interface CoreHandle extends Omit<Handle, "switchModel"> { fallback(): Pr
 
 /** Per-SDK adapter. */
 export interface SDKAdapter {
+  models(): Promise<readonly string[]>;
+  defaultModel?(): string | undefined;
   capabilities(runtime: Runtime): Capabilities;
   open(spec: SessionSpec): Promise<Handle>;
 }
 /** Role router the core drives (see sdk/registry.ts). */
 export interface Driver {
-  capabilities(role: string): Capabilities;
+  catalog?(): Promise<ReadonlyMap<string, readonly string[]>>;
+  defaultModel?(sdk: string): string | undefined;
+  capabilities(role: string, runtime?: Runtime): Capabilities;
   open(spec: Spec): Promise<CoreHandle>;
 }
 

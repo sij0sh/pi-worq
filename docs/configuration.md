@@ -9,18 +9,19 @@ Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-paylo
 ```json
 {
   "default": "standard",
+  "launch": { "countdownSeconds": 5, "interactive": true },
   "runtimes": {
     "standard": { "sdk": "pi", "model": "provider/model", "fallbackModel": "provider/model", "thinking": "medium" },
     "deep": { "model": "provider/model", "thinking": "high" },
     "fast": { "model": "provider/model", "thinking": "low" }
   },
-  "roles": { "agent.plan": "deep", "subagent": "fast", "subagent.evidence": "standard", "reviewer": "deep" },
+  "roles": { "agent.plan": "deep", "agent.execute": "standard", "agent.foundation": "deep", "subagent": "fast", "subagent.evidence": "standard", "reviewer": "deep" },
   "approveExtensions": false,
   "limits": { "agents": 4, "runTurns": 1000, "continuationTurns": 0 }
 }
 ```
 
-Top-level keys: `default`, `runtimes`, `roles`, `approveExtensions`, `limits`. Nothing else is accepted. The pre-0.0.28 keys (`harness`, `harnesses`, `model`, `fallbackModel`, `models`) fail with a migration message.
+Top-level keys: `default`, `launch`, `runtimes`, `roles`, `approveExtensions`, `limits`. Nothing else is accepted. The pre-0.0.28 keys (`harness`, `harnesses`, `model`, `fallbackModel`, `models`) fail with a migration message.
 
 ## Runtimes
 
@@ -41,6 +42,12 @@ A runtime is a named preset: `sdk` (default `pi`), `model`, `fallbackModel`, `th
 | `reviewer` / `reviewer.<name>` | Every reviewer / one, e.g. `reviewer.intent` |
 
 Resolution: **exact role → role family → `default` → built-in `main`** (`sdk: pi`, Main's model). Named children must be declared: delegating to `subagent.evidence` without `roles["subagent.evidence"]` fails as `Unknown named child`.
+
+## Launch picker
+
+In the TUI, each new SDK session starts a five-second countdown with its role’s preset selected. Use `roles["agent.<workflow-name>"]` to give an installed workflow its own default. Parallel sessions share one popup: Tab selects a pending agent, ↑/↓ selects harness, model or thinking, and ←/→ changes it. Editing pauses that agent’s countdown. Enter launches immediately, A launches all, and Esc cancels the selected launch. Overrides apply only to this session; changing model or harness drops its configured fallback. Existing conversations continue without another countdown.
+
+Set `"launch": { "interactive": true, "countdownSeconds": 5 }` in `pi-worq.json` to customize this. `interactive: false`, zero seconds, or a non-TUI host launches defaults immediately. Only Pi ships today.
 
 ## Shared resources
 

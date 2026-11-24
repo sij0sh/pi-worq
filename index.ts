@@ -6,6 +6,7 @@ import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type { AgentEvent } from "./src/agent.ts";
+import { launchPicker } from './src/launch-picker.ts';
 import { loadConfig } from "./src/runtime/config.ts";
 import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
@@ -127,7 +128,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
         const host = { get model() { return ctx.model; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, config, resources);
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
+        if (closing) throw new Error('Worq closed');
+        return instance = new Worq({ select: ctx.mode === 'tui' ? launchPicker(ctx.ui) : undefined, telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
       })().finally(() => { starting = undefined; });
       return starting;
     };
@@ -137,9 +139,9 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       for (const name of TOOLS) if (name !== "worq_spawn") active.add(name);
       pi.setActiveTools([...active]);
     };
-    const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
+    const run = async (ctx: ExtensionContext, op: string, args: unknown, signal?: AbortSignal) => {
       if (off && op === "spawn") throw new Error("Worq is off; re-enable with /worq.");
-      const result = await dispatch(await ensure(ctx), table, op, args);
+      const result = await dispatch(await ensure(ctx), table, op, args, signal);
       status();
       return result;
     };
@@ -152,8 +154,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       pi.registerTool({
         name, label: name, description: body, parameters, promptSnippet: body, defaultActive: false,
         ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
-        async execute(_id, params, _signal, _update, ctx) {
-          const { text, data } = await run(ctx, op, params);
+        async execute(_id, params, signal, _update, ctx) {
+          const { text, data } = await run(ctx, op, params, signal);
           return { content: [{ type: "text", text: clean(text) }], details: data };
         },
       });

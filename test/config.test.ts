@@ -53,6 +53,15 @@ test("config: exact role → family → default", async () => {
   assert.deepEqual(config.sdks, ["pi"]);
 });
 
+test('config: launch preferences are independent of per-workflow presets', async () => {
+  assert.deepEqual((await configOf({})).launch, { interactive: true, countdownSeconds: 5 });
+  const config = await configOf({ ...example, roles: { agent: 'standard', 'agent.foundation': 'deep' }, launch: { interactive: false, countdownSeconds: 8 } });
+  assert.deepEqual(config.launch, { interactive: false, countdownSeconds: 8 });
+  assert.equal(config.runtime('agent.foundation').name, 'deep');
+  assert.equal(config.runtime('agent.plan').name, 'standard');
+  await assert.rejects(configOf({ launch: { countdownSeconds: -1 } }), /countdownSeconds/);
+});
+
 test("config: no file or no default is the built-in main runtime", async () => {
   const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
   assert.deepEqual(loadConfig(dir).runtime("agent.plan"), { name: "main", sdk: "pi", path: "", via: "" });
@@ -140,9 +149,10 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
         reviewer: (turn) => { cwds.push(turn.spec.cwd); return turn.tool("report", pass).then(() => {}); },
       }, seen),
       prompts, limits: DEFAULT_LIMITS, state, root, semaphore, notify() {},
-      check(role) {
+      async select(role) {
         checks.push(role);
         assertRuntime({ name: "a", sdk: "pi", thinking: "high", path: "/runtimes/a", via: "/roles/reviewer.intent" }, role === deny ? { ...MINIMAL_CAPS, context: FULL_CAPS.context } : FULL_CAPS);
+        return undefined;
       },
     }, { ref, kind, task: "Uppercase the greeting", attachments: [] });
     agent.launch();

@@ -334,6 +334,7 @@ function recordingSdk(caps: Capabilities, seen: SessionSpec[], switched: string[
   return {
     modelRef: /.*/,
     load: async (): Promise<SDKAdapter> => ({
+      models: async () => ['m/a', 'm/b'],
       capabilities: () => caps,
       async open(spec) {
         seen.push(spec);
@@ -371,6 +372,10 @@ test("registry: createDriver routes by runtime, prepares the shared environment,
     assert.equal(await handle.fallback(), false, "fallback is used once");
   }
   assert.deepEqual(switched, ["m/b"]);
+  const override = { ...fast, model: 'm/b', fallbackModel: undefined, thinking: 'high' };
+  const selected = await driver.open({ ...roleSpec('agent.plan'), runtime: override });
+  assert.equal(seen.at(-1)?.runtime, override);
+  assert.equal(await selected.fallback(), false);
 
   const minimal = await createDriver({}, configFor(() => ({ ...MAIN })), resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, [], []) });
   await assert.rejects(minimal.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "capability" && /extension/.test(error.message));

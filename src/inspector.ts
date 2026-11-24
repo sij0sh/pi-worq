@@ -138,7 +138,7 @@ export class Inspector {
       return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of ' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
         ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
         row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
-        `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
+        ...(row.setup?.sdk ? [`Harness: ${row.setup.sdk}`] : []), `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
         `Injected pinned skills: ${row.setup ? row.setup.skills.join(', ') || 'none' : 'unavailable'}`,
         `Child context estimate: ${row.context?.percent == null ? 'unavailable' : `${row.context.percent.toFixed(1)}%${row.phase === 'closed' || Date.now() - row.context.at > 60_000 ? ' (stale)' : ''}`}`,
         `SDK-normalized cache · child session, finalized responses (${c.responses})`, `Read: ${c.reads ? c.read : 'unavailable'} · ${c.reads}/${c.responses} with SDK field`, 'Provider coverage unverified; zero may be an SDK default.', `Write: ${c.writes ? c.write : 'unavailable'} · ${c.writes}/${c.responses} with SDK field`];

@@ -38,12 +38,14 @@ export const SDKS: Record<string, SDKRecord> = { pi: { … } };
 export async function createDriver(host, config, resources): Promise<Driver>;
 ```
 
-`HostServices` carries explicit per-SDK host dependencies (`pi: { model, modelRegistry, agentDir }`) — no opaque context. `createDriver` preloads `pi` plus every SDK a declared preset names. Per `open(spec)` it resolves the role's runtime, runs `assertRuntime`, picks the thinking default, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter. It wraps the handle with the core's one-shot `fallback()`.
+`HostServices` carries explicit per-SDK host dependencies (`pi: { model, modelRegistry, agentDir }`) — no opaque context. `createDriver` preloads `pi` plus every SDK a declared preset names. The TUI discovers other registered adapters on demand. Worq resolves the preset once per launch and passes the selected runtime through the conversation. Per `open(spec)` the driver checks that runtime, runs `assertRuntime`, picks the thinking default, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter. It wraps the handle with the core's one-shot `fallback()`.
 
 ## Contract
 
 ```ts
 interface SDKAdapter {
+  models(): Promise<readonly string[]>; // selectable native model refs
+  defaultModel?(): string | undefined;  // snapshot the host's current default
   capabilities(runtime: Runtime): Capabilities;
   open(spec: SessionSpec): Promise<Handle>;
 }

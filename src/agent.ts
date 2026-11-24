@@ -9,7 +9,7 @@ import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
 import { Conversation, WorkerHandoff } from "./session.ts";
-import { tool, type Driver, type Tool } from "./sdk/contract.ts";
+import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
 
@@ -50,8 +50,8 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
-  /** Judge one role's runtime before any work; built in Worq.spawn over the config and the driver. */
-  check(role: string): void;
+  runtime?: Runtime;
+  select(role: string, title: string, signal: AbortSignal): Promise<Runtime | undefined>;
 }
 
 /**
@@ -92,6 +92,7 @@ export class Agent {
   submission?: string;
   reviews: ReviewRecord[] = [];
   readonly delegations: Delegation[] = [];
+  readonly launches: { role: string; runtime: Runtime; label?: string }[] = [];
   ask?: { question: string; resolve(answer: string): void };
   readonly done: Promise<void>;
   private readonly history: { seq: number; line: string }[] = [];
@@ -160,6 +161,7 @@ export class Agent {
     this.title = input.title ?? input.ref;
     this.dir = input.dir;
     this.kind = input.kind;
+    if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
     this.mode = input.mode;
@@ -266,7 +268,7 @@ export class Agent {
       const noReviewers = workflow ? "\n\nNo independent reviewers run for this workflow; submit a self-contained result." : "";
       this.conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, admitCloseout: this.admitCloseout, pending: () => this.openPqs,
-        spec: { observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(workflow ? { skills: [workflow.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(workflow ? { skills: [workflow.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
           description: workflow ? `Submit your result.${write ? "" : " Worq saves it to .agents/plans/."}` : write ? "Submit your work for independent review." : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
@@ -385,20 +387,21 @@ export class Agent {
     let conversation: Conversation<typeof PqAnswer> | undefined;
     let release: (() => void) | undefined;
     try {
-      this.deps.check(role);
+      const runtime = await this.deps.select(role, `${this.title} · ${d.question}`, signal);
       release = await semaphore.acquire(signal);
+      if (runtime) this.launches.push({ role, runtime, label: d.question });
       d.state = 'running';
       this.deps.telemetry?.state(key, 'running');
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
+        spec: { runtime, observe: this.deps.telemetry?.sink(key), name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
         finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
       });
       d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
       d.state = "answered";
     } catch (error) {
       if (this.signal.aborted) return;
-      d.state = "failed";
+      d.state = error instanceof Block && error.code === 'cancelled' ? 'cancelled' : 'failed';
       d.error = errorText(error);
     } finally {
       this.deps.telemetry?.state(key, this.signal.aborted ? 'cancelled' : d.state);
@@ -496,8 +499,10 @@ export class Agent {
     let completed = false;
     let release: (() => void) | undefined;
     try {
-      this.deps.check(`reviewer.${name}`);
+      this.deps.telemetry?.state(key, 'queued');
+      const runtime = await this.deps.select(`reviewer.${name}`, this.title, signal);
       release = await semaphore.acquire(signal);
+      if (runtime) this.launches.push({ role: `reviewer.${name}`, runtime, label: `round ${this.round}` });
       this.deps.telemetry?.state(key, 'running');
       let cwd = root;
       if (write) {
@@ -507,7 +512,7 @@ export class Agent {
       }
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
+        spec: { runtime, observe: this.deps.telemetry?.sink(key), name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
         finish: { name: "report", description: "Return your independent review.", schema: ReviewReport },
       });
       const payload = {

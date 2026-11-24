@@ -30,14 +30,14 @@ export function ops(kinds: string[]) {
 export type Ops = ReturnType<typeof ops>;
 export type Op = keyof Ops;
 
-export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown): Promise<{ text: string; data?: unknown }> {
+export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown, signal?: AbortSignal): Promise<{ text: string; data?: unknown }> {
   if (!(op in table)) throw new Block("op", `Unknown operation ${op}`);
   const key = op as Op;
   const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
     case "spawn": {
       const { kind, task, verify, mode, reason, title, attach } = args as Static<Ops["spawn"]>;
-      const agent = await worq.spawn(kind, task, { verify, mode, reason, title, attach });
+      const agent = await worq.spawn(kind, task, { verify, mode, reason, title, attach }, signal);
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
       return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its review digest or questions arrive as Worq notifications.`, data: { ref: agent.ref } };
     }

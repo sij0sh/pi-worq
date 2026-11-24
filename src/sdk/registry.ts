@@ -41,12 +41,22 @@ export async function createDriver(host: HostServices, config: Config, resources
   await Promise.all([...new Set(["pi", ...config.sdks])].filter((sdk) => sdks[sdk]).map(load));
 
   return {
-    capabilities(role) {
-      const runtime = config.runtime(role);
+    async catalog() {
+      const catalog = new Map<string, readonly string[]>();
+      for (const sdk of Object.keys(sdks)) {
+        // An optional backend without host services must not block installed ones.
+        if (!adapters.has(sdk)) { try { await load(sdk); } catch { continue; } }
+        catalog.set(sdk, await adapter(sdk).models());
+      }
+      return catalog;
+    },
+    defaultModel(sdk) { return adapter(sdk).defaultModel?.(); },
+    capabilities(role, runtime = config.runtime(role)) {
       return adapter(runtime.sdk).capabilities(runtime);
     },
     async open(spec): Promise<CoreHandle> {
-      const runtime = config.runtime(spec.name);
+      spec.signal.throwIfAborted();
+      const runtime = spec.runtime ?? config.runtime(spec.name);
       const sdk = adapter(runtime.sdk);
       const caps = sdk.capabilities(runtime);
       assertRuntime(runtime, caps, resources.extensions.length);
@@ -56,7 +66,7 @@ export async function createDriver(host: HostServices, config: Config, resources
       const skill = skillTool(packages);
       const skills = packages.map((s) => s.name);
       const emit = (event: SessionEvent) => spec.emit(event.type === "telemetry" && "setup" in event.value
-        ? { type: "telemetry", value: { setup: { ...event.value.setup, skills } } } : event);
+        ? { type: "telemetry", value: { setup: { ...event.value.setup, sdk: runtime.sdk, skills } } } : event);
       spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "built-in"}` });
       const handle = await sdk.open({
         ...rest, emit, runtime, thinking, extensions: resources.extensions,

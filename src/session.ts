@@ -23,6 +23,7 @@ export class WorkerHandoff extends Error {
 
 /** What a caller supplies; the Conversation turns the adapter's event stream into these sinks. */
 export interface ConversationSpec {
+  runtime?: import('./sdk/contract.ts').Runtime;
   /** Role key: agent.<kind>, subagent[.<name>], reviewer.<name>. */
   name: string;
   cwd: string;
@@ -146,10 +147,10 @@ export class Conversation<T extends TSchema> {
   private async open() {
     if (this.handle) return this.handle;
     const { spec, driver } = this.options;
-    const caps = driver.capabilities(spec.name);
+    const caps = driver.capabilities(spec.name, spec.runtime);
     if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     const handle = await driver.open({
-      id: this.id, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.signal,
+      id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.signal,
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
     });

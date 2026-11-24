@@ -22,7 +22,7 @@ export function thinkingLevels(model: Leveled | undefined): string[] {
   if (!model) return [];
   if (!model.reasoning) return ["off"];
   const map = model.thinkingLevelMap ?? {};
-  return [...CORE_LEVELS.filter((level) => map[level] !== null), ...EXTRA_LEVELS.filter((level) => level in map)];
+  return [...CORE_LEVELS.filter((level) => map[level] !== null), ...EXTRA_LEVELS.filter((level) => map[level] != null)];
 }
 
 /** Only the prepared system prompt and tools (plus shared native extensions): no ambient discovery. */
@@ -77,6 +77,8 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
   const modelRuntime = (host.modelRegistry as unknown as { runtime?: unknown }).runtime;
 
   return {
+    async models() { return host.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`); },
+    defaultModel() { const m = host.model; return m && `${m.provider}/${m.id}`; },
     capabilities(runtime): Capabilities {
       return {
         switchModel: true, thinking: thinkingLevels(primary(runtime)), extensions: true, turnUnit: "request",
