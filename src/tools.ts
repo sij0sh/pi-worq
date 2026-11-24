@@ -23,6 +23,8 @@ function searchTool(cwd: string): Tool {
       let match: RegExp;
       try { match = new RegExp(pattern); } catch (error) { throw new Block("pattern", `Invalid regular expression: ${errorText(error)}`); }
       const start = await realpath(await scoped(cwd, at, { root: true }));
+      // Match the walk's resolved paths so Windows short names cannot leak into the output.
+      const base = await realpath(cwd).catch(() => cwd);
       const lines: string[] = [];
       let bytes = 0, files = 0, capped = false;
       const read = async (file: string) => {
@@ -34,7 +36,7 @@ function searchTool(cwd: string): Tool {
         const rows = raw.split(/\r?\n/);
         for (let i = 0; i < rows.length; i++) {
           if (!match.test(rows[i])) continue;
-          const line = `${relative(cwd, file).split(sep).join("/")}:${i + 1}:${one(rows[i].trim(), 300)}`;
+          const line = `${relative(base, file).split(sep).join("/")}:${i + 1}:${one(rows[i].trim(), 300)}`;
           if (lines.length >= SEARCH.hits || bytes + line.length > SEARCH.bytes) { capped = true; return; }
           lines.push(line);
           bytes += line.length + 1;

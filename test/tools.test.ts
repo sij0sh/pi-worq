@@ -48,6 +48,17 @@ test("search: one bounded call finds matches and refuses .git, binaries and stra
   await assert.rejects(search("node_modules/dep/secret.ts"), /Symbolic link is not allowed/);
 });
 
+test("search: paths stay root-relative when the root itself is reached through a link", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "worq-search-alias-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const root = join(dir, "repo");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(root, "src", "a.ts"), "needle\n");
+  const alias = join(dir, "alias");
+  await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(await call(readTools(alias), "search", { pattern: "needle" }), "src/a.ts:1:needle");
+});
+
 test("search: results are capped and say so; a bad pattern is a Block", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "worq-search-"));
   t.after(() => rm(root, { recursive: true, force: true }));

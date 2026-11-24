@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { agentDock } from "../src/dock.ts";
@@ -120,7 +120,7 @@ test("workflow loader: per-folder defects are named and skipped; valid siblings 
   });
   const { kinds, problems } = loadWorkflows(dir, loadPrompts().kinds);
   assert.deepEqual([...kinds.keys()], ["fine"]);
-  const message = (name: string) => problems.find((p) => p.path.endsWith(`/${name}`))?.message ?? "";
+  const message = (name: string) => problems.find((p) => p.path.split(sep).join("/").endsWith(`/${name}`))?.message ?? "";
   assert.match(message("audit-"), /folder name must be lowercase/);
   assert.match(message("Audit"), /folder name must be lowercase/);
   assert.match(message("plan"), /"plan" is a built-in kind/);
