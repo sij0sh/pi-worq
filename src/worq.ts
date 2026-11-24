@@ -89,12 +89,12 @@ export class Worq {
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
       const verdicts = a.reviews.length ? ` · ${a.reviews.map((r) => `${r.name} ${r.verdict}`).join(", ")}` : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
-      return `${a.ref} · ${a.kind.name} · ${a.state} · round ${a.round}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
+      return `${a.headline} · ${a.state} · round ${a.round}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
     }).join("\n");
   }
   private detail(a: Agent): string {
     return [
-      `${a.ref} · ${a.kind.name} · ${a.state} · round ${a.round}`,
+      `${a.headline} · ${a.state} · round ${a.round}`,
       `Task: ${a.task}`,
       `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.reviewPolicyLabel}`,
       `Run turns: ${a.view().budget.spent}/${a.view().budget.allowance}`,

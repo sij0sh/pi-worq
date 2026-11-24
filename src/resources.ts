@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath, mkdtemp, rm, writeFile, lstat } from "node:fs/promises";
+import { readFile, realpath, rm, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, isAbsolute, resolve } from "node:path";
 import { discoverAndLoadExtensions, type ResourceLoader } from "@earendil-works/pi-coding-agent";
-import { inside } from "./workspace.ts";
+import { inside, temporaryDirectory } from "./workspace.ts";
 import { Block } from "./contracts.ts";
 import type { ModelChoice } from "./config.ts";
 
@@ -31,7 +31,7 @@ export async function applyResources(loader: ResourceLoader, prompt: string, con
   if (context.length) loader.getSystemPrompt = () => [prompt, ...context].join("\n\n");
   if (scripts.length) {
     // Pi discovers extensions relative to both arguments; neither may be an ambient directory.
-    const dir = await mkdtemp(join(tmpdir(), "worq-ext-"));
+    const dir = await temporaryDirectory(tmpdir(), "worq-ext-");
     try {
       const paths = await Promise.all(scripts.map(async (bytes, i) => { const path = join(dir, `${i}.mjs`); await writeFile(path, bytes); return path; }));
       const result = await discoverAndLoadExtensions(paths, dir, dir);

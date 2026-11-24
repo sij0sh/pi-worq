@@ -1,4 +1,4 @@
-import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -6,6 +6,17 @@ import { Block } from "./contracts.ts";
 import { cleanEnv, git } from "./process.ts";
 import { windows } from "./platform.mjs";
 export { statePath } from "./platform.mjs";
+
+let tempSequence = 0;
+/** Exclusive, short scratch paths without random tokens in exposed names. */
+export async function temporaryDirectory(parent: string, prefix: string) {
+  for (let attempt = 0; attempt < 256; attempt++) {
+    const path = join(parent, `${prefix}${process.pid.toString(36)}-${(++tempSequence >>> 0).toString(36)}`);
+    try { await mkdir(path, { mode: 0o700 }); return path; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  }
+  throw new Block("temp-dir", "Could not allocate a private scratch directory");
+}
 
 export function inside(base: string, path: string): boolean {
   const rel = relative(base, path);
@@ -42,7 +53,7 @@ export async function writeScoped(base: string, path: string, content: string | 
   const info = await lstat(target).catch((error) => { if (error.code !== "ENOENT") throw error; return undefined; });
   if (info && !info.isFile()) throw new Block("path", `Not a regular file: ${path}`);
   // Replace rather than mutate an existing inode (including hardlinks).
-  const tmp = await mkdtemp(join(dirname(target), ".worq-"));
+  const tmp = await temporaryDirectory(dirname(target), ".worq-");
   try {
     await writeFile(join(tmp, "content"), content, { mode: info?.mode ?? 0o644 });
     if (options.create) await link(join(tmp, "content"), target);
@@ -205,7 +216,7 @@ export interface Runtime { env: NodeJS.ProcessEnv; tmp: string }
  * state directory's privacy guarantee. The caller removes `tmp` when the box closes.
  */
 export async function runtimeEnv(parent: string): Promise<Runtime> {
-  const tmp = await mkdtemp(join(tmpdir(), "worq-"));
+  const tmp = await temporaryDirectory(tmpdir(), "worq-");
   if (!windows) await chmod(tmp, 0o700);
   const env = { ...cleanEnv, HOME: join(parent, "home"), XDG_CONFIG_HOME: join(parent, "config"), XDG_STATE_HOME: join(parent, "state"),
     XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: tmp, TERM: "xterm-256color",

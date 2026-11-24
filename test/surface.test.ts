@@ -185,6 +185,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     return notice;
   };
   const asked = await waitFor("ask");
+  assert.match(asked.message.content, /^Surface test \(surface-test\) · plan asks:/);
   assert.deepEqual(asked.options, { triggerTurn: true, deliverAs: "followUp" });
   const theme = { fg: (_: string, text: string) => text };
   const durable = { ...asked.message, content: `[worq ${ref}] Legacy heading\nPrintable legacy-only detail` };
@@ -231,7 +232,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const failedRun = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Fail it" }, undefined, undefined, ctx);
   for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
-  assert.match(widget?.render(34).join("\n") ?? "", new RegExp(`${failedRun.details.ref} failed Main`));
+  assert.match(widget?.render(34).join("\n") ?? "", /Surface test failed Main/);
   assert.match(widget?.render(20)[0] ?? "", /0 live/);
   await handlers.session_shutdown({}, ctx);
   assert.equal(widget, undefined);

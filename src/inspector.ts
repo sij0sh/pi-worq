@@ -5,12 +5,12 @@ import type { Outcome, Row, Telemetry } from './telemetry.ts';
 
 const age = (time: number) => elapsed(Date.now()-time);
 const active = (r: Row) => !['closed', 'failed', 'cancelled', 'done', 'answered'].includes(r.state);
-const headline = (r: Row) => `${r.ref} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
+const headline = (r: Row) => `${r.question ?? (r.title ? `${r.title} (${r.ref})` : r.ref)} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
 const fit = (s: string, w: number) => w > 0 ? truncateToWidth(s, w, w >= 3 ? '…' : '') : '';
 const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' : active(r) ? 'accent' : 'muted';
 const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
 export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
-const compact = (r: Row) => `${r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
+const compact = (r: Row) => `${r.title ?? r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
 const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}.${review.slot}`;
 function childIdentity(row: Row, width: number) {
   if (!row.review) return `${row.role} ${row.state}`;
@@ -122,7 +122,7 @@ export class Inspector {
     const lines = this.data.activity.slice().reverse().flatMap(e => {
       const row = this.data.rows.get(e.key);
       if (!row || (this.ref && row.ref !== this.ref)) return [];
-      const source = `${row.ref}${row.parent ? ` ${row.question ? `PQ: ${row.question}` : row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
+      const source = `${row.title ?? row.ref}${row.parent ? ` ${row.question ? `PQ: ${row.question}` : row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
       return [`${source} · ${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''} · ${age(e.at)} ago`];
     });
     if (!lines.length) lines.push('No activity observed.');

@@ -105,7 +105,7 @@ export class Agent {
   private warning = (message: string) => this.budgetNotice("warning", message);
   private budgetNotice(type: "warning" | "checkpoint", message: string) {
     this.log(message);
-    this.deps.notify({ type, ref: this.ref, text: `[worq ${this.ref}] ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
+    this.deps.notify({ type, ref: this.ref, text: `${this.headline} ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
   }
   private readonly checkpoints = new Set<() => void>();
   private beforeAttempt = async (signal: AbortSignal) => {
@@ -156,10 +156,11 @@ export class Agent {
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
   }
+  get headline() { return `${this.title} (${this.ref}) · ${this.kind.name}`; }
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
   get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
-  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!); this.start(); return this; }
+  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title); this.start(); return this; }
 
   log(line: string) {
     this.history.push({ seq: ++this.seq, line: one(clean(line), 400) });
@@ -304,7 +305,7 @@ export class Agent {
       this.log(`state ${this.state}`);
       this.publish();
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
-      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
+      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
 
@@ -368,7 +369,7 @@ export class Agent {
             timer = setTimeout(() => resolve(UNANSWERED), this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            this.deps.notify({ type: "ask", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
+            this.deps.notify({ type: "ask", ref: this.ref, text: `${this.headline} asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
           });
         } finally {
           clearTimeout(timer);
@@ -480,7 +481,7 @@ export class Agent {
   /** Display-only round notice; `worq_list` holds the full findings. */
   digest() {
     const write = this.kind.access === "write";
-    const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
+    const head = `${this.headline} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
     const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
     return [head, where, "Reviews:",
       ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }),

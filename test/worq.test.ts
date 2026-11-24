@@ -162,7 +162,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.match((await next("review-ready", agent.ref, 2)).text, /unresolved review issues/, "a repair attempt does not clear a repeated finding");
   assert.equal(agent.round, 2);
   assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline/);
-  assert.match(worq.list(), new RegExp(`${agent.ref} · plan · review-ready · round 2`));
+  assert.match(worq.list(), /Uppercase the greeting \(uppercase-the-greeting\) · plan · review-ready · round 2/);
   assert.match(worq.list(agent.ref), /PQs:[\s\S]*Reviews:/);
 
   assert.match(await worq.cancel(agent.ref), /closed/);

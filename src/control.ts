@@ -39,7 +39,7 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown)
       const { kind, task, verify, mode, reason, title, attach } = args as Static<Ops["spawn"]>;
       const agent = await worq.spawn(kind, task, { verify, mode, reason, title, attach });
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
-      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its review digest or questions arrive as [worq ${agent.ref}] messages.`, data: { ref: agent.ref } };
+      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its review digest or questions arrive as Worq notifications.`, data: { ref: agent.ref } };
     }
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }
