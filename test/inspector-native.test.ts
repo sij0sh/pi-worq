@@ -21,17 +21,17 @@ test('offline native Pi inspector opens, tabs, resizes, and restores the editor'
     wait(1500),
     { type: 'type', text: '/worq-inspect' }, key('enter'), wait(350), observe,
     key('tab'), { type: 'resize', cols: 40, rows: 24 }, wait(250), observe,
-    key('tab'), observe, key('escape'), observe,
+    key('tab'), observe, key('escape'), wait(150), key('escape'), wait(150), observe,
   ], dir, {
     PATH: process.env.PATH, HOME: dir, TERM: 'xterm-256color', PI_TELEMETRY: '0', OPENAI_API_KEY: 'offline-tui-fixture',
     PI_CODING_AGENT_DIR: join(dir, 'pi'), WORQ_STATE_DIR: join(dir, 'state'),
   }, AbortSignal.timeout(12_000));
-  const [agents, activity, evidence, editor] = screens.map(s => s.screen);
-  assert.match(agents, /Worq · Agents/);
-  assert.match(agents, /No Worq agents observed/);
-  assert.doesNotMatch(agents, /control socket unavailable/);
+  const [activity, evidence, agents, editor] = screens.map(s => s.screen);
   assert.match(activity, /Worq · Activity/);
+  assert.match(activity, /No activity observed/);
+  assert.doesNotMatch(activity, /control socket unavailable/);
   assert.match(evidence, /Worq · Evidence/);
-  assert.doesNotMatch(editor, /Worq · Evidence/);
+  assert.match(agents, /Worq · Agents/);
+  assert.doesNotMatch(editor, /Worq · Agents/);
   assert.match(editor, /─{30}/);
 });

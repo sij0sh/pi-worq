@@ -150,6 +150,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     const panel = create({ requestRender() {}, terminal: { rows: 30 } }, { fg: (_: string, s: string) => s }, {}, () => { closed = true; });
     assert.match(panel.render(100).join(' '), /Worq/);
     panel.handleInput('\x1b');
+    assert.equal(closed, false);
+    panel.handleInput('\x1b');
     assert.ok(closed);
   } } };
   const entryCount = entries.length;

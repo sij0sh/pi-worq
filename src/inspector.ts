@@ -55,10 +55,14 @@ export function outcome(o?: Outcome): string {
     case 'ok': return 'completed';
   }
 }
+const ACTIVITY = 1;
 const tabs = ['Agents', 'Activity', 'Evidence'];
 export class Inspector {
-  private tab = 0;
-  private focusDetail = false;
+  private tab = ACTIVITY;
+  private focusDetail = true;
+  private activityPage = { offset: 0, maxOffset: 0 };
+  private shownActivity: string[] = [];
+  private pausedActivity?: string[];
   private key?: string;
   private offset = 0;
   private maxOffset = 0;
@@ -94,9 +98,19 @@ export class Inspector {
     if (matchesKey(input, 'escape')) { if (!this.focusDetail) return this.close(); this.focusDetail = false; }
     else if (matchesKey(input, 'tab') || matchesKey(input, 'shift+tab')) { this.tab = (this.tab + (matchesKey(input, 'tab') ? 1 : 2)) % tabs.length; this.offset = 0; }
     else if (matchesKey(input, 'enter')) { this.focusDetail = !this.focusDetail; this.offset = 0; }
+    else if (this.tab === ACTIVITY && (matchesKey(input, 'j') || matchesKey(input, 'shift+j'))) {
+      this.pausedActivity = undefined;
+      this.activityPage.offset = 0;
+      this.focusDetail = true;
+    }
     else if (matchesKey(input, 'up') || matchesKey(input, 'down')) {
       const delta = matchesKey(input, 'up') ? -1 : 1;
-      if (this.focusDetail) this.offset = Math.max(0, Math.min(this.maxOffset, this.offset + delta));
+      if (this.focusDetail && this.tab === ACTIVITY) {
+        const page = this.activityPage;
+        const next = Math.max(0, Math.min(page.maxOffset, page.offset + delta));
+        if (next > page.offset) this.pausedActivity ??= this.shownActivity;
+        page.offset = next;
+      } else if (this.focusDetail) this.offset = Math.max(0, Math.min(this.maxOffset, this.offset + delta));
       else {
         const rows = this.roster();
         const i = Math.max(0, rows.findIndex(r => r.key === this.key));
@@ -107,20 +121,29 @@ export class Inspector {
     this.redraw();
   }
   invalidate() {}
+  private activityLines(): string[] {
+    const lines = this.data.activity.slice().reverse().flatMap(e => {
+      const row = this.data.rows.get(e.key);
+      if (!row || (this.ref && row.ref !== this.ref)) return [];
+      const source = `@${row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
+      return [`${source} · ${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''} · ${age(e.at)} ago`];
+    });
+    if (!lines.length) lines.push('No activity observed.');
+    if (this.data.activityGap) lines.push(`Activity gap · ${this.data.activityGap} older events evicted session-wide`);
+    return lines;
+  }
   private detail(row?: Row): string[] {
     if (!row) return ['No Worq agents observed in this session.'];
     if (this.tab === 0) {
       const c = row.cache;
       return [headline(row), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of @' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
+        ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
+        row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
         `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
         `Injected pinned skills: ${row.setup ? row.setup.skills.join(', ') || 'none' : 'unavailable'}`,
         `Child context estimate: ${row.context?.percent == null ? 'unavailable' : `${row.context.percent.toFixed(1)}%${row.phase === 'closed' || Date.now() - row.context.at > 60_000 ? ' (stale)' : ''}`}`,
         `SDK-normalized cache · child session, finalized responses (${c.responses})`, `Read: ${c.reads ? c.read : 'unavailable'} · ${c.reads}/${c.responses} with SDK field`, 'Provider coverage unverified; zero may be an SDK default.', `Write: ${c.writes ? c.write : 'unavailable'} · ${c.writes}/${c.responses} with SDK field`];
     }
-    if (this.tab === 1) return [headline(row), ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
-      row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
-      ...(this.data.activityGap ? [`Activity gap · ${this.data.activityGap} older events evicted session-wide`] : []),
-      ...this.data.activity.filter(e => e.key === row.key || (!row.parent && this.data.rows.get(e.key)?.parent === row.key)).reverse().map(e => `${age(e.at)} ago · ${e.key === row.key ? '' : this.data.rows.get(e.key)?.role + ' · '}${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''}`)];
     const key = row.parent ?? row.key;
     const live = this.data.live.get(key);
     const history = this.data.settled.filter(r => r.run === key && r.round !== live?.round).reverse();
@@ -143,7 +166,9 @@ export class Inspector {
     const height = Math.max(1, Math.min(24, this.height() - 4));
     const wide = width >= 80;
     const title = this.theme.fg('accent', fit(`Worq · ${tabs[this.tab]} · ${rows.length} roles`, width));
-    const hint = fit(width < 56 ? `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · ↵ · Tab · Esc` : `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`, width);
+    const activity = this.tab === ACTIVITY;
+    const follow = activity ? (this.pausedActivity ? 'Paused · J Jump to live · ' : 'Live · ') : '';
+    const hint = fit(follow + (width < 56 ? `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · ↵ · Tab · Esc` : `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`), width);
     const start = Math.max(0, index - height + 1);
     const left = Math.min(40, Math.floor(width * .4));
     const rosterWidth = wide ? left : width;
@@ -154,7 +179,8 @@ export class Inspector {
       return { r, text: fit(prefix + text, rosterWidth) };
     });
     const detailWidth = wide ? width - left - 3 : width;
-    const detail = this.detail(selected).flatMap(line => {
+    const detailLines = activity ? (this.shownActivity = this.pausedActivity ?? this.activityLines()) : this.detail(selected);
+    const detail = detailLines.flatMap(line => {
       // Preserve exact revision IDs and diagnostics even in a narrow detail pane.
       const chunks: string[] = [];
       let chunk = '';
@@ -165,9 +191,16 @@ export class Inspector {
       chunks.push(chunk);
       return chunks;
     });
-    this.maxOffset = Math.max(0, detail.length - height);
-    this.offset = Math.min(this.offset, this.maxOffset);
-    const page = detail.slice(this.offset, this.offset + height);
+    const maxOffset = Math.max(0, detail.length - height);
+    let offset: number;
+    if (activity) {
+      this.activityPage.maxOffset = maxOffset;
+      offset = this.activityPage.offset = Math.min(this.activityPage.offset, maxOffset);
+    } else {
+      this.maxOffset = maxOffset;
+      offset = this.offset = Math.min(this.offset, maxOffset);
+    }
+    const page = detail.slice(offset, offset + height);
     let lines: string[];
     if (wide) {
       lines = Array.from({ length: Math.max(roster.length, page.length) }, (_, i) => {

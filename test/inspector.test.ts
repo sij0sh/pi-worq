@@ -70,10 +70,8 @@ test('bounded layouts and independent evidence retention through out-of-order to
     assert.ok(rows.length <= 4);
     assert.ok([...rows, ...panel.render(width)].every(line => visibleWidth(line) <= width));
   }
-  panel.handleInput('\t');
   assert.match(panel.render(140).join('\n'), /exit 7/);
   panel.handleInput('\t');
-  panel.handleInput('\r');
   assert.match(panel.render(30).join('\n'), /Evidence gap/);
   panel.handleInput('\x1b');
   assert.equal(closed, false);
@@ -97,6 +95,7 @@ test('20-column glance retains actor, status and overflow without counting failu
   data.state('1', 'closed');
   assert.equal(glance(data, 20, theme)[2], '@0000 failed Main');
   const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
+  panel.handleInput('\x1b');
   assert.match(panel.render(20).join(' '), /@0002 rev-rdy Main/);
   assert.equal(hasGlance(new Telemetry()), false);
 });
@@ -109,6 +108,8 @@ test('inspector groups interleaved children under owners and preserves selection
   data.add('b1', 'bbbb', 'PQ d1', 'b');
   data.add('a1', 'aaaa', 'PQ d1', 'a');
   const panel = new Inspector(data, undefined, theme, () => 24, () => {}, () => {});
+  panel.handleInput('\x1b');
+  panel.handleInput('\x1b[Z');
   panel.render(65);
   panel.handleInput('\x1b[B');
   panel.handleInput('\x1b[B');
@@ -139,4 +140,43 @@ test('inspector groups interleaved children under owners and preserves selection
   assert.match(details, /SDK-normalized cache/);
   assert.match(details, /Read: 0 · 1\/1 with SDK field/);
   assert.match(details, /zero may be an SDK default/);
+});
+
+
+test('Activity follows across roles, pauses on scroll, and jumps live without moving selection', () => {
+  const data = new Telemetry();
+  data.add('a', 'aaaa', 'plan');
+  data.add('b', 'bbbb', 'execute');
+  data.add('b1', 'bbbb', 'PQ d1', 'b');
+  const panel = new Inspector(data, undefined, theme, () => 7, () => {}, () => {});
+  const screen = () => panel.render(40).join('\n');
+  for (let i = 0; i < 4; i++) data.sink('a')({ start: String(i), name: `older-${i}` });
+  data.sink('b1')({ start: '1', name: 'newest' });
+  assert.match(screen(), /Activity.*\nLive.*\n@bbbb PQ d1 · start newest\b[^\n]*\n@aaaa · start older-3/);
+  panel.handleInput('\x1b[B');
+  const paused = screen();
+  assert.match(paused, /Paused · J Jump to live.*\n@aaaa · start older-3/);
+  for (let i = 0; i < 240; i++) data.sink('b')({ start: String(i), name: `fresh-${i}` });
+  assert.equal(screen(), paused);
+  panel.handleInput('\x1b[Z');
+  assert.match(screen(), /Agents.*\n[^\n]*\n@aaaa .*plan/);
+  panel.handleInput('\t');
+  assert.equal(screen(), paused);
+  panel.handleInput('j');
+  assert.match(screen(), /Live.*\n@bbbb · start fresh-239/);
+  data.sink('b')({ start: 'final', name: 'following' });
+  assert.match(screen(), /Live.*\n@bbbb · start following/);
+  panel.handleInput('\x1b');
+  assert.match(screen(), /› @aaaa .*plan/);
+});
+
+test('filtered Activity includes only its family and handles empty history', () => {
+  const data = new Telemetry();
+  data.add('a', 'aaaa', 'plan');
+  data.add('a1', 'aaaa', 'PQ d1', 'a');
+  data.add('b', 'bbbb', 'execute');
+  const render = (ref: string) => new Inspector(data, ref, theme, () => 24, () => {}, () => {}).render(40).join('\n');
+  assert.match(render('aaaa'), /@aaaa PQ d1 · queued.*\n@aaaa · starting/);
+  assert.doesNotMatch(render('aaaa'), /@bbbb/);
+  assert.match(render('cccc'), /No activity observed/);
 });
