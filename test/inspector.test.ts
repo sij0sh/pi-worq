@@ -122,6 +122,38 @@ test('bounded layouts and independent evidence retention through out-of-order to
 });
 
 
+test('dock shows each agent’s harness/model/thinking left of Activity', () => {
+  const data = new Telemetry();
+  data.add('owner', 'aaaa', 'plan', undefined, undefined, undefined, 'Add the model column');
+  data.add('child', 'aaaa', 'PQ d1', 'owner');
+  data.add('plain', 'cccc', 'execute');
+  for (const [key, model, thinking] of [
+    ['owner', 'commandcode/deepseek/deepseek-v4.1-flash', 'max'],
+    ['child', 'anthropic/claude-sonnet-4.5', 'high'],
+  ] as const) data.sink(key)({ setup: { sdk: 'pi', model, thinking, skills: [] } });
+  for (const key of ['owner', 'child', 'plain']) data.sink(key)({ start: '1', name: 'read_file' });
+  const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
+  const [header, labels, ...rest] = dock.render(120);
+  const row = (marker: string) => rest.find(line => line.includes(marker))!;
+  const model = labels!.indexOf('MODEL');
+  const activity = labels!.indexOf('ACTIVITY');
+  const cell = (line: string) => line.slice(model, activity);
+  assert.ok(model > labels!.indexOf('AGENT') && model < activity);
+  // The provider stays in the inspector, and the longest label keeps exactly one space before Activity.
+  assert.equal(cell(row('plan:')), 'pi/deepseek-v4.1-flash/max ');
+  assert.equal(cell(row('↳')).trimEnd(), 'pi/claude-sonnet-4.5/high');
+  assert.equal(cell(row('execute')).trimEnd(), '—');
+  assert.equal(visibleWidth(row('plan:').slice(0, row('plan:').indexOf('read_file'))), activity);
+  assert.ok([header, labels, ...rest].every(line => visibleWidth(line!) === 120));
+  assert.doesNotMatch(dock.render(80)[1]!, /MODEL/);
+  // A ref that would push titles below their floor drops the column rather than truncating the model.
+  data.sink('plain')({ setup: { sdk: 'pi', model: 'openrouter/meta/muse-spark-1.3-contributor-extra-long', thinking: 'minimal', skills: [] } });
+  assert.doesNotMatch(dock.render(120)[1]!, /MODEL/);
+  const bare = new Telemetry();
+  bare.add('x', 'dddd', 'plan');
+  assert.doesNotMatch(agentDock(bare, theme, () => false, () => {}, () => {}, () => 24).render(140)[1]!, /MODEL/);
+});
+
 test('dock prefixes an execute title without repeating the kind in compact view', () => {
   const data = new Telemetry();
   data.add('owner', 'abcd', 'execute', undefined, undefined, undefined, 'Fix it');

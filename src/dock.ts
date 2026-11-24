@@ -10,6 +10,8 @@ export function elapsed(ms: number) {
 }
 const cell = (s: string, n: number) => { const t = truncateToWidth(s,n,'…'); return t + ' '.repeat(Math.max(0,n-visibleWidth(t))); };
 export const metrics = (r: Row) => [r.rate == null ? '—' : `${r.rate.toFixed(1)}%`, r.speed == null ? '—' : `${Math.round(r.speed)}`, String(r.turns ?? '—')];
+/** The dock's `harness/model/thinking` label; the model ref's provider/id stays in the inspector. Empty when setup was not observed. */
+const modelLabel = (r: Row) => [r.setup?.sdk, r.setup?.model?.split('/').filter(Boolean).at(-1), r.setup?.thinking].filter(Boolean).join('/');
 const contextUsage = ({ context }: Row) => {
   if (context?.percent == null) return '—';
   const n = context.contextWindow;
@@ -36,11 +38,15 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     if (folded()) return [header];
     // Keep Activity readable, but give extra space to titles and PQ questions.
     const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);
-    const sizes = w >= 74 ? [w-40-activityWidth,activityWidth,7,7,7,7,12]
+    // MODEL sits against ACTIVITY and takes only what the longest visible label needs, so the slack stays with titles.
+    const longest = Math.max(0, ...visible.map(r => visibleWidth(modelLabel(r))));
+    const modelWidth = Math.max(12, longest+1);
+    const showModel = w >= 74 && longest > 0 && w-40-activityWidth-modelWidth >= 18;
+    const sizes = w >= 74 ? [w-40-activityWidth-(showModel ? modelWidth : 0),...(showModel ? [modelWidth] : []),activityWidth,7,7,7,7,12]
       : w >= 45 ? [w-18-activityWidth,activityWidth,8,10]
       : [Math.floor(w*.5),w-Math.floor(w*.5)];
     const table = (values:string[]) => sizes.map((n,i)=>cell(values[i]??'',n)).join('');
-    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT','ACTIVITY','AGE','CACHE','TOK/S','TURNS','CTX']);
+    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT',...(showModel ? ['MODEL'] : []),'ACTIVITY','AGE','CACHE','TOK/S','TURNS','CTX']);
     return [header,theme.fg('muted',labels),...visible.map(r=>{
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
@@ -52,7 +58,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : prefix ? r.state : `${r.role} ${r.state}`}`,w);
       const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;
       const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
-      const rest = table(['',activity,age,cache,speed,turns,contextUsage(r)]).slice(sizes[0]);
+      const rest = table(['',...(showModel ? [modelLabel(r) || '—'] : []),activity,age,cache,speed,turns,contextUsage(r)]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;
     })];
   } }, e=>{
