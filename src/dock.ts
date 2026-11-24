@@ -59,9 +59,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
       if(w < 35 && r.question && r.parent) return cell(`↳ ${r.question}`,w);
-      const prefix = !r.parent && r.title != null
-        ? r.workflow ? 'Workflow : ' : r.role === 'plan' || r.role === 'execute' ? `${r.role}: ` : ''
-        : '';
+      const prefix = !r.parent && r.title != null ? `${r.role}: ` : '';
       const title = prefix ? `${prefix}${r.title}` : r.title;
       if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : prefix ? r.state : `${r.role} ${r.state}`}`,w);
       const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;

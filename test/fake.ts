@@ -1,12 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Value } from "typebox/value";
 import type { AgentEvent } from "../src/agent.ts";
-import { DEFAULT_LIMITS, MAIN, type Config, type Limits } from "../src/runtime/config.ts";
+import { DEFAULT_LIMITS, type Config, type Limits } from "../src/runtime/config.ts";
 import { errorText } from "../src/contracts.ts";
-import { loadPrompts } from "../src/prompts.ts";
+import { loadPrompts, type Kind } from "../src/prompts.ts";
+import { loadCatalog } from "../src/runtime/workflows.ts";
 import type { Capabilities, CoreHandle, Driver, Spec } from "../src/sdk/contract.ts";
 import { Worq } from "../src/worq.ts";
 
@@ -141,12 +143,19 @@ export async function repo() {
   return { dir, root, state: join(dir, "state"), git };
 }
 
-export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}, telemetry?: import('../src/telemetry.ts').Telemetry, prompts = loadPrompts()) {
+/** The shipped packages, provisioned into a throwaway profile exactly as a first start would. */
+export function shippedKinds(): Map<string, Kind> {
+  const profile = mkdtempSync(join(tmpdir(), "worq-profile-"));
+  return loadCatalog(profile).kinds;
+}
+export const KINDS: ReadonlyMap<string, Kind> = shippedKinds();
+export const config = (limits: Partial<Limits> = {}): Config => ({ path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, approveExtensions: false });
+
+export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}, telemetry?: import('../src/telemetry.ts').Telemetry, kinds: ReadonlyMap<string, Kind> = KINDS) {
   const events: AgentEvent[] = [];
   const seen: Spec[] = [];
-  const config: Config = { path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, approveExtensions: false, sdks: ["pi"], runtime: () => ({ ...MAIN }) };
   let wake: (() => void) | undefined;
-  const worq = new Worq({ telemetry, driver: fakeDriver(scripts, seen), prompts, config, state, cwd: root,
+  const worq = new Worq({ telemetry, driver: fakeDriver(scripts, seen), prompts: loadPrompts(), kinds, config: config(limits), state, cwd: root,
     notify: (event) => { events.push(event); wake?.(); } });
   /** Resolve when an event of this type for this ref arrives. */
   const next = async (type: AgentEvent["type"], ref?: string, count = 1) => {

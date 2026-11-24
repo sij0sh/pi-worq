@@ -3,20 +3,22 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
-import { Block, errorText, literals, obj, parse, text } from "./contracts.ts";
+import { Block, errorText, obj, parse, text } from "./contracts.ts";
 import { controlExtension, controlPipe, windows } from "./platform.mjs";
-import { REF_PATTERN, type Worq } from "./worq.ts";
+import { KIND_PATTERN, REF_PATTERN, type Worq } from "./worq.ts";
 
 const ref = Type.String({ pattern: REF_PATTERN, description: "Exact agent name from worq_spawn or worq_list" });
-/** One schema for the Pi tools, /worq subcommands and the worq CLI. */
-export function ops(kinds: string[]) {
+/** One schema for the Pi tools, /worq subcommands and the worq CLI. Kind is checked against the live catalog, not an enum. */
+export function ops() {
   return {
     spawn: obj({
-      kind: literals(kinds as [string, ...string[]]),
-      task: Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver. At-sign mentions are literal." }),
-      title: Type.String({ minLength: 1, maxLength: 80, description: "A 2–4 word title summarizing this work" }),
+      kind: Type.String({ minLength: 1, maxLength: 64, pattern: KIND_PATTERN, description: "Installed agent package name" }),
+      task: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver; omit to run the package as written. At-sign mentions are literal." })),
+      title: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Optional 2–4 word title; generated when omitted" })),
       attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names or repo-relative paths under .agents/plans/" })),
-      verify: Type.Optional(Type.Boolean({ description: "Reviewed kinds only; false skips the independent review" })),
+      sdk: Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9-]*$", description: "Harness id; defaults to pi" })),
+      model: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Model ref for the harness; defaults to Main's model (pi) or the harness default" })),
+      thinking: Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z]+$", description: "Thinking level; defaults to Main's when the model supports it" })),
     }),
     list: obj({ ref: Type.Optional(ref) }),
     send: obj({ ref, text: text(6000) }),
@@ -30,16 +32,23 @@ export function ops(kinds: string[]) {
 export type Ops = ReturnType<typeof ops>;
 export type Op = keyof Ops;
 
+/** Tool and socket requests: never user authority, never a picker. */
 export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown, signal?: AbortSignal): Promise<{ text: string; data?: unknown }> {
   if (!(op in table)) throw new Block("op", `Unknown operation ${op}`);
   const key = op as Op;
+  // Legacy wire field: review follows the package. A redundant true is dropped by Worq.launch; false is refused there.
+  let verify: unknown;
+  if (key === "spawn" && raw && typeof raw === "object" && "verify" in raw) {
+    ({ verify, ...raw } = raw as Record<string, unknown>);
+    if (typeof verify !== "boolean") throw new Block("invalid-payload", "spawn: /verify must be boolean");
+  }
   const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
     case "spawn": {
-      const { kind, task, verify, title, attach } = args as Static<Ops["spawn"]>;
-      const agent = await worq.spawn(kind, task, { verify, title, attach }, signal);
+      const request = args as Static<Ops["spawn"]>;
+      const agent = await worq.launch({ ...request, ...(verify !== undefined ? { verify: verify as boolean } : {}) }, { caller: "main", signal });
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
-      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and parked digest arrive as Worq notifications.`, data: { ref: agent.ref } };
+      return { text: `Spawned ${request.kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and parked digest arrive as Worq notifications.`, data: { ref: agent.ref } };
     }
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }

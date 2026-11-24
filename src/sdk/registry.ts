@@ -1,63 +1,127 @@
-import { Block } from "../contracts.ts";
-import type { Config } from "../runtime/config.ts";
+import { lstatSync, readdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Block, errorText } from "../contracts.ts";
+import { MAIN } from "../runtime/config.ts";
 import { compose, EMPTY, skillTool, type Resources } from "../runtime/resources.ts";
+import { contained, exists, outsideCheckout } from "../runtime/skills.ts";
 import { assertRuntime, supportedThinking, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SDKAdapter, type SessionEvent } from "./contract.ts";
 import type { PiHost } from "./pi.ts";
 
-/** Explicit host dependencies, one optional entry per SDK that needs something from the host. */
+/** Explicit host dependencies. Only the shipped Pi adapter needs any; installed adapters get `AdapterContext`. */
 export interface HostServices { pi?: PiHost }
 
-/**
- * One record per SDK: metadata `loadConfig` needs (no SDK import) plus a lazy loader.
- * Adding an SDK = one adapter file under src/sdk/ + one record here.
- */
+/** One SDK: a lazy loader. Discovery never imports it. */
 export interface SDKRecord {
-  /** Model refs this SDK can resolve. */
-  modelRef: RegExp;
   load(host: HostServices): Promise<SDKAdapter>;
 }
-export const SDKS: Record<string, SDKRecord> = {
-  pi: { modelRef: /^[^/\s]+\/[^\s]+$/, load: async (host) => (await import("./pi.ts")).piAdapter(host.pi) },
-};
+export const PI: SDKRecord = { load: async (host) => (await import("./pi.ts")).piAdapter(host.pi) };
+
+/** What an installed adapter's factory receives. */
+export interface AdapterContext { id: string; dir: string; agentDir: string }
+/**
+ * Installed adapter entry: `<agentDir>/worq/adapters/<id>/adapter.mjs`, default export
+ * `{ version: 1, create(context: AdapterContext): SDKAdapter | Promise<SDKAdapter> }`.
+ * Installing one is the trust opt-in: it runs in-process as operator code (not a sandbox).
+ */
+export interface AdapterFactory { version: 1; create(context: AdapterContext): SDKAdapter | Promise<SDKAdapter> }
+const ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const METHODS = ["models", "capabilities", "validateRuntime", "open"] as const;
 
 /**
- * The core's single Driver. Per role it resolves the runtime preset, judges it against the SDK's
- * capabilities and prepares the shared environment (instructions, skill index + `skill` tool, extensions).
+ * The shipped Pi record plus every adapter folder in the operator's global directory. Folder = id.
+ * Never project-local, never a path from a launch request. Broken folders are reported; siblings still register.
  */
-export async function createDriver(host: HostServices, config: Config, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = SDKS): Promise<Driver> {
+export function discoverAdapters(agentDir: string): { records: Record<string, SDKRecord>; problems: { path: string; message: string }[] } {
+  const records: Record<string, SDKRecord> = { pi: PI };
+  const problems: { path: string; message: string }[] = [];
+  const base = join(agentDir, "worq", "adapters");
+  try {
+    if (!exists(base)) return { records, problems };
+    const root = realpathSync(base);
+    outsideCheckout(root);
+    for (const id of readdirSync(root).sort()) {
+      if (id.startsWith(".")) continue;
+      const path = join(root, id);
+      try {
+        if (!lstatSync(path).isDirectory()) continue;
+        if (!ID.test(id)) throw new Block("sdk", "adapter folder name must be lowercase letters and digits, hyphen-separated");
+        if (id === "pi") throw new Block("sdk", "pi is the shipped adapter and cannot be replaced");
+        const dir = contained(root, path);
+        const entry = join(dir, "adapter.mjs");
+        if (!exists(entry)) throw new Block("sdk", "add adapter.mjs");
+        const file = contained(dir, entry);
+        if (!lstatSync(file).isFile()) throw new Block("sdk", "adapter.mjs must be a regular file");
+        records[id] = { load: () => importAdapter(id, file, dir, agentDir) };
+      } catch (error) { problems.push({ path, message: errorText(error) }); }
+    }
+  } catch (error) { problems.push({ path: base, message: errorText(error) }); }
+  return { records, problems };
+}
+async function importAdapter(id: string, file: string, dir: string, agentDir: string): Promise<SDKAdapter> {
+  const module = await import(pathToFileURL(file).href) as { default?: Partial<AdapterFactory> };
+  const factory = module.default;
+  if (factory?.version !== 1 || typeof factory.create !== "function") throw new Block("sdk", `${file}: default export must be { version: 1, create(context) }`);
+  const adapter = await factory.create({ id, dir, agentDir });
+  const missing = METHODS.filter((name) => typeof (adapter as unknown as Record<string, unknown> | undefined)?.[name] !== "function");
+  if (missing.length) throw new Block("sdk", `${file}: adapter lacks ${missing.join(", ")}`);
+  return adapter;
+}
+
+/**
+ * The core's single Driver. Imports each SDK lazily by id (once, in-flight loads shared), judges runtimes
+ * against the SDK's capabilities and prepares the shared environment (instructions, skill index + `skill` tool, extensions).
+ */
+export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI }): Promise<Driver> {
+  const loading = new Map<string, Promise<SDKAdapter>>();
   const adapters = new Map<string, SDKAdapter>();
+  const installed = () => Object.keys(sdks).sort((a, b) => a === "pi" ? -1 : b === "pi" ? 1 : a.localeCompare(b));
   const load = async (sdk: string) => {
-    const record = sdks[sdk];
-    if (!record) throw new Block("config", `${config.path}: unknown sdk "${sdk}" (available: ${Object.keys(sdks).join(", ")})`);
-    if (!adapters.has(sdk)) adapters.set(sdk, await record.load(host));
+    if (adapters.has(sdk)) return adapters.get(sdk)!;
+    const record = Object.hasOwn(sdks, sdk) ? sdks[sdk] : undefined;
+    if (!record) throw new Block("sdk", `Unknown sdk "${sdk}" (installed: ${installed().join(", ")})`);
+    let pending = loading.get(sdk);
+    if (!pending) {
+      pending = record.load(host).then((adapter) => { adapters.set(sdk, adapter); return adapter; }, (error) => {
+        loading.delete(sdk);
+        throw new Block("sdk", `sdk "${sdk}" could not load: ${errorText(error)}`);
+      });
+      loading.set(sdk, pending);
+    }
+    return pending;
   };
   const adapter = (sdk: string) => {
     const found = adapters.get(sdk);
-    if (!found) throw new Block("config", `${config.path}: unknown sdk "${sdk}" (available: ${[...adapters.keys()].join(", ")})`);
+    if (!found) throw new Block("sdk", `sdk "${sdk}" is not loaded`);
     return found;
   };
-  // Lazily import only the SDKs a role can reach: the built-in "pi" plus every declared preset.
-  await Promise.all([...new Set(["pi", ...config.sdks])].filter((sdk) => sdks[sdk]).map(load));
 
   return {
+    sdks: installed,
+    async load(sdk) { await load(sdk); },
     async catalog() {
       const catalog = new Map<string, readonly string[]>();
-      for (const sdk of Object.keys(sdks)) {
-        // An optional backend without host services must not block installed ones.
-        if (!adapters.has(sdk)) { try { await load(sdk); } catch { continue; } }
-        catalog.set(sdk, await adapter(sdk).models());
+      for (const sdk of installed()) {
+        // Picker information only: one failing adapter must not hide the others.
+        try { await load(sdk); catalog.set(sdk, await adapter(sdk).models()); }
+        catch { if (adapters.has(sdk)) catalog.set(sdk, []); }
       }
       return catalog;
     },
     defaultModel(sdk) { return adapter(sdk).defaultModel?.(); },
     defaultThinking(sdk) { return adapter(sdk).defaultThinking?.(); },
-    capabilities(role, runtime = config.runtime(role)) {
+    capabilities(_role, runtime = MAIN) {
       return adapter(runtime.sdk).capabilities(runtime);
+    },
+    async validate(runtime, signal) {
+      signal.throwIfAborted();
+      await (await load(runtime.sdk)).validateRuntime(runtime, signal);
+      signal.throwIfAborted();
     },
     async open(spec): Promise<CoreHandle> {
       spec.signal.throwIfAborted();
-      const preset = spec.runtime ?? config.runtime(spec.name);
-      const sdk = adapter(preset.sdk);
+      const preset = spec.runtime ?? MAIN;
+      const sdk = await load(preset.sdk);
       const runtime = spec.runtime ?? { ...preset, model: preset.model ?? sdk.defaultModel?.() };
       const caps = sdk.capabilities(runtime);
       assertRuntime(runtime, caps, resources.extensions.length);
@@ -69,7 +133,7 @@ export async function createDriver(host: HostServices, config: Config, resources
       const skills = packages.map((s) => s.name);
       const emit = (event: SessionEvent) => spec.emit(event.type === "telemetry" && "setup" in event.value
         ? { type: "telemetry", value: { setup: { ...event.value.setup, sdk: runtime.sdk, skills } } } : event);
-      spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "built-in"}` });
+      spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "Main's defaults"}` });
       const handle = await sdk.open({
         ...rest, emit, runtime, thinking, extensions: resources.extensions,
         system: compose(spec.system, resources, packages),

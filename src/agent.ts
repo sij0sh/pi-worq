@@ -32,8 +32,8 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
+  /** The admitted runtime; PQ and review children inherit the owner's effective runtime. */
   runtime?: Runtime;
-  select(role: string, title: string, signal: AbortSignal): Promise<Runtime | undefined>;
   /** Live controllable sessions, keyed by telemetry row key. */
   sessions?: Sessions;
 }
@@ -50,7 +50,7 @@ export class Agent {
   readonly task: string;
   readonly attachments: Attachment[];
   readonly title: string;
-  /** The profile reviews and the spawn did not opt out. */
+  /** The package's review policy. */
   readonly reviewed: boolean;
   readonly branch?: string;
   readonly owner = process.pid;
@@ -89,7 +89,7 @@ export class Agent {
     this.deps.notify({ type: "warning", ref: this.ref, text: `${this.headline} ${message}` });
   };
 
-  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[] }) {
     this.deps = deps;
     this.ref = input.ref;
     this.title = input.title ?? input.ref;
@@ -98,7 +98,7 @@ export class Agent {
     if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
-    this.reviewed = input.kind.review && input.verify !== false;
+    this.reviewed = input.kind.review;
     if (input.kind.access === "write") this.branch = `worq/${input.ref}`;
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
@@ -112,7 +112,7 @@ export class Agent {
   /** The current round's review, if it ran. */
   get review() { return this.reviews.find((r) => r.round === this.round); }
   launch() {
-    this.deps.telemetry?.add(this.id, this.ref, this.kind.name, undefined, undefined, undefined, this.title, Boolean(this.kind.skill));
+    this.deps.telemetry?.add(this.id, this.ref, this.kind.name, undefined, undefined, undefined, this.title);
     this.deps.sessions?.set(this.id, {
       key: this.id, ref: this.ref, role: `agent.${this.kind.name}`, label: this.headline,
       consequence: "Stops the agent and every PQ and review it owns; its branch is kept.",
@@ -195,8 +195,8 @@ export class Agent {
   }
 
   private get children(): SubagentDeps {
-    const { driver, prompts, semaphore, select, telemetry, sessions } = this.deps;
-    return { driver, guard: prompts.guard, semaphore, select, telemetry, sessions, warning: this.warning,
+    const { driver, prompts, semaphore, telemetry, sessions } = this.deps;
+    return { driver, guard: prompts.guard, semaphore, runtime: () => this.conversation?.runtime ?? this.deps.runtime, telemetry, sessions, warning: this.warning,
       launched: (role, runtime, label) => { this.launches.push({ role, runtime, label }); } };
   }
 
@@ -363,7 +363,7 @@ export class Agent {
     let identity: Revision["identity"];
     if (this.kind.access === "read") {
       const path = `.agents/plans/plan-${this.ref}.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report, label: this.kind.skill ? "Workflow result" : "Plan" });
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report });
       await writeScoped(this.deps.root, path, markdown, { create: !this.plan });
       identity = { digest: createHash("sha256").update(markdown, "utf8").digest("hex") };
       this.plan = { path, text: markdown };

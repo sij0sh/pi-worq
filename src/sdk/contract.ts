@@ -19,14 +19,14 @@ export const tool = <T extends TSchema>(name: string, description: string, param
 
 /** One runtime selection for a session. */
 export interface Runtime {
-  /** Preset name; "main" uses the current Pi session. */
+  /** "main": Pi session defaults; "launch": a launch request set sdk, model or thinking. */
   name: string;
   sdk: string;
   model?: string;
   thinking?: string;
-  /** JSON path the override came from, "" for the built-in runtime. */
+  /** Field prefix for refusals ("" for none). */
   path: string;
-  /** JSON path that selected the override, "" when built-in. */
+  /** Where the selection came from, "" for Main's defaults. */
   via: string;
 }
 
@@ -111,18 +111,33 @@ export interface CoreHandle extends Omit<Handle, "configure" | "selection"> {
 
 /** Per-SDK adapter. */
 export interface SDKAdapter {
+  /** Optional information for the /worq picker. Never required for a launch. */
   models(): Promise<readonly string[]>;
   defaultModel?(): string | undefined;
   defaultThinking?(): string | undefined;
   capabilities(runtime: Runtime): Capabilities;
+  /**
+   * Required local preflight for a resolved runtime, before Worq reserves a slot, ref or worktree.
+   * Must not open a session, list models, probe credentials or send a request. Rejects malformed or locally
+   * unknown models, a missing required model and unsupported adapter-specific selections. It does not claim the
+   * backend will accept the model: account, network and provider-side resolution may still fail at open.
+   */
+  validateRuntime(runtime: Runtime, signal: AbortSignal): void | Promise<void>;
   open(spec: SessionSpec): Promise<Handle>;
 }
 /** Role router the core drives (see sdk/registry.ts). */
 export interface Driver {
+  /** Installed SDK ids (Pi first). */
+  sdks?(): readonly string[];
+  /** Import one SDK's adapter by id; required before its sync methods. Rejects unknown ids. */
+  load?(sdk: string): Promise<void>;
+  /** Picker information: each loadable SDK's models. A failing SDK is skipped. */
   catalog?(): Promise<ReadonlyMap<string, readonly string[]>>;
   defaultModel?(sdk: string): string | undefined;
   defaultThinking?(sdk: string): string | undefined;
   capabilities(role: string, runtime?: Runtime): Capabilities;
+  /** The adapter's local preflight (SDKAdapter.validateRuntime). */
+  validate?(runtime: Runtime, signal: AbortSignal): Promise<void>;
   open(spec: Spec): Promise<CoreHandle>;
 }
 

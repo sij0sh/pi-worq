@@ -1,7 +1,9 @@
 ---
+name: plan
+description: read-only; settles consequential decisions and saves a plan to .agents/plans/
 access: read
 review: true
-description: read-only; settles consequential decisions and saves a plan to .agents/plans/
+disable-model-invocation: false
 ---
 ## Kind: plan
 

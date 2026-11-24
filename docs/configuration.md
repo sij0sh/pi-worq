@@ -4,36 +4,39 @@ One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), 
 
 Both are read once per Pi session, when the first Worq tool call creates the Worq instance. Edit, then start a new Pi session; running agents keep what they launched with.
 
-Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Unknown SDKs and malformed model refs fail at load as `config`. A capability mismatch fails as `capability` at spawn / before each PQ or reviewer.
+Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Runtime problems (unknown SDK, unknown model, unsupported thinking, context isolation, extensions) fail at launch, before any slot, ref or worktree.
 
 ```json
 {
-  "plan": { "sdk": "pi", "model": "provider/model", "thinking": "high" },
-  "execute": { "thinking": "medium" },
-  "review": { "model": "provider/review-model" },
-  "launch": { "countdownSeconds": 5, "interactive": true },
   "approveExtensions": false,
   "limits": { "agents": 4, "idleMinutes": 60 }
 }
 ```
 
-Top-level keys: `plan`, `execute`, `review`, `launch`, `approveExtensions`, `limits`.
+Top-level keys: `approveExtensions`, `limits`.
 
-## Runtime overrides
+## Runtime
 
-`plan` and `execute` apply to the corresponding workers. `review` applies to every independent review. PQ subagents and workflows always start with Main's live Pi selection. Overrides are independent, and all three keys and their fields are optional.
+No config. Every launch resolves the same way, from `/worq`, `worq_spawn` or `worq spawn`:
 
-- `sdk`: execution backend (default `pi`; the only backend shipped today).
-- `model`: defaults to Main's current model for Pi. Pi refs use `<provider>/<model>`. Other SDKs use their own model refs and defaults.
-- `thinking`: defaults to Main's current thinking level when the selected Pi model supports it; otherwise the SDK decides. An explicitly configured unsupported level fails as `capability`.
+- `sdk`: explicit, else `pi`. The adapter is imported on first use.
+- `model`: explicit, else the adapter default (Pi: Main's current model).
+- `thinking`: explicit, else the adapter default (Pi: Main's level) when the model supports it; an unsupported inherited level is dropped, an unsupported explicit one refused (`capability`).
+- Then the adapter's local preflight (`validateRuntime`) rejects malformed/unknown models before admission. Account, network and provider-side failures can still surface at open; the agent then fails with the existing cleanup.
 
-To migrate, remove `default`, `runtimes` and `roles`. Copy any worker and review settings you still want directly into `plan`, `execute` and `review`, keeping only `sdk`, `model` and `thinking`. Remove the old runtime keys even if you don't want any overrides.
+PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included). `/worq configure` / the dock change a live session; the harness stays locked.
 
-## Launch picker
+`/worq` shows a runtime step (harness, model, thinking) with Main's selection preselected. Enter launches, Esc cancels; no countdown. Changing harness resets model and thinking to that harness's defaults. Tool and CLI launches never open it.
 
-In the TUI, each new SDK session starts a five-second countdown with Main's current selection or the configured role override preselected. Parallel sessions share one popup: Tab selects a pending agent, ↑/↓ selects harness, model or thinking, and ←/→ changes it. Editing pauses that agent’s countdown. Enter launches immediately, A launches all, and Esc cancels the selected launch. Picker changes apply only to that session. Existing conversations continue without another countdown.
+## Migration
 
-Set `"launch": { "interactive": true, "countdownSeconds": 5 }` in `pi-worq.json` to customize this. `interactive: false`, zero seconds, or a non-TUI host launches defaults immediately. Only Pi ships today.
+| Old key | Now | Effect until removed |
+|---|---|---|
+| `plan`, `execute`, `review` (even `{}`) | launch request fields; reviews inherit | **every new launch refused** with the file, keys and these instructions. list/send/cancel/log/configure and cleanup keep working |
+| `default`, `runtimes`, `roles`, `model`, … (pre-preset formats) | same | same |
+| `launch` | removed (no countdown) | ignored; one warning per Pi session on first launch use |
+
+Relying on a distinct reviewer model? Keep the older release until you accept inherited reviewer runtime; Worq never translates or silently drops it. Fix the file, then reload Pi.
 
 ## Shared resources
 
@@ -61,13 +64,17 @@ Subagents are read-only sessions answering one probing question. The delegating 
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-The name labels the child without changing its runtime default. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
+The name labels the child; it runs on its agent's runtime. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
 
-Each submission of a `review: true` kind gets one review subagent (`prompts/review.md`, `review` override when set). Built-in plan and execute are reviewed unless spawned with `verify: false`; workflows only when they set `review: true`. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Each submission of a `review: true` package gets one review subagent (`prompts/review.md`), on the agent's runtime. Shipped `plan` and `execute` set `review: true`. `verify:false` is refused; install an unreviewed package instead. `worq list <ref>` prints each session's resolved runtime.
 
 ## Workflows
 
-Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. `limits.agents` counts active workflows; turns spend from the same budgets. Reviewed only with `review: true`. See `docs/workflows.md`.
+The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `plan` and `execute` are seeded on first use. `disable-model-invocation: true` keeps one user-only (`/worq`). Reviewed only with `review: true`. See `docs/workflows.md`.
+
+## Adapters
+
+Extra harnesses: `<agentDir>/worq/adapters/<id>/adapter.mjs`. Installing one is the trust opt-in (operator code, in-process). See `docs/sdk.md`.
 
 ## Limits
 
@@ -93,17 +100,20 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 
 ## Verifying a configuration
 
-- `worq list <ref>` shows review policy and each role's resolved runtime (`name`, `sdk`, `path`, `via`).
-- The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <path>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
-- Skipped review reads `Review: none`.
+- `worq list <ref>` shows review policy and each session's resolved runtime (`name` `main` or `launch`, `sdk`, `model`, `thinking`).
+- The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <source>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
+- An unreviewed package reads `Review: none`.
 
 ## Failures and fixes
 
 | Failure | Cause | Fix |
 |---|---|---|
-| `… old Worq format` | Obsolete runtime keys | Move overrides to `plan`, `execute` or `review`; resources to `<agentDir>/worq/` |
-| `/plan/model … not a valid pi model ref` | Ref shape | Use `<provider>/<model>` |
-| `unknown sdk` | `sdk` names no registered adapter | Use `pi` |
+| `… are no longer supported, so new launches are refused` | Removed presets / old format | See Migration; remove the keys, reload |
+| `/launch is ignored` | Removed countdown settings | Remove `launch` |
+| `… is not a Pi model ref` | Ref shape | Use `<provider>/<model>` |
+| `Unknown sdk` | No installed adapter with that id | `pi`, or install `<agentDir>/worq/adapters/<id>/` |
+| `sdk "<id>" could not load` | Adapter import/factory failed | Fix the adapter; other SDKs keep working |
+| `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; use an unreviewed package |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
 | `Extension approval required` | Files in `worq/extensions/` | Set `approveExtensions: true` or remove them |
@@ -111,7 +121,8 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 | `Untrusted resource` / `Repository resource` | Escaping link, or `worq/` inside a checkout | Move the file / directory |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
 | `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |
-| `invocation` | User-only workflow sent to `worq_spawn`, or a built-in kind to `/worq workflow` | `/worq workflow`; `worq_spawn` for built-ins |
+| `invocation` | User-only package sent to `worq_spawn` or the CLI | Launch it with `/worq` |
+| `kind` | No installed package with that name | Install it, or check `/worq` warnings |
 
 ## Recipes
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
-import { DEFAULT_LIMITS, MAIN, type Config } from "../src/runtime/config.ts";
+import { MAIN, } from "../src/runtime/config.ts";
 import { Block, obj, text } from "../src/contracts.ts";
 import { EMPTY, type Resources } from "../src/runtime/resources.ts";
 import { assertRuntime, type Capabilities, type Driver, type Handle, type Runtime, type SDKAdapter, type SessionSpec, type Spec, type Tool } from "../src/sdk/contract.ts";
@@ -310,10 +310,10 @@ test("conformance: a session that finishes opening after dispose is disposed, no
 /** A recording SDK adapter: proves the router hands adapters a resolved, prepared spec. */
 function recordingSdk(caps: Capabilities, seen: SessionSpec[], defaultThinking?: () => string): SDKRecord {
   return {
-    modelRef: /.*/,
     load: async (): Promise<SDKAdapter> => ({
       models: async () => ['m/a', 'm/b'],
       capabilities: () => caps,
+      validateRuntime: () => {},
       defaultThinking,
       async open(spec) {
         seen.push(spec);
@@ -325,19 +325,17 @@ function recordingSdk(caps: Capabilities, seen: SessionSpec[], defaultThinking?:
     }),
   };
 }
-const configFor = (runtime: (role: string) => Runtime, sdks: string[] = ["pi"]): Config =>
-  ({ path: "test", limits: DEFAULT_LIMITS, approveExtensions: false, sdks, runtime });
 const roleSpec = (name: string): Spec => ({ id: "s", name, cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
 
 test("registry: createDriver routes by runtime and prepares the shared environment", async () => {
   const seen: SessionSpec[] = [];
   const sdks = { pi: recordingSdk(FULL_CAPS, seen, () => "medium"), test: recordingSdk(FULL_CAPS, seen) };
-  const review: Runtime = { name: "review", sdk: "test", model: "m/a", path: "/review", via: "/review" };
-  const config = configFor((role) => role === "review" ? review : { ...MAIN }, ["test"]);
+  const review: Runtime = { name: "launch", sdk: "test", model: "m/a", path: "", via: "launch request" };
   const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
-  const driver = await createDriver({}, config, resources, sdks);
+  const driver = await createDriver({}, resources, sdks);
+  assert.deepEqual(driver.sdks?.(), ["pi", "test"]);
   for (const role of ["agent.plan", "subagent", "review"]) {
-    const handle = await driver.open(roleSpec(role));
+    const handle = await driver.open(role === "review" ? { ...roleSpec(role), runtime: review } : roleSpec(role));
     const spec = seen.at(-1)!;
     assert.equal(spec.runtime.sdk, role === "review" ? "test" : "pi", `${role} routes to its runtime's sdk`);
     assert.match(spec.system, /^S\n\nOperator instructions a\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
@@ -354,10 +352,11 @@ test("registry: createDriver routes by runtime and prepares the shared environme
   (await driver.open({ ...roleSpec('agent.plan'), runtime: { ...MAIN, model: 'm/a' } })).dispose();
   assert.equal(seen.at(-1)?.thinking, undefined, "an admitted SDK default stays resolved");
 
-  const minimal = await createDriver({}, configFor(() => ({ ...MAIN })), resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, []) });
+  const minimal = await createDriver({}, resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, []) });
   await assert.rejects(minimal.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "capability" && /extension/.test(error.message));
-  const unknown = await createDriver({}, configFor(() => ({ ...MAIN, sdk: "claude" })), EMPTY, sdks);
-  assert.throws(() => unknown.capabilities("agent.plan"), (error: unknown) => error instanceof Block && error.code === "config" && /unknown sdk "claude"/.test(error.message));
+  const unknown = await createDriver({}, EMPTY, sdks);
+  await assert.rejects(unknown.load!("claude"), (error: unknown) => error instanceof Block && error.code === "sdk" && /Unknown sdk "claude" \(installed: pi, test\)/.test(error.message));
+  await assert.rejects(unknown.open({ ...roleSpec("agent.plan"), runtime: { ...MAIN, sdk: "claude" } }), /Unknown sdk "claude"/);
 });
 
 test("pi: capability snapshot derives thinking from the runtime's model", () => {
@@ -371,12 +370,16 @@ test("pi: capability snapshot derives thinking from the runtime's model", () => 
   assert.deepEqual(caps.context, { system: "replace", ambientInstructions: false });
   assert.deepEqual(piAdapter({ model, modelRegistry: registry } as never).capabilities(MAIN).thinking, caps.thinking, "no runtime model: Main's model");
   assert.throws(() => adapter.capabilities({ ...MAIN, model: "q/z", path: "/plan" }), /\/plan\/model: Pi does not know model q\/z/);
+  assert.throws(() => adapter.validateRuntime({ ...MAIN, model: "q/z" }, new AbortController().signal), /model: Pi does not know model q\/z/);
+  assert.throws(() => adapter.validateRuntime({ ...MAIN, model: "no-slash" }, new AbortController().signal), /not a Pi model ref/);
+  assert.throws(() => adapter.validateRuntime(MAIN, new AbortController().signal), (e: unknown) => e instanceof Block && e.code === "model", "no Main model and none requested");
+  assert.doesNotThrow(() => adapter.validateRuntime({ ...MAIN, model: "p/m" }, new AbortController().signal));
   assert.deepEqual(thinkingLevels({ reasoning: false }), ["off"]);
   assert.deepEqual(thinkingLevels(undefined), []);
 });
 
 test("pi: nothing to resolve is Block(model)", async () => {
-  const driver = await createDriver({ pi: { model: undefined, modelRegistry: { find: () => undefined } } as never }, configFor(() => ({ ...MAIN })));
+  const driver = await createDriver({ pi: { model: undefined, modelRegistry: { find: () => undefined } } as never });
   await assert.rejects(driver.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "model");
 });
 
@@ -390,13 +393,14 @@ test("live: Pi adapter opens a real session and submits", { skip: process.env.WO
   assert.ok(model, `unknown model ${ref}`);
   const registry = { find: (provider: string, id: string) => models.getModel(provider, id) };
   const runtime: Runtime = { name: "live", sdk: "pi", model: ref, path: "/plan", via: "/plan" };
-  const driver = await createDriver({ pi: { model, modelRegistry: registry } as never }, configFor(() => runtime));
-  const caps = driver.capabilities("subagent");
+  const driver = await createDriver({ pi: { model, modelRegistry: registry } as never });
+  await driver.load!("pi");
+  const caps = driver.capabilities("subagent", runtime);
   assert.ok(caps.thinking.length > 0, "the live model must expose a thinking level");
   const logs: string[] = [];
   const c = new Conversation({
     driver, signal: new AbortController().signal, turns: 6, minutes: 3, finish,
-    spec: { name: "subagent", cwd: process.cwd(), system: "You are a conformance probe. Call submit with value set to the word ready.", tools: tools(), log: (line) => { logs.push(line); } },
+    spec: { runtime, name: "subagent", cwd: process.cwd(), system: "You are a conformance probe. Call submit with value set to the word ready.", tools: tools(), log: (line) => { logs.push(line); } },
   });
   try {
     const result = await c.run("Call the echo tool with value hi, then call submit with value ready.");

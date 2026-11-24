@@ -8,7 +8,6 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { isModelType } from "@earendil-works/pi-ai/models";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Block, obj, text } from "../src/contracts.ts";
-import { DEFAULT_LIMITS, loadConfig, type Config } from "../src/runtime/config.ts";
 import { EMPTY } from "../src/runtime/resources.ts";
 import { tool, type CoreHandle, type Driver, type Handle, type Runtime, type RuntimeChange, type SDKAdapter, type Spec } from "../src/sdk/contract.ts";
 import { createDriver, type HostServices } from "../src/sdk/registry.ts";
@@ -76,6 +75,7 @@ test("registry: configure validates against the new model and tracks the runtime
   const adapter: SDKAdapter = {
     models: async () => ["m/a", "m/b"],
     capabilities: (runtime: Runtime) => ({ ...FULL_CAPS, thinking: levels[runtime.model ?? "m/a"] ?? [] }),
+    validateRuntime: () => {},
     async open() {
       const handle: Handle = { prompt: async () => "completed", get streaming() { return false; }, abort: async () => {}, dispose() {},
         configure: async (change) => { applied.push(change); } };
@@ -83,9 +83,8 @@ test("registry: configure validates against the new model and tracks the runtime
     },
   };
   const runtime: Runtime = { name: "plan", sdk: "pi", model: "m/a", thinking: "low", path: "/plan", via: "/plan" };
-  const config: Config = { path: "t", limits: DEFAULT_LIMITS, approveExtensions: false, sdks: ["pi"], runtime: () => runtime };
-  const driver = await createDriver({}, config, EMPTY, { pi: { modelRef: /.*/, load: async () => adapter } });
-  const handle = await driver.open({ id: "s", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
+  const driver = await createDriver({}, EMPTY, { pi: { load: async () => adapter } });
+  const handle = await driver.open({ id: "s", runtime, name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
   assert.equal(handle.runtime?.thinking, "low");
   assert.throws(() => handle.check!({ model: "m/b", thinking: "high" }), (e: unknown) => e instanceof Block && e.code === "capability", "thinking is judged against the new model");
   await handle.configure!({ thinking: "high" });
@@ -104,7 +103,7 @@ test("Pi applies a queued model and thinking switch after tools, within the same
   assert.ok(first && second);
   await modelRuntime.setRuntimeApiKey("openai", "test-transport-only");
   const registry = { runtime: modelRuntime, find: (provider: string, id: string) => [first, second].find(m => m.provider === provider && m.id === id) };
-  const driver = await createDriver({ pi: { model: first, modelRegistry: registry as unknown as NonNullable<HostServices["pi"]>["modelRegistry"], thinkingLevel: "medium", agentDir: cwd } }, loadConfig(cwd));
+  const driver = await createDriver({ pi: { model: first, modelRegistry: registry as unknown as NonNullable<HostServices["pi"]>["modelRegistry"], thinkingLevel: "medium", agentDir: cwd } });
   const requests: { model: string; thinking?: string; roles: string[] }[] = [];
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
   modelRuntime.streamSimple = (model, { messages }, options) => {

@@ -10,14 +10,14 @@ import { DEFAULT_LIMITS } from "../src/runtime/config.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import { readTools } from "../src/tools.ts";
 import { scoped, worktree } from "../src/workspace.ts";
-import { fakeDriver } from "./fake.ts";
+import { fakeDriver, KINDS } from "./fake.ts";
 
 test("log: a long run keeps its opening lines as well as its tail", () => {
   const prompts = loadPrompts();
   const agent = new Agent({
     driver: fakeDriver({}), prompts, limits: DEFAULT_LIMITS, state: "/tmp", root: "/tmp", semaphore: new Semaphore(1),
-    notify() {}, async select() { return undefined; },
-  }, { ref: "aaaa", kind: prompts.kinds.get("plan")!, task: "task", attachments: [] });
+    notify() {},
+  }, { ref: "aaaa", kind: KINDS.get("plan")!, task: "task", attachments: [] });
   for (let i = 0; i < 300; i++) agent.log(`line ${i}`);
   const kept = agent.tail(1000).map((entry) => entry.line);
   assert.equal(kept.length, 200);

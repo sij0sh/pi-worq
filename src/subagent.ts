@@ -28,7 +28,8 @@ export interface SubagentDeps {
   driver: Driver;
   guard: string;
   semaphore: Semaphore;
-  select(role: string, title: string, signal: AbortSignal): Promise<Runtime | undefined>;
+  /** The owner's effective runtime at child launch: children never pick their own. */
+  runtime(): Runtime | undefined;
   telemetry?: Telemetry;
   sessions?: Sessions;
   warning?(message: string): void;
@@ -86,7 +87,7 @@ export async function runSubagent<T extends TSchema>(deps: SubagentDeps, a: Assi
     },
   });
   try {
-    const runtime = await deps.select(a.role, a.title, signal);
+    const runtime = deps.runtime();
     release = await deps.semaphore.acquire(signal);
     if (runtime) deps.launched?.(a.role, runtime, a.label);
     a.started?.();

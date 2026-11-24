@@ -1,68 +1,43 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
-import { Agent } from "../src/agent.ts";
-import type { Semaphore } from "../src/subagent.ts";
-import { DEFAULT_LIMITS, loadConfig, type Config } from "../src/runtime/config.ts";
+import { loadConfig, type Config } from "../src/runtime/config.ts";
 import { Block } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import { compose, loadResources } from "../src/runtime/resources.ts";
-import { assertRuntime, type Runtime, type Spec } from "../src/sdk/contract.ts";
+import { assertRuntime, type Runtime } from "../src/sdk/contract.ts";
 import { Worq } from "../src/worq.ts";
-import { fakeDriver, fakeHarness, FULL_CAPS, MINIMAL_CAPS, pass, repo } from "./fake.ts";
-
-async function configOf(value: unknown, sdks?: string[]): Promise<Config> {
-  const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
-  await writeFile(join(dir, "pi-worq.json"), JSON.stringify(value));
-  return sdks ? loadConfig(dir, sdks) : loadConfig(dir);
-}
+import { fakeDriver, fakeHarness, FULL_CAPS, KINDS, MINIMAL_CAPS, pass, repo } from "./fake.ts";
 const configError = (error: unknown) => error instanceof Block && error.code === "config";
 
-test("config: only Plan, Execute and Review have overrides", async () => {
-  const config = await configOf({
-    plan: { model: "openai/gpt-5", thinking: "medium" },
-    execute: { sdk: "pi", thinking: "high" },
-    review: { model: "anthropic/claude-haiku-4-5" },
-  });
-  assert.deepEqual(config.runtime("agent.plan"), { name: "plan", sdk: "pi", path: "/plan", via: "/plan", model: "openai/gpt-5", thinking: "medium" });
-  assert.equal(config.runtime("agent.execute").thinking, "high");
-  {
-    const role = "review";
-    assert.equal(config.runtime(role).model, "anthropic/claude-haiku-4-5");
-    assert.equal(config.runtime(role).thinking, undefined, "overrides do not inherit from each other");
+async function configOf(value: unknown): Promise<Config> {
+  const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify(value));
+  return loadConfig(dir);
+}
+
+test("config: removed role presets refuse new launches with file, keys and migration text; empty blocks count", async () => {
+  for (const value of [{ plan: { model: "openai/gpt-5" } }, { review: {} }, { execute: { sdk: "pi" }, review: { model: "a/b" } }, { plan: {}, launch: { countdownSeconds: 3 } }]) {
+    const config = await configOf(value);
+    const keys = Object.keys(value).filter((key) => key !== "launch").map((key) => `/${key}`).join(", ");
+    assert.ok(config.migration?.includes(`pi-worq.json: ${keys} `), config.migration);
+    assert.match(config.migration!, /launch request sets sdk, model or thinking/);
+    assert.match(config.migration!, /distinct reviewer runtime, keep the older Worq release/);
   }
-  for (const role of ["agent.foundation", "subagent", "subagent.evidence"]) {
-    assert.deepEqual(config.runtime(role), { name: "main", sdk: "pi", path: "", via: "" });
-  }
-  assert.deepEqual(config.sdks, ["pi"]);
+  const legacy = await configOf({ default: "a", runtimes: { a: {} }, roles: {} });
+  assert.match(legacy.migration ?? "", /\/default, \/runtimes, \/roles are no longer supported/);
 });
 
-test('config: launch preferences are independent of runtime overrides', async () => {
-  const defaults = await configOf({});
-  assert.equal(defaults.runtime('agent.plan').name, 'main');
-  assert.deepEqual(defaults.launch, { interactive: true, countdownSeconds: 5 });
-  const config = await configOf({ plan: { thinking: 'high' }, launch: { interactive: false, countdownSeconds: 8 } });
-  assert.deepEqual(config.launch, { interactive: false, countdownSeconds: 8 });
-  await assert.rejects(configOf({ launch: { countdownSeconds: -1 } }), /countdownSeconds/);
-});
-
-test("config: model refs and SDK names are validated at load, naming the key", async () => {
-  await assert.rejects(configOf({ plan: { model: "not-a-ref" } }), (error) => configError(error) && /\/plan\/model/.test((error as Block).message));
-  await assert.rejects(configOf({ review: { sdk: "claude" } }), (error) => configError(error) && /\/review\/sdk: unknown sdk "claude"/.test((error as Block).message));
-  const mixed = await configOf({ review: { sdk: "claude", model: "anything" } }, ["pi", "claude"]);
-  assert.equal(mixed.runtime("review").sdk, "claude");
-  assert.deepEqual(mixed.sdks, ["claude"]);
-});
-
-test("config: legacy keys fail with a migration message", async () => {
-  for (const legacy of [{ default: "a", runtimes: { a: {} }, roles: {} }, { model: "a/m" }, { harness: "pi" }]) {
-    await assert.rejects(configOf(legacy), (error) => configError(error) && /old Worq format[\s\S]*plan[\s\S]*execute[\s\S]*review/.test((error as Block).message));
+test("config: obsolete launch preferences are ignored with a warning, never a gate", async () => {
+  for (const launch of [{ countdownSeconds: 8 }, { interactive: false }, { countdownSeconds: -1 }, "junk"]) {
+    const config = await configOf({ launch, limits: { agents: 2 } });
+    assert.equal(config.migration, undefined);
+    assert.match(config.ignored ?? "", /\/launch is ignored/);
+    assert.equal(config.limits.agents, 2);
   }
-  await assert.rejects(configOf({ plan: { fallbackModel: "a/b" } }), /fallbackModel/);
+  assert.equal((await configOf({})).ignored, undefined);
 });
 
 /** A caller may branch on the code alone. */
@@ -73,84 +48,59 @@ test("config: every refusal carries a stable code", async () => {
   assert.throws(() => loadConfig(dir), byCode("invalid-json"));
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: "three" } }));
   assert.throws(() => loadConfig(dir), byCode("invalid-payload"));
-  await assert.rejects(configOf({ plan: { model: "not-a-ref" } }), byCode("config"));
-  const runtime: Runtime = { name: "plan", sdk: "pi", thinking: "high", path: "/plan", via: "/plan" };
+  const runtime: Runtime = { name: "launch", sdk: "pi", thinking: "high", path: "", via: "launch request" };
   assert.throws(() => assertRuntime(runtime, MINIMAL_CAPS), byCode("capability"));
 });
 
-/** A misconfigured role fails at spawn, before any worker is launched. */
-async function spawnFailure(fail: unknown, role: string, selected = true): Promise<void> {
-  const { dir, root, state } = await repo();
-  const config = await configOf(fail);
-  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), config, state, cwd: root, notify() {} });
-  try {
-    const spawn = worq.spawn("plan", "plan it", { title: "Plan work" });
-    if (selected) await assert.rejects(spawn, (error: unknown) => error instanceof Block && error.code === "capability" && error.message.includes(role));
-    else await (await spawn).done;
-  } finally { await worq.shutdown(); await rm(dir, { recursive: true, force: true }); }
-}
-
-test("config: spawn validates only the selected agent role", async () => {
-  await spawnFailure({ plan: { thinking: "high" } }, "/plan/thinking");
-  await spawnFailure({ execute: { thinking: "high" }, review: { thinking: "high" } }, "/review/thinking", false);
-});
-
-/** The review's runtime is checked before acquiring a slot or creating its snapshot. */
-test("agent: a review whose role check fails takes no semaphore slot and no snapshot", async (t) => {
+test("config: the migration gate blocks every new launch before preflight; management keeps working; ignored launch warns once", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const prompts = loadPrompts();
-  const kind = prompts.kinds.get("execute")!;
-  const seen: Spec[] = [];
-  const acquires: string[] = [];
-  const checks: string[] = [];
-  /** Every review's cwd: a snapshot checkout ends in review-<round>/product. */
-  const cwds: string[] = [];
-  const semaphore = { acquire: async () => { acquires.push("acquire"); return () => {}; } } as unknown as Semaphore;
-  /** One execute agent; `deny` names the role whose harness cannot honour its choice. */
-  const run = async (ref: string, deny?: string) => {
-    const agent = new Agent({
-      driver: fakeDriver({
-        "agent.execute": (turn) => turn.tool("submit", { summary: "Uppercased the greeting" }).then(() => {}),
-        review: (turn) => { cwds.push(turn.spec.cwd); return turn.tool("submit", pass).then(() => {}); },
-      }, seen),
-      prompts, limits: DEFAULT_LIMITS, state, root, semaphore, notify() {},
-      async select(role) {
-        checks.push(role);
-        assertRuntime({ name: "a", sdk: "pi", thinking: "high", path: "/review", via: "/review" }, role === deny ? { ...MINIMAL_CAPS, context: FULL_CAPS.context } : FULL_CAPS);
-        return undefined;
-      },
-    }, { ref, kind, task: "Uppercase the greeting", attachments: [] });
-    agent.launch();
-    const deadline = Date.now() + 20_000;
-    while (agent.state !== "parked") {
-      if (agent.ended || Date.now() > deadline) throw new Error(`agent ${ref} ended ${agent.state}: ${agent.error}`);
-      await sleep(5);
-    }
-    return agent;
-  };
+  const warnings: string[] = [];
+  const validated: string[] = [];
+  const driver = fakeDriver({});
+  driver.validate = async (runtime) => { validated.push(runtime.sdk); };
+  const config = await configOf({ review: {}, launch: { countdownSeconds: 2 } });
+  const worq = new Worq({ driver, prompts: loadPrompts(), kinds: KINDS, config, state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
+  t.after(() => worq.shutdown());
+  for (const kind of ["plan", "execute"]) {
+    await assert.rejects(worq.spawn(kind, "plan it", { title: "Plan work" }), (error) => configError(error) && /\/review is no longer supported/.test((error as Block).message));
+  }
+  assert.deepEqual(validated, [], "refused before adapter preflight");
+  assert.equal(warnings.length, 1, "ignored launch warns once, alongside the gate");
+  assert.match(warnings[0], /\/launch is ignored/);
+  assert.equal(worq.list(), "No Worq agents in this session.");
+  assert.equal(await worq.cancel("all"), "No live agents");
+});
 
-  // Control: when the check passes, the semaphore is taken and the reviewer is handed a snapshot checkout,
-  // so the zeros asserted below come from the check, not from an inert double.
-  const control = await run("abce");
-  assert.deepEqual(control.reviews.map((r) => r.verdict), ["pass"]);
-  assert.deepEqual(acquires, ["acquire"], "a passing check reaches semaphore.acquire once");
-  assert.match(cwds[0], /review-1[/\\]product$/, "a passing check reaches snapshot");
-  acquires.length = 0;
-  cwds.length = 0;
-  seen.length = 0;
+test("config: an ignored launch block alone does not block launches", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const warnings: string[] = [];
+  const worq = new Worq({ driver: fakeDriver({ agent: (turn) => turn.tool("submit", { summary: "ok" }).then(() => {}), review: (turn) => turn.tool("submit", pass).then(() => {}) }),
+    prompts: loadPrompts(), kinds: KINDS, config: await configOf({ launch: { interactive: false } }), state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
+  t.after(() => worq.shutdown());
+  const agent = await worq.spawn("plan", "plan it", { title: "Plan work" });
+  await worq.spawn("plan", "plan more", { title: "Plan more" });
+  assert.equal(warnings.length, 1);
+  await agent.cancel();
+});
 
-  const denied = await run("abcd", "review");
-  assert.deepEqual(denied.reviews.map((r) => r.verdict), ["inconclusive"], "a denied role is recorded as inconclusive, never pass");
-  assert.match(denied.reviews[0].error ?? "", /thinking/, "the record carries the real capability refusal");
-  assert.ok(checks.includes("review"), "the check ran");
-  assert.deepEqual(acquires, [], "the denied review never reaches semaphore.acquire");
-  // The workspace (mkdir + snapshot) is prepared behind that acquire, so no checkout can exist.
-  assert.ok(!cwds.some((cwd) => /review-1/.test(cwd)), "no review cwd, so snapshot never ran");
-  assert.ok(!existsSync(join(state, denied.id, "review-1")), "no scratch directory either");
-  assert.ok(!seen.some((spec) => spec.name === "review"), "the driver never opened the denied review's session");
-  await control.cancel();
-  await denied.cancel();
+test("verify:false is refused before admission; review follows the package", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const worq = new Worq({ driver: fakeHarness(FULL_CAPS, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
+  await assert.rejects(worq.spawn("execute", "x", { title: "No review", verify: false }), (error) => error instanceof Block && error.code === "verify" && /review follows the package/.test(error.message));
+  assert.equal(worq.size, 0);
+});
+
+test("explicit runtime fields the harness cannot honour are refused before admission", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
+  await assert.rejects(worq.spawn("plan", "plan it", { title: "Plan work", thinking: "high" }), (error: unknown) => error instanceof Block && error.code === "capability" && /thinking/.test(error.message));
+  const isolated = new Worq({ driver: fakeHarness(MINIMAL_CAPS, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
+  await assert.rejects(isolated.spawn("plan", "plan it", { title: "Plan work" }), /cannot isolate context/);
+  assert.equal(worq.size + isolated.size, 0);
 });
 
 test("resources: one shared snapshot for every role; contained, outside checkouts, extensions need approval", async (t) => {

@@ -1,36 +1,60 @@
 import { Agent, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
-import type { Config } from "./runtime/config.ts";
+import { MAIN, type Config } from "./runtime/config.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
-import { modelChoices, prepareLaunch, type ModelChoice, type SelectLaunch } from './runtime/launch.ts';
-import type { Driver, RuntimeChange } from "./sdk/contract.ts";
+import { modelChoices, resolveRuntime, type ModelChoice, type RuntimeRequest } from './runtime/launch.ts';
+import type { Driver, Runtime, RuntimeChange } from "./sdk/contract.ts";
 import type { SessionControl, Sessions } from "./session.ts";
 import { Semaphore } from "./subagent.ts";
 import { baselineProject, reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {
-  select?: SelectLaunch;
   telemetry?: import('./telemetry.ts').Telemetry;
   driver: Driver;
   prompts: Prompts;
-  /** Every launchable kind: built-ins plus installed workflows. Defaults to `prompts.kinds`. */
-  kinds?: ReadonlyMap<string, Kind>;
+  /** The installed catalog: every launchable package. */
+  kinds: ReadonlyMap<string, Kind>;
   config: Config;
   /** Installed native extension count; every role's SDK must be able to load them. */
   extensions?: number;
   state: string;
   cwd: string;
   notify(event: AgentEvent): void;
+  /** Operator-only notice (obsolete settings). */
+  warn?(text: string): void;
+}
+/** One launch, from any route. Absent runtime fields inherit; see resolveRuntime. */
+export interface LaunchRequest extends RuntimeRequest {
+  kind: string;
+  task?: string;
+  title?: string;
+  attach?: string[];
+  /** Legacy wire field. true is redundant for reviewed packages; false is refused. */
+  verify?: boolean;
+}
+export interface LaunchOptions {
+  /** Only the confirmed /worq route has user authority; tool and socket requests are "main". */
+  caller: "user" | "main";
+  signal?: AbortSignal;
+  /** Runs after admission succeeds, immediately before the agent starts. */
+  beforeStart?(): void;
 }
 export const REF_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)+$";
+export const KIND_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 const REF = new RegExp(REF_PATTERN);
+const MAX_TASK = 8000;
 function nameFrom(title: string) {
   if (typeof title !== "string" || title.length > 80 || !/^[a-z0-9]+(?:-[a-z0-9]+)*(?: +[a-z0-9]+(?:-[a-z0-9]+)*){1,3}$/i.test(title.trim())) throw new Block("title", "Supply a 2–4 word title using letters, numbers or internal hyphens");
   return title.trim().toLowerCase().replace(/ +/g, "-");
 }
+/** A readable title from the task's first words, else the package name. */
+function generatedTitle(kind: string, task: string) {
+  const words = (task.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((w) => w.slice(0, 16)).slice(0, 4);
+  return words.length >= 2 ? words.join(" ") : [...kind.split("-"), "run"].slice(0, 4).join(" ");
+}
 
-/** Agents owned by this Pi session. Main is the only spawner. */
+/** Agents owned by this Pi session. Every route admits through `launch`; Main manages them all alike. */
 export class Worq {
   private readonly starting = new Set<{ label: string }>();
   private readonly agents = new Map<string, Agent>();
@@ -38,13 +62,14 @@ export class Worq {
   readonly sessions: Sessions = new Map();
   private readonly semaphore: Semaphore;
   private readonly deps: WorqDeps;
+  private warned = false;
   constructor(deps: WorqDeps) {
     this.deps = deps;
     this.semaphore = new Semaphore(deps.config.limits.parallel);
   }
   private admissions = new AbortController();
-  private readonly select = (role: string, title: string, signal: AbortSignal) => prepareLaunch(this.deps.config, this.deps.driver, this.deps.extensions ?? 0, role, `${role} · ${title}`, signal, this.deps.select);
   get size() { return this.agents.size; }
+  get kinds() { return this.deps.kinds; }
   all() { return [...this.agents.values()]; }
   get(ref: string) {
     const agent = this.agents.get(ref);
@@ -52,33 +77,50 @@ export class Worq {
     return agent;
   }
 
-  private get kinds() { return this.deps.kinds ?? this.deps.prompts.kinds; }
-  async spawn(kindName: string, task: string, opts: { title: string; attach?: string[]; verify?: boolean }, signal?: AbortSignal): Promise<Agent> {
-    const kind = this.kinds.get(kindName);
-    if (kind?.userOnly) throw new Block("invocation", `${kindName} is user-only (disable-model-invocation); launch it with /worq workflow`);
-    const spawnable = [...this.kinds.values()].filter((k) => !k.userOnly).map((k) => k.name);
-    if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${spawnable.join(" | ")}`);
-    if (!kind.review && opts.verify !== undefined) throw new Block("invalid-payload", `verify does not apply to ${kindName} (no review)`);
-    return this.admit(kind, task, { ...opts, base: nameFrom(opts.title) }, signal);
+  /**
+   * Common new-launch boundary for every route: warn once about ignored settings, refuse on removed ones.
+   * Management (list/send/cancel/configure) never passes through here.
+   */
+  gate() {
+    const { config } = this.deps;
+    if (config.ignored && !this.warned) { this.warned = true; this.deps.warn?.(config.ignored); }
+    if (config.migration) throw new Block("config", config.migration);
   }
-  /** The user's launch path for any installed workflow. Built-in kinds stay on worq_spawn. */
-  async runWorkflow(kind: Kind, direction?: string): Promise<Agent> {
-    if (!kind.skill) throw new Block("invocation", `${kind.name} is a built-in kind; launch it with worq_spawn`);
-    const prompt = (direction ?? "").trim();
-    if (prompt.length > 8000) throw new Block("invalid-payload", "Workflow direction exceeds 8000 characters");
-    const task = prompt || `Run the ${kind.name} workflow on this repository and submit its result.`;
-    return this.admit(kind, task, { title: kind.name.replace(/-/g, " "), base: `${kind.name}-workflow` });
+  /** The runtime a launch with no explicit fields would use, for the /worq picker. */
+  defaults(signal: AbortSignal = this.admissions.signal): Promise<Runtime> {
+    return resolveRuntime(this.deps.driver, this.deps.extensions ?? 0, {}, signal);
   }
-  /** Parked agents hold no slot. */
-  private capacity() {
-    const live = this.all().filter((a) => a.active).length + this.starting.size;
-    const max = this.deps.config.limits.agents;
-    if (live >= max) throw new Block("at-capacity", `${live} agents are active (limits.agents ${max}); wait, close or cancel one first`);
+  /** Picker information; never needed for a launch. */
+  launchChoices(initial: Runtime): Promise<ModelChoice[]> {
+    return modelChoices(this.deps.driver, initial, this.deps.extensions ?? 0);
   }
-  private async admit(kind: Kind, task: string, { title, base, attach = [], verify }: { title: string; base: string; attach?: string[]; verify?: boolean }, caller?: AbortSignal): Promise<Agent> {
+  /** Convenience for Main-authority launches. */
+  spawn(kind: string, task: string | undefined, opts: Omit<LaunchRequest, "kind" | "task"> = {}, signal?: AbortSignal): Promise<Agent> {
+    return this.launch({ ...opts, kind, ...(task !== undefined ? { task } : {}) }, { caller: "main", signal });
+  }
+  /**
+   * The one admission path. Order: gate, authorization, payload, runtime preflight (adapter-local) — all before any
+   * pending slot, ref or worktree. Then capacity + pending slot, repository/baseline/attachments, ref, start.
+   */
+  async launch(request: LaunchRequest, { caller, signal: callerSignal, beforeStart }: LaunchOptions): Promise<Agent> {
     const { prompts, config } = this.deps;
-    const signal = caller ? AbortSignal.any([caller, this.admissions.signal]) : this.admissions.signal;
+    this.gate();
+    const kind = this.kinds.get(request.kind);
+    const spawnable = [...this.kinds.values()].filter((k) => !k.userOnly).map((k) => k.name);
+    if (!kind) throw new Block("kind", `Unknown kind ${request.kind}; installed: ${spawnable.join(" | ") || "none"}`);
+    if (kind.userOnly && caller !== "user") throw new Block("invocation", `${kind.name} is user-only (disable-model-invocation); launch it with /worq`);
+    if (request.verify === false) throw new Block("verify", `verify:false is no longer supported: review follows the package's review frontmatter${kind.review ? ` (${kind.name} is reviewed)` : ""}. Omit verify, or install an unreviewed package for unreviewed runs.`);
+    if (request.verify === true && !kind.review) throw new Block("invalid-payload", `verify does not apply to ${kind.name} (no review)`);
+    const direction = (request.task ?? "").trim();
+    if (direction.length > MAX_TASK) throw new Block("invalid-payload", `Task exceeds ${MAX_TASK} characters`);
+    const task = direction || `Run the ${kind.name} workflow on this repository and submit its result.`;
+    const title = request.title?.trim() || generatedTitle(kind.name, direction);
+    let base = nameFrom(title);
+    if (!REF.test(base)) base = `${base}-run`;
+    const signal = callerSignal ? AbortSignal.any([callerSignal, this.admissions.signal]) : this.admissions.signal;
     signal.throwIfAborted();
+    this.capacity();
+    const runtime = await resolveRuntime(this.deps.driver, this.deps.extensions ?? 0, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal);
     this.capacity();
     const pending = { label: `${title} · ${kind.name} · pending launch` };
     this.starting.add(pending);
@@ -86,17 +128,23 @@ export class Worq {
       const preflight = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
       const root = await repository(this.deps.cwd, preflight);
       if (kind.access === "write") await baselineProject(root, preflight);
-      const runtime = await this.select(`agent.${kind.name}`, title, signal);
-      const attachments = await this.attachments(root, attach);
+      const attachments = await this.attachments(root, request.attach ?? []);
       signal.throwIfAborted();
       const { ref, dir } = await reserveName(root, this.deps.state, base);
       signal.throwIfAborted();
-      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, select: this.select, sessions: this.sessions },
-        { ref, title: title.trim(), dir, kind, task, attachments, verify });
+      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, sessions: this.sessions },
+        { ref, title, dir, kind, task, attachments });
       this.agents.set(ref, agent);
+      beforeStart?.();
       agent.launch();
       return agent;
     } finally { this.starting.delete(pending); }
+  }
+  /** Parked agents hold no slot. */
+  private capacity() {
+    const live = this.all().filter((a) => a.active).length + this.starting.size;
+    const max = this.deps.config.limits.agents;
+    if (live >= max) throw new Block("at-capacity", `${live} agents are active (limits.agents ${max}); wait, close or cancel one first`);
   }
   private async attachments(root: string, sources: string[]): Promise<Attachment[]> {
     const out = new Map<string, Attachment>();
@@ -157,9 +205,10 @@ export class Worq {
   /** Models the session may switch to: same harness, current first. */
   async choices(target: string): Promise<ModelChoice[]> {
     const session = this.session(target);
-    const runtime = session.runtime() ?? this.deps.config.runtime(session.role);
+    const runtime = session.runtime() ?? { ...MAIN };
+    await this.deps.driver.load?.(runtime.sdk);
     const current = { ...runtime, model: runtime.model ?? this.deps.driver.defaultModel?.(runtime.sdk) };
-    return modelChoices(this.deps.driver, session.role, current, this.deps.extensions ?? 0, current.sdk);
+    return modelChoices(this.deps.driver, current, this.deps.extensions ?? 0, current.sdk);
   }
   async configure(target: string, change: RuntimeChange): Promise<string> {
     const session = this.session(target);

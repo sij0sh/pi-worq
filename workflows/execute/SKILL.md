@@ -1,7 +1,9 @@
 ---
+name: execute
+description: edits its own git worktree on branch worq/<name>; one independent review checks the exact commit
 access: write
 review: true
-description: edits its own git worktree on branch worq/<name>; one independent review checks the exact commit, or none when the spawn sets verify:false
+disable-model-invocation: false
 ---
 ## Kind: execute
 

@@ -13,6 +13,7 @@ import type { Capabilities, ExtensionFile, Handle, Runtime, SDKAdapter, SessionS
 /** Main's live selection and model registry, plus the agent dir for auth. */
 export type PiHost = Pick<ExtensionContext, "model" | "modelRegistry" | "thinkingLevel"> & { agentDir?: string };
 
+const REF = /^[^/\s]+\/\S+$/;
 const CORE_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
 const EXTRA_LEVELS = ["xhigh", "max"] as const;
 type Level = (typeof CORE_LEVELS)[number] | (typeof EXTRA_LEVELS)[number];
@@ -67,12 +68,14 @@ function sdkTool(tool: Tool, outcomes: Map<string, Outcome>) {
 export function piAdapter(host: PiHost | undefined): SDKAdapter {
   if (!host) throw new Block("config", "The pi sdk needs a Pi host (Main's model registry)");
   const find = (ref: string, key: string) => {
+    if (!REF.test(ref)) throw new Block("model", `${key}: ${ref} is not a Pi model ref (provider/model)`);
     const slash = ref.indexOf("/");
     const model = host.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
-    if (!model) throw new Block("config", `${key}: Pi does not know model ${ref}`);
+    if (!model) throw new Block("model", `${key}: Pi does not know model ${ref}`);
     return model;
   };
-  const primary = (runtime: Runtime) => runtime.model ? find(runtime.model, `${runtime.path}/model`) : host.model;
+  const at = (runtime: Runtime) => runtime.path ? `${runtime.path}/model` : "model";
+  const primary = (runtime: Runtime) => runtime.model ? find(runtime.model, at(runtime)) : host.model;
   // Main's model runtime carries extension-registered providers and auth; share it when the host exposes it.
   const modelRuntime = (host.modelRegistry as unknown as { runtime?: unknown }).runtime;
 
@@ -86,10 +89,14 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         context: { system: "replace", ambientInstructions: false },
       };
     },
+    /** Registry lookup only: no session, request or credential probe. */
+    validateRuntime(runtime) {
+      if (!primary(runtime)) throw new Block("model", "Select a Pi model in this session or pass a model (provider/model)");
+    },
     async open(spec: SessionSpec): Promise<Handle> {
       const { runtime } = spec;
       const model = primary(runtime);
-      if (!model) throw new Block("model", "Select a Pi model or set a runtime model in pi-worq.json");
+      if (!model) throw new Block("model", "Select a Pi model in this session or pass a model (provider/model)");
       const level = spec.thinking as Level | undefined;
       const outcomes = new Map<string, Outcome>();
       const calls = new Map<string, string>();
@@ -189,7 +196,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         abort: () => session.abort(),
         get selection() { return selection(); },
         async configure(change) {
-          const next = change.model !== undefined ? find(change.model, `${runtime.path}/model`) : undefined;
+          const next = change.model !== undefined ? find(change.model, at(runtime)) : undefined;
           const level = (change.thinking ?? session.thinkingLevel) as Level;
           // setModel keeps the conversation, tool results and session identity.
           if (next) await session.setModel(next);

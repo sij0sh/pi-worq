@@ -2,15 +2,26 @@
 
 An **SDK adapter** runs one Worq session (agent, PQ subagent or review) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Pi is the only one that ships.
 
-Adding an SDK = one file under `src/sdk/` + one record in `src/sdk/registry.ts`. Nothing in `src/agent.ts`, `src/worq.ts`, `src/session.ts`, `src/runtime/`, the prompts or the four tools changes.
+Adding an SDK = one folder: `<agentDir>/worq/adapters/<id>/adapter.mjs`. No Worq source changes. Folder name = id (lowercase, hyphenated; `pi` is reserved). Global only: never project-local, never a path from a launch request. Installing it is the trust opt-in: it runs in-process with Pi's privileges (not a sandbox). Native-extension approval stays separate.
+
+```js
+// <agentDir>/worq/adapters/echo/adapter.mjs — bundle its own dependencies
+export default {
+  version: 1,
+  create({ id, dir, agentDir }) { return adapter; }, // SDKAdapter, or a promise of one
+};
+```
+
+Select it per launch: `worq_spawn { kind, sdk: "echo", model? , thinking? }`, `worq spawn <kind> --sdk echo`, or the `/worq` runtime step. Discovery only lists folders; the module is imported on first use (in-flight loads shared). A broken adapter fails its own launches (`sdk "<id>" could not load`), is skipped by the picker and never blocks Pi or management.
 
 ## Layout
 
 ```
 src/sdk/contract.ts       contract types, assertRuntime
-src/sdk/registry.ts       SDKS metadata (lazy loaders) + createDriver role router
-src/sdk/pi.ts             Pi adapter
-src/runtime/config.ts     Plan, Execute, Review overrides / limits
+src/sdk/registry.ts       Pi record + installed adapter discovery (lazy loaders) + createDriver
+src/sdk/pi.ts             Pi adapter (shipped)
+src/runtime/launch.ts     resolveRuntime (every launch route) + picker choices
+src/runtime/config.ts     limits, extension approval, migration findings
 src/runtime/resources.ts  shared instructions, skills, extensions snapshot
 src/session.ts            Conversation (budgets, nudges, queueing)
 ```
@@ -19,7 +30,7 @@ src/session.ts            Conversation (budgets, nudges, queueing)
 
 | Worq owns | Adapter owns |
 |---|---|
-| Runtime resolution (role → preset) | Native model resolution |
+| Runtime resolution (request → defaults) | Defaults, local preflight, native model resolution |
 | Shared resources, prompt composition, `skill` tool | Loading native extension bytes |
 | Tool schema validation and dispatch fencing | Native tool registration |
 | Live runtime changes (when, to what, validation) | Safe request boundary and `configure` mechanics |
@@ -30,24 +41,22 @@ src/session.ts            Conversation (budgets, nudges, queueing)
 ## Registry
 
 ```ts
-export interface SDKRecord {
-  modelRef: RegExp;                                  // used by loadConfig, no SDK import
-  load(host: HostServices): Promise<SDKAdapter>;     // lazy import of the adapter file
-}
-export const SDKS: Record<string, SDKRecord> = { pi: { … } };
-export async function createDriver(host, config, resources): Promise<Driver>;
+export interface SDKRecord { load(host: HostServices): Promise<SDKAdapter> }  // lazy
+export function discoverAdapters(agentDir): { records: Record<string, SDKRecord>; problems };  // pi + installed
+export async function createDriver(host, resources, records): Promise<Driver>;
 ```
 
-`HostServices` carries explicit per-SDK host dependencies (`pi: { model, modelRegistry, thinkingLevel, agentDir }`) — no opaque context. `createDriver` preloads `pi` plus any SDK named by a role override. The TUI discovers other registered adapters on demand. Worq snapshots the selection at launch and passes it through the conversation. Per `open(spec)` the driver checks that runtime, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter.
+`HostServices` carries only the shipped Pi adapter's host (`pi: { model, modelRegistry, thinkingLevel, agentDir }`); installed adapters get `{ id, dir, agentDir }`. `resolveRuntime` loads the requested adapter, fills defaults, judges capabilities and runs `validateRuntime` before Worq reserves a slot, ref or worktree; it never calls `models()`. Worq freezes the selection and passes it through the conversation; PQs and reviews inherit the owner's effective runtime. Per `open(spec)` the driver re-checks that runtime, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter.
 
 ## Contract
 
 ```ts
 interface SDKAdapter {
-  models(): Promise<readonly string[]>; // selectable native model refs
-  defaultModel?(): string | undefined;  // read the host's current model
-  defaultThinking?(): string | undefined; // read the host's current thinking level
+  models(): Promise<readonly string[]>; // picker information only; may be empty or incomplete
+  defaultModel?(): string | undefined;  // used when a launch names no model
+  defaultThinking?(): string | undefined; // inherited only when the model supports it
   capabilities(runtime: Runtime): Capabilities;
+  validateRuntime(runtime: Runtime, signal: AbortSignal): void | Promise<void>; // required local preflight
   open(spec: SessionSpec): Promise<Handle>;
 }
 interface SessionSpec {
@@ -87,15 +96,16 @@ type SessionEvent =
 | Open | Respect `spec.signal`; the core disposes a handle that finishes opening after cancel/dispose. |
 | Dispose | Idempotent. |
 | Identity | `spec.id` is one `randomUUID()` per Conversation; key per-session resources on it. |
+| Preflight | `validateRuntime` rejects malformed/locally unknown models, a missing required model and unsupported adapter-specific selections. No `open`, `models()`, credential probe, dummy session or request. Honour `signal`. Validating syntax only is fine when the backend alone can resolve a model; don't claim more. |
 
 ## Capabilities
 
-Pure data; `assertRuntime(runtime, caps, extensionCount)` judges and names the preset path (e.g. `/plan/thinking`).
+Pure data; `assertRuntime(runtime, caps, extensionCount)` judges the resolved runtime. Not a substitute for `validateRuntime`.
 
 | Field | Meaning | Denial |
 |---|---|---|
 | `switchModel` | `Handle.configure` can change the model | Manual model switch when `false` → `capability` |
-| `thinking` | Levels the runtime's model accepts; `[]` = no level control | Configured level outside the list → `capability` |
+| `thinking` | Levels the runtime's model accepts; `[]` = no level control | Explicit level outside the list → `capability` |
 | `context` | `replace` + no ambient instructions required | Anything else refuses the session |
 | `extensions` | Can load shared native extensions | Installed extensions + `false` → `capability` |
 | `turnUnit` | `request` (one `turn` per model request) or `prompt` | Informational; logged at open |
@@ -110,7 +120,7 @@ Shared `extensions/` files are SDK-native (Pi API). A non-Pi adapter reports `ex
 
 ## Conformance
 
-`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, extension denial, unknown SDK) is asserted against `createDriver` with a recording adapter.
+`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, extension denial, unknown SDK) is asserted against `createDriver` with a recording adapter. `test/adapter.test.ts` installs a deterministic adapter folder and launches it through production discovery, `worq_spawn` and the CLI.
 
 The live Pi run opens a real session, dispatches a Worq tool and submits: `WORQ_CONFORMANCE_PI=1 WORQ_CONFORMANCE_MODEL=<provider>/<model> npm test`. Unset, it skips.
 
@@ -123,7 +133,7 @@ For a process-boundary SDK the minimum `ask_main`-preserving equivalent is a loo
 ### Pi (`pi`)
 
 - `src/sdk/pi.ts` → `piAdapter(host)`.
-- Refs `<provider>/<model>` (`^[^/\s]+\/[^\s]+$`); unknown ref → `config` naming the override (e.g. `/plan/model`); nothing resolves → `model`.
+- Refs `<provider>/<model>`; malformed or not in Main's model registry → `model`, at preflight; no Main model and none requested → `model`.
 - Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and extension-registered providers match Main.
 - Capabilities: `switchModel: true`, thinking from the model, `extensions: true`, `turnUnit: "request"`, isolated context.
 - `configure` uses `session.setModel` / `setThinkingLevel`. Pi clamps an incompatible level on a model-only switch; the adapter reports the effective level.

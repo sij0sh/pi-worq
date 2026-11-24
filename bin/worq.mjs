@@ -10,7 +10,8 @@ const usage = `Usage: worq [--pid N] <command>
   sessions                    Pi sessions with Worq loaded
   list [ref]                  agents, or one agent in full
   log <ref> [-f]              agent activity (-f follows)
-  spawn <kind> --title "Short title" [--attach <plan>]... <task>   start an agent
+  spawn <kind> [--title "Short title"] [--attach <plan>]... [--sdk id] [--model ref] [--thinking level] [--] [task]
+                              start an agent (task omitted: run the package as written)
   send <ref> <text>           steer, answer, or resume a parked agent
   cancel <ref|all>            close or cancel; branch kept
   configure <ref> [--model provider/id] [--thinking level]   change a live agent's runtime`;
@@ -64,19 +65,34 @@ async function main(argv) {
   switch (command) {
     case "list": return print("list", first ? { ref: first } : {});
     case "spawn": {
+      if (!first || first.startsWith("-")) throw new Error("spawn requires a kind");
       let title;
       const attach = [];
+      const runtime = {};
       while (rest[0]?.startsWith("--")) {
         const flag = rest.shift();
         if (flag === "--") break;
-        if (!["--title", "--attach"].includes(flag)) throw new Error(`Unknown spawn option ${flag}`);
+        if (!["--title", "--attach", "--sdk", "--model", "--thinking"].includes(flag)) throw new Error(`Unknown spawn option ${flag}`);
         const value = rest.shift();
         if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
         if (flag === "--title") title = value;
-        if (flag === "--attach") attach.push(value);
+        else if (flag === "--attach") attach.push(value);
+        else runtime[flag.slice(2)] = value;
       }
-      if (!title) throw new Error("spawn requires --title");
-      return print("spawn", { kind: first, title, attach, task: rest.join(" ") });
+      const task = rest.join(" ");
+      // Legacy shape (title and task given, no runtime flags) is sent exactly as older releases did.
+      const modern = !title || !task || Object.keys(runtime).length > 0;
+      const args = modern
+        ? { kind: first, ...(title ? { title } : {}), ...(attach.length ? { attach } : {}), ...runtime, ...(task ? { task } : {}) }
+        : { kind: first, title, attach, task };
+      try { return await print("spawn", args); }
+      catch (error) {
+        // An older host's strict schema rejects omitted title/task and runtime fields. Never retried.
+        if (modern && /^spawn: \/(?:title|task|sdk|model|thinking)? /.test(error.message)) {
+          error.message += `\nThe running Worq may be older than this CLI: omitting --title or the task, and --sdk/--model/--thinking, need a matching upgrade. With an older Worq use: worq spawn <kind> --title "Short title" [--attach <plan>] <task>`;
+        }
+        throw error;
+      }
     }
     case "send": return print("send", { ref: first, text: rest.join(" ") });
     case "cancel": return print("cancel", { ref: first });

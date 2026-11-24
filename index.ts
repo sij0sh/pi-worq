@@ -12,9 +12,9 @@ import { loadConfig } from "./src/runtime/config.ts";
 import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
-import { createDriver } from "./src/sdk/registry.ts";
+import { createDriver, discoverAdapters } from "./src/sdk/registry.ts";
 import { loadPrompts, type Kind } from "./src/prompts.ts";
-import { loadWorkflows, type Workflows } from "./src/runtime/workflows.ts";
+import { loadCatalog } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/sdk/contract.ts";
 import { statePath } from "./src/workspace.ts";
@@ -27,9 +27,9 @@ const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || t
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background SDK agent of a kind. Requires a 2–4 word title and returns an exact readable name; reviewed kinds get one independent review per submission (verify:false skips it).",
+    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name; reviewed kinds get one independent review per submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
-      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request.",
+      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
     ],
   },
   worq_list: {
@@ -62,14 +62,16 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
   return function worq(pi: ExtensionAPI) {
     const prompts = loadPrompts();
     const agentDir = () => options.agentDir?.() ?? getAgentDir();
-    // Workflows are read once per extension load: worq_spawn's kind list is fixed at registration.
-    let workflows: Workflows;
-    try { workflows = loadWorkflows(agentDir(), prompts.kinds); }
-    catch (error) { workflows = { dir: join(agentDir(), "workflows"), kinds: new Map(), problems: [{ path: join(agentDir(), "workflows"), message: errorText(error) }] }; }
-    const catalog: ReadonlyMap<string, Kind> = new Map([...prompts.kinds, ...workflows.kinds]);
+    // One catalog, read once per extension load (shipped packages are provisioned first): worq_spawn's description is fixed at registration.
+    const workflows = loadCatalog(agentDir());
+    const adapters = discoverAdapters(agentDir());
+    const issues = [...workflows.problems, ...adapters.problems];
+    const catalog: ReadonlyMap<string, Kind> = workflows.kinds;
     const spawnable = [...catalog.values()].filter((kind) => !kind.userOnly);
-    const table = ops(spawnable.map((kind) => kind.name));
-    const kinds = spawnable.map((kind) => `${kind.name}: ${kind.description}`).join("; ");
+    const table = ops();
+    const kinds = spawnable.length
+      ? spawnable.map((kind) => `${kind.name} (${kind.access}${kind.review ? ", reviewed" : ""}): ${kind.description}`).join("; ")
+      : "none installed for Main; the user can add packages under <agentDir>/workflows/";
     let warned = false;
     let instance: Worq | undefined;
     let starting: Promise<Worq> | undefined;
@@ -128,17 +130,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const config = loadConfig(dir);
         const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
-        const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, config, resources);
+        const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ select: ctx.mode === 'tui' ? launchPicker(ctx.ui) : undefined, telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify,
+          warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;
-    };
-    /** Make list/send/cancel available for a launched workflow without enabling Main's spawn. */
-    const service = () => {
-      const active = new Set(pi.getActiveTools());
-      for (const name of TOOLS) if (name !== "worq_spawn") active.add(name);
-      pi.setActiveTools([...active]);
     };
     const run = async (ctx: ExtensionContext, op: string, args: unknown, signal?: AbortSignal) => {
       if (off && op === "spawn") throw new Error("Worq is off; re-enable with /worq.");
@@ -172,27 +169,46 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       if (ctx.mode === "tui") ctx.ui.notify(clean(text), level);
       else process.stderr.write(`${clean(text)}\n`);
     };
-    const problems = (ctx: ExtensionContext) => { for (const problem of workflows.problems) say(ctx, `! ${problem.path}: ${problem.message}`, "warning"); };
-    /** The user entry point for every installed workflow (user-only or not): choose one, then optional extra instructions. */
-    const launchWorkflow = async (ctx: ExtensionContext) => {
-      if (ctx.mode !== "tui") { say(ctx, "Workflow launcher requires a TUI."); return; }
+    const problems = (ctx: ExtensionContext) => { for (const problem of issues) say(ctx, `! ${problem.path}: ${problem.message}`, "warning"); };
+    const enableOnly = async (ctx: ExtensionContext) => {
+      enable(true);
+      pi.appendEntry(ENABLED, { on: true });
+      await ensure(ctx);
+      say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${spawnable.map((kind) => kind.name).join(", ") || "none"}.${ctx.mode === "tui" ? " Launch one yourself: /worq." : ""}`);
+    };
+    /**
+     * The user launch route for every installed package: choose → optional instructions → explicit runtime confirmation.
+     * Cancelling at any step changes no tools and creates no agent or worktree. On admission all four Main tools activate
+     * before the agent starts, so Main can drive it without another command.
+     */
+    const launcher = async (ctx: ExtensionContext) => {
+      if (ctx.mode !== "tui") { await enableOnly(ctx); return; }
       problems(ctx);
-      if (!workflows.kinds.size) {
-        say(ctx, `No workflows loaded. Add ${join(workflows.dir, "<name>", "SKILL.md")} with name and description frontmatter, then restart Pi.`);
+      const worq = await ensure(ctx);
+      worq.gate();
+      if (!catalog.size) {
+        say(ctx, `No agent packages installed. Add ${join(workflows.dir, "<name>", "SKILL.md")} with name and description frontmatter, then restart Pi.`);
         return;
       }
-      const list = [...workflows.kinds.values()];
-      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
-      const choice = await ctx.ui.select("Launch workflow", [...labels.keys()]);
-      if (choice === undefined) return;
-      const kind = labels.get(choice);
+      const labels = new Map([...catalog.values()].map((kind) => [`${kind.name} · ${kind.access}${kind.review ? " · reviewed" : ""}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
+      const choice = await ctx.ui.select("Launch SDK agent", [...labels.keys()]);
+      const kind = choice === undefined ? undefined : labels.get(choice);
       if (!kind) return;
-      const extra = await ctx.ui.input(`Additional instructions for ${kind.name} (optional)`, "Leave empty to run the workflow as written");
+      const extra = await ctx.ui.input(`Launch ${kind.name}: instructions (optional)`, "Leave empty to run the package as written");
       if (extra === undefined) return;
-      const agent = await (await ensure(ctx)).runWorkflow(kind, extra);
-      service();
+      const initial = await worq.defaults();
+      const runtime = await launchPicker(ctx.ui, { label: kind.name, initial, choices: await worq.launchChoices(initial) });
+      if (!runtime) return;
+      if (off && !await confirmOverlay(ctx.ui, "Worq is off", `Launching re-enables ${TOOLS.join(", ")} for Main and keeps them on. Continue?`)) return;
+      const explicit = runtime.sdk !== initial.sdk || runtime.model !== initial.model || runtime.thinking !== initial.thinking
+        ? { sdk: runtime.sdk, ...(runtime.model !== undefined ? { model: runtime.model } : {}), ...(runtime.thinking !== undefined ? { thinking: runtime.thinking } : {}) }
+        : {};
+      const agent = await worq.launch({ kind: kind.name, task: extra, ...explicit }, {
+        caller: "user",
+        beforeStart: () => { enable(true); pi.appendEntry(ENABLED, { on: true }); },
+      });
       status();
-      say(ctx, `Launched workflow ${kind.name} as ${agent.ref}. /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers while running; /worq cancel ${agent.ref} stops it.`);
+      say(ctx, `Launched ${kind.name} as ${agent.ref}. Main can now drive it; /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers; /worq cancel ${agent.ref} stops it.`);
     };
 
     // Passive notices are visible and persisted, but never steer an unrelated Main turn.
@@ -206,7 +222,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
 
     pi.registerCommand("worq", {
-      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq workflow · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all> · /worq configure <ref> <model|-> [thinking]",
+      description: "Launch an SDK agent: /worq · enable tools only: /worq on · ask Main: /worq <request> · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all> · /worq configure <ref> <model|-> [thinking]",
       async handler(args, ctx) {
         if (closing) return;
         const value = args.trim();
@@ -218,11 +234,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
             say(ctx, "New launches disabled. Running agents continue; /worq cancel all stops them.");
             return;
           }
-          if (word === "workflow") {
-            if (value !== "workflow") { say(ctx, "Usage: /worq workflow", "error"); return; }
-            await launchWorkflow(ctx);
+          if (!value || word === "workflow") {
+            if (value && value !== "workflow") { say(ctx, "Usage: /worq", "error"); return; }
+            await launcher(ctx);
             return;
           }
+          if (value === "on") { await enableOnly(ctx); return; }
           if (word === "configure") {
             const [model, thinking] = rest;
             if (!ref || !model) { say(ctx, "Usage: /worq configure <ref> <provider/model|-> [thinking]", "error"); return; }
@@ -234,14 +251,9 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
             say(ctx, (await run(ctx, word, params)).text);
             return;
           }
+          if (catalog.has(value)) { say(ctx, `Usage: /worq ${value} <request>, or /worq to launch it yourself`, "error"); return; }
           enable(true);
           pi.appendEntry(ENABLED, { on: true });
-          if (!value) {
-            await ensure(ctx);
-            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${spawnable.map((kind) => kind.name).join(", ")}. Workflows: /worq workflow.`);
-            return;
-          }
-          if (catalog.has(value)) { say(ctx, `Usage: /worq ${value} <request>`, "error"); return; }
           pi.sendUserMessage(value, { deliverAs: "followUp" });
         } catch (error) { say(ctx, errorText(error), "error"); }
       },

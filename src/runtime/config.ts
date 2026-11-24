@@ -3,15 +3,8 @@ import { join } from "node:path";
 import { Type, type Static } from "typebox";
 import { Block, json, obj, parse } from "../contracts.ts";
 import type { Runtime } from "../sdk/contract.ts";
-import { SDKS } from "../sdk/registry.ts";
 
 const int = (minimum: number, maximum: number) => Type.Optional(Type.Integer({ minimum, maximum }));
-/** Ref format is per SDK (registry `modelRef`); this only rejects non-strings. */
-const modelRef = Type.Optional(Type.String({ maxLength: 200 }));
-const name = Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9-]*$" });
-const thinking = Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z]+$" }));
-const RuntimeSchema = obj({ sdk: Type.Optional(name), model: modelRef, thinking });
-const presets = ["plan", "execute", "review"] as const;
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
 const Limits = obj({
   agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), asks: int(0, 20),
@@ -20,10 +13,6 @@ const Limits = obj({
   idleMinutes: int(1, 1440), services: int(0, 8),
 });
 const ConfigSchema = obj({
-  plan: Type.Optional(RuntimeSchema),
-  execute: Type.Optional(RuntimeSchema),
-  review: Type.Optional(RuntimeSchema),
-  launch: Type.Optional(obj({ countdownSeconds: int(0, 120), interactive: Type.Optional(Type.Boolean()) })),
   /** Approves executing the native extension files installed in the shared resource directory. */
   approveExtensions: Type.Optional(Type.Boolean()),
   limits: Type.Optional(Limits),
@@ -36,22 +25,28 @@ export const DEFAULT_LIMITS = {
 } satisfies Required<Static<typeof Limits>>;
 export type Limits = typeof DEFAULT_LIMITS;
 
+/** The default runtime: the current Pi session's model and thinking level. */
 export const MAIN: Runtime = { name: "main", sdk: "pi", path: "", via: "" };
 export interface Config {
   path: string;
   limits: Limits;
-  launch?: { countdownSeconds: number; interactive: boolean };
   approveExtensions: boolean;
-  /** SDKs named by declared presets (the router preloads them). */
-  sdks: string[];
-  /** Return the override for Plan, Execute or Review, otherwise the built-in Pi runtime. */
-  runtime(role: string): Runtime;
+  /** Removed settings that must be migrated before any new launch. Management keeps working. */
+  migration?: string;
+  /** Removed settings that are ignored; warned once on first launch use. */
+  ignored?: string;
 }
 
+/** Role presets removed in favour of Main's runtime plus explicit launch overrides. */
+const PRESETS = ["plan", "execute", "review"];
+/** Pre-preset formats. */
 const LEGACY = ["default", "runtimes", "roles", "agents", "scq", "harness", "harnesses", "model", "fallbackModel", "models"];
 
-/** Read <agentDir>/pi-worq.json. A missing file means defaults; an invalid one fails naming the key. */
-export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS)): Config {
+/**
+ * Read <agentDir>/pi-worq.json. A missing file means defaults; an invalid supported key fails naming it.
+ * Removed keys never throw here: they become findings so list/send/cancel and cleanup stay usable.
+ */
+export function loadConfig(agentDir: string): Config {
   const path = join(agentDir, "pi-worq.json");
   let raw = "{}";
   try { raw = readFileSync(path, "utf8"); }
@@ -59,30 +54,26 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Block("config", `Cannot read ${path}: ${(error as Error).message}`);
   }
   const data = json(raw, path);
-  const legacy = data && typeof data === "object" ? LEGACY.filter((key) => key in data) : [];
-  if (legacy.length) throw new Block("config", `${path}: ${legacy.join(", ")} ${legacy.length > 1 ? "are" : "is"} from the old Worq format. Remove those keys and put any SDK, model or thinking overrides directly in "plan", "execute" or "review" (each takes { "sdk", "model", "thinking" }). Other roles use the current Pi session. Shared resources belong under <agentDir>/worq/.`);
-  const config = parse(ConfigSchema, data, path);
-  const resolved = new Map<string, Runtime>();
-  for (const key of presets) {
-    const preset = config[key];
-    if (!preset) continue;
-    const sdk = preset.sdk ?? "pi";
-    const location = `/${key}`;
-    if (!sdks.includes(sdk)) throw new Block("config", `${path}: ${location}/sdk: unknown sdk "${sdk}" (available: ${sdks.join(", ")})`);
-    const pattern = SDKS[sdk]?.modelRef;
-    if (preset.model !== undefined && pattern && !pattern.test(preset.model)) throw new Block("config", `${path}: ${location}/model "${preset.model}" is not a valid ${sdk} model ref (expected ${pattern})`);
-    resolved.set(key, { ...preset, name: key, sdk, path: location, via: location });
+  const record = data && typeof data === "object" && !Array.isArray(data) ? { ...(data as Record<string, unknown>) } : data;
+  let migration: string | undefined;
+  let ignored: string | undefined;
+  if (record && typeof record === "object") {
+    const fields = record as Record<string, unknown>;
+    const presets = PRESETS.filter((key) => key in fields).map((key) => `/${key}`);
+    const legacy = LEGACY.filter((key) => key in fields).map((key) => `/${key}`);
+    const found = [...presets, ...legacy];
+    if (found.length) migration = `${path}: ${found.join(", ")} ${found.length > 1 ? "are" : "is"} no longer supported, so new launches are refused until the file is fixed. `
+      + "Agents run on the current Pi session's model and thinking unless a launch request sets sdk, model or thinking (worq_spawn, worq spawn --sdk/--model/--thinking, or the /worq runtime step). "
+      + "PQ and review subagents inherit their agent's runtime. If you rely on a distinct reviewer runtime, keep the older Worq release until you accept that; otherwise remove the keys and reload Pi.";
+    if ("launch" in fields) ignored = `${path}: /launch is ignored (the launch countdown was removed; /worq always confirms explicitly). Remove it and reload Pi to silence this warning.`;
+    for (const key of [...PRESETS, ...LEGACY, "launch"]) delete fields[key];
   }
-
+  const config = parse(ConfigSchema, record, path);
   return {
     path,
-    launch: { countdownSeconds: 5, interactive: true, ...config.launch },
     limits: { ...DEFAULT_LIMITS, ...config.limits },
     approveExtensions: config.approveExtensions ?? false,
-    sdks: [...new Set([...resolved.values()].map((r) => r.sdk))],
-    runtime(role) {
-      const key = role === "agent.plan" ? "plan" : role === "agent.execute" ? "execute" : role === "review" ? "review" : "";
-      return { ...(resolved.get(key) ?? MAIN) };
-    },
+    ...(migration ? { migration } : {}),
+    ...(ignored ? { ignored } : {}),
   };
 }

@@ -202,6 +202,7 @@ export class Conversation<T extends TSchema> {
   private async open() {
     if (this.handle) return this.handle;
     const { spec, driver } = this.options;
+    await driver.load?.(spec.runtime?.sdk ?? "pi");
     const caps = driver.capabilities(spec.name, spec.runtime);
     if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     const handle = await driver.open({

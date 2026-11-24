@@ -4,8 +4,7 @@ import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { test } from "node:test";
 import { reserveName } from "../src/workspace.ts";
-import { loadPrompts } from "../src/prompts.ts";
-import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
+import { KINDS, pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
 
 test("readable claims serialize across linked worktrees and survive restart", async (t) => {
   const { dir, root, state } = await repo();
@@ -242,7 +241,7 @@ test("execute agent: plan explicitly attached, own worktree and branch, review s
   await worq.cancel(plan.ref);
 });
 
-test("execute with verify:false: no review runs and the digest says unreviewed", async (t) => {
+test("an unreviewed write package: no review runs and the digest says unreviewed", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq, next, seen } = setup(root, state, {
@@ -251,8 +250,9 @@ test("execute with verify:false: no review runs and the digest says unreviewed",
       await turn.tool("write_file", { path: "app.py", content: "print('HELLO')\n" });
       await turn.tool("submit", { summary: "Uppercased", report: "Checks run: cat app.py" });
     },
-  });
-  const exec = await worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting", verify: false });
+  }, {}, undefined, new Map([["execute", { ...KINDS.get("execute")!, review: false }]]));
+  await assert.rejects(worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting", verify: true }), /verify does not apply/);
+  const exec = await worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting" });
   const ready = await next("parked", exec.ref);
   assert.equal(seen.filter((s) => s.name === "review").length, 0, "no review ran");
   assert.match(ready.text, /parked · unreviewed/);
@@ -376,7 +376,7 @@ test("an idle parked agent closes after limits.idleMinutes", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { worq, next } = setup(root, state, {
     "agent.plan": (turn) => turn.tool("submit", planSubmission).then(() => {}),
-  }, { idleMinutes: 1 }, undefined, { ...loadPrompts(), kinds: new Map([["plan", { ...loadPrompts().kinds.get("plan")!, review: false }]]) });
+  }, { idleMinutes: 1 }, undefined, new Map([["plan", { ...KINDS.get("plan")!, review: false }]]));
   const agent = await worq.spawn("plan", "One", { title: "One plan" });
   await next("parked", agent.ref);
   t.mock.timers.tick(60_000);
