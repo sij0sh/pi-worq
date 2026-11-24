@@ -1,3 +1,4 @@
+import type { Skill } from "./runtime/skills.ts";
 import { randomUUID } from "node:crypto";
 import type { Static, TSchema } from "typebox";
 import { observe, type Observation } from "./telemetry.ts";
@@ -27,6 +28,8 @@ export interface ConversationSpec {
   cwd: string;
   system: string;
   tools: Tool[];
+  /** Session-specific skill packages (a workflow's own). */
+  skills?: readonly Skill[];
   log(line: string): void;
   observe?(value: Observation): void;
 }
@@ -146,7 +149,7 @@ export class Conversation<T extends TSchema> {
     const caps = driver.capabilities(spec.name);
     if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     const handle = await driver.open({
-      id: this.id, name: spec.name, cwd: spec.cwd, system: spec.system, signal: this.signal,
+      id: this.id, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.signal,
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
     });

@@ -1,193 +1,180 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { loadPrompts, loadWorkflows } from "../src/prompts.ts";
+import { fileURLToPath } from "node:url";
+import { loadPrompts } from "../src/prompts.ts";
+import { skillTool } from "../src/runtime/resources.ts";
+import { loadWorkflows } from "../src/runtime/workflows.ts";
 import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
 
-const section = (heading: string, title: string, text = "Do the work.") => `${heading} ${title}\n\n${text}\n`;
-
-function workflowFile(options: { access?: string; description?: string; invocation?: string; reviewers?: string; body?: string } = {}) {
+function skillFile(options: { name?: string; access?: string; description?: string; disable?: string; extra?: string[]; body?: string } = {}) {
   const lines = ["---"];
-  if (options.access !== undefined) lines.push(`access: ${options.access}`);
+  if (options.name !== undefined) lines.push(`name: ${options.name}`);
   if (options.description !== undefined) lines.push(`description: ${options.description}`);
-  if (options.invocation !== undefined) lines.push(`invocation: ${options.invocation}`);
-  if (options.reviewers !== undefined) lines.push(`reviewers: ${options.reviewers}`);
-  lines.push("---", "");
-  const body = options.body ?? `# Objective\n\nInspect the repository.\n\n${section("##", "Workflow")}\n${section("##", "Recursive question", "What remains unresolved?")}`;
-  return `${lines.join("\n")}${body}`;
+  if (options.access !== undefined) lines.push(`access: ${options.access}`);
+  if (options.disable !== undefined) lines.push(`disable-model-invocation: ${options.disable}`);
+  lines.push(...(options.extra ?? []), "---", "");
+  return `${lines.join("\n")}${options.body ?? "Inspect the repository and submit the result.\n"}`;
 }
+const workflowFile = (options: Parameters<typeof skillFile>[0] = {}) => skillFile(options);
 
-async function files(t: { after(callback: () => unknown): void }, entries: Record<string, string | "dir">) {
-  const dir = await mkdtemp(join(tmpdir(), "worq-workflow-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  for (const [name, value] of Object.entries(entries)) {
-    if (value === "dir") await mkdir(join(dir, name));
-    else await writeFile(join(dir, name), value);
-  }
-  return dir;
-}
-
-async function agentDir(t: { after(callback: () => unknown): void }, entries: Record<string, string | "dir">) {
+/** `<agentDir>/workflows/<entry>`: a string value is `<entry>/SKILL.md`; `{ file }` is a flat file; extra paths are package files. */
+async function agentDir(t: { after(callback: () => unknown): void }, entries: Record<string, string | { file: string } | Record<string, string>>) {
   const dir = await mkdtemp(join(tmpdir(), "worq-workflow-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const workflows = join(dir, "workflows");
   await mkdir(workflows);
   for (const [name, value] of Object.entries(entries)) {
-    if (value === "dir") await mkdir(join(workflows, name));
-    else await writeFile(join(workflows, name), value);
+    if (typeof value === "object" && "file" in value && typeof value.file === "string" && Object.keys(value).length === 1) { await writeFile(join(workflows, name), value.file); continue; }
+    const files = typeof value === "string" ? { "SKILL.md": value } : value as Record<string, string>;
+    for (const [rel, text] of Object.entries(files)) {
+      await mkdir(dirname(join(workflows, name, rel)), { recursive: true });
+      await writeFile(join(workflows, name, rel), text);
+    }
+    if (!Object.keys(files).length) await mkdir(join(workflows, name), { recursive: true });
   }
   return dir;
 }
 
-/** Base prompts plus the user kinds the loader returns. */
+/** Base prompts plus the workflow kinds the loader returns. */
 function userPrompts(dir: string) {
   const prompts = loadPrompts();
-  const loaded = loadWorkflows(join(dir, "workflows"), prompts);
+  const loaded = loadWorkflows(dir, prompts.kinds);
   for (const [name, kind] of loaded.kinds) prompts.kinds.set(name, kind);
   return { prompts, ...loaded };
 }
 
-const docsExample = `---
-access: read
-description: Identify consequential architectural problems
----
-
-# Objective
-
-Identify structural problems that increase the cost or risk of changing the software.
-
-## Workflow
-
-1. Establish the project's architectural boundaries.
-2. Inspect ownership, contracts and dependencies.
-3. Identify violations with concrete evidence.
-4. Recommend the smallest adequate corrections.
-
-## Recursive question
-
-What unresolved architectural concern could materially affect future changes?
-
-## Completion
-
-Submit prioritized findings, supporting evidence and recommended corrections.
-`;
-
-test("workflow loader: a missing directory is an empty installation", async () => {
-  const { kinds, problems } = loadWorkflows("/nonexistent/worq/workflows", loadPrompts());
+test("workflow loader: a missing directory is an empty installation", () => {
+  const { kinds, problems } = loadWorkflows("/nonexistent/worq", loadPrompts().kinds);
   assert.equal(kinds.size, 0);
   assert.deepEqual(problems, []);
 });
 
-test("workflow loader: H1 and H2 sections load as user kinds without reviewers", async (t) => {
-  const dir = await files(t, {
-    "audit-h1.md": workflowFile({ access: "read", description: "First", body: `# Workflow\n\nInspect.\n\n# Recursive question\n\nWhat is unresolved?\n` }),
-    "audit-h2.md": workflowFile({ access: "write", description: "Second", body: `## Workflow\n\nChange.\n\n## Recursive question\n\nWhat is unresolved?\n` }),
+test("workflow loader: skill packages with standard frontmatter; access defaults to write, read is explicit", async (t) => {
+  const dir = await agentDir(t, {
+    audit: { "SKILL.md": skillFile({ name: "audit", description: "Audit it", access: "read" }), "references/table.md": "| a |", "scripts/run.sh": "echo" },
+    change: skillFile({ description: "Change it" }),
+    private: skillFile({ description: "Mine", disable: "true" }),
+    quoted: skillFile({ name: '"quoted"', description: "'Quoted'", disable: "false" }),
   });
+  const { kinds, problems } = loadWorkflows(dir, loadPrompts().kinds);
+  assert.deepEqual(problems, []);
+  assert.deepEqual([...kinds.keys()], ["audit", "change", "private", "quoted"]);
+  const audit = kinds.get("audit")!;
+  assert.equal(audit.access, "read");
+  assert.equal(audit.description, "Audit it");
+  assert.match(audit.prompt, /^Inspect the repository/);
+  assert.deepEqual(audit.workflow?.skill.files, ["references/table.md", "scripts/run.sh"]);
+  assert.equal(audit.workflow?.userOnly, false);
+  assert.equal(kinds.get("change")!.access, "write");
+  assert.equal(kinds.get("private")!.workflow?.userOnly, true);
+  assert.equal(kinds.get("quoted")!.description, "Quoted");
+});
+
+test("workflow loader: the documented example loads", async () => {
+  const example = join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "examples");
   const prompts = loadPrompts();
-  const { kinds, problems } = loadWorkflows(dir, prompts);
-  assert.deepEqual(problems, []);
-  assert.deepEqual([...kinds.keys()].sort(), ["audit-h1", "audit-h2"]);
-  const h1 = kinds.get("audit-h1")!;
-  assert.equal(h1.access, "read");
-  assert.equal(h1.description, "First");
-  assert.equal(h1.invocation, "user");
-  assert.equal(h1.reviewers, undefined);
-  assert.match(h1.prompt, /# Workflow\n\nInspect\./);
-  assert.equal(kinds.get("audit-h2")!.access, "write");
+  const dir = await mkdtemp(join(tmpdir(), "worq-example-"));
+  try {
+    await mkdir(join(dir, "workflows"));
+    await symlink(join(example, "foundation"), join(dir, "workflows", "linked"));
+    const { problems: linked } = loadWorkflows(dir, prompts.kinds);
+    assert.match(linked[0]?.message ?? "", /symlinked workflows are not followed/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+  const copy = await mkdtemp(join(tmpdir(), "worq-example-"));
+  try {
+    const { cp } = await import("node:fs/promises");
+    await cp(join(example, "foundation"), join(copy, "workflows", "foundation"), { recursive: true });
+    const loaded = loadWorkflows(copy, prompts.kinds);
+    assert.deepEqual(loaded.problems, []);
+    const foundation = loaded.kinds.get("foundation")!;
+    assert.equal(foundation.access, "read");
+    assert.equal(foundation.workflow?.userOnly, false);
+    assert.ok(foundation.workflow?.skill.files.includes("references/capabilities.md"));
+  } finally { await rm(copy, { recursive: true, force: true }); }
 });
 
-test("workflow loader: the documented example loads", async (t) => {
-  const dir = await files(t, { "architecture-audit.md": docsExample });
-  const { kinds, problems } = loadWorkflows(dir, loadPrompts());
-  assert.deepEqual(problems, []);
-  assert.equal(kinds.get("architecture-audit")?.description, "Identify consequential architectural problems");
-});
-
-test("workflow loader: bad file names are problems and valid siblings still load", async (t) => {
-  const dir = await files(t, {
-    "audit-.md": workflowFile({ access: "read", description: "x" }),
-    "audit--v2.md": workflowFile({ access: "read", description: "x" }),
-    "Architecture Audit.md": workflowFile({ access: "read", description: "x" }),
-    "audit.md": workflowFile({ access: "read", description: "Fine" }),
+test("workflow loader: per-folder defects are named and skipped; valid siblings still load", async (t) => {
+  const dir = await agentDir(t, {
+    "audit-": skillFile({ description: "x" }),
+    "Audit": skillFile({ description: "x" }),
+    plan: skillFile({ description: "Collides" }),
+    empty: {},
+    mismatch: skillFile({ name: "other", description: "x" }),
+    nodesc: skillFile(),
+    disable: skillFile({ description: "x", disable: "yes" }),
+    access: skillFile({ description: "x", access: "admin" }),
+    reviewed: skillFile({ description: "x", extra: ["reviewers: plan"] }),
+    invoked: skillFile({ description: "x", extra: ["invocation: user"] }),
+    blank: skillFile({ description: "x", body: "" }),
+    "legacy.md": { file: skillFile({ description: "x" }) },
+    fine: skillFile({ description: "Fine" }),
+    ".hidden": skillFile({ description: "x" }),
+    "README.md": { file: "junk" },
+    "notes.txt": { file: "junk" },
   });
-  const { kinds, problems } = loadWorkflows(dir, loadPrompts());
-  assert.deepEqual([...kinds.keys()], ["audit"]);
-  assert.equal(problems.length, 3);
-  for (const problem of problems) assert.match(problem.message, /file name must be lowercase letters and digits/);
-  assert.ok(problems.every((problem) => problem.path.startsWith(dir)));
-});
-
-test("workflow loader: unrelated entries are ignored", async (t) => {
-  const dir = await files(t, {
-    ".DS_Store": "junk",
-    "notes.txt": "junk",
-    "README.md": "junk",
-    "readme.MD": "junk",
-    "x.md": "dir",
-  });
-  const { kinds, problems } = loadWorkflows(dir, loadPrompts());
-  assert.equal(kinds.size, 0);
-  assert.deepEqual(problems, []);
-});
-
-test("workflow loader: per-file defects are named and skipped", async (t) => {
-  const dir = await files(t, {
-    "plan.md": workflowFile({ access: "read", description: "Collides" }),
-    "blank.md": "",
-    "access.md": workflowFile({ description: "No access" }),
-    "space.md": workflowFile({ access: " ", description: "Space access" }),
-    "nodesc.md": workflowFile({ access: "read" }),
-    "invoked.md": workflowFile({ access: "read", description: "Has invocation", invocation: "user" }),
-    "fine.md": workflowFile({ access: "read", description: "Fine" }),
-  });
-  const { kinds, problems } = loadWorkflows(dir, loadPrompts());
+  const { kinds, problems } = loadWorkflows(dir, loadPrompts().kinds);
   assert.deepEqual([...kinds.keys()], ["fine"]);
-  const messages = problems.map((problem) => problem.message);
-  assert.ok(messages.some((message) => /"plan" is a built-in kind; rename the file/.test(message)));
-  assert.ok(messages.some((message) => /blank\.md: is blank/.test(message)));
-  assert.ok(messages.some((message) => /access\.md: access must be read or write/.test(message)));
-  assert.ok(messages.some((message) => /space\.md: access must be read or write/.test(message)));
-  assert.ok(messages.some((message) => /nodesc\.md: description is required \(shown by \/worq workflow\)/.test(message)));
-  assert.ok(messages.some((message) => /invoked\.md: invocation is decided by the workflows directory; remove "invocation"/.test(message)));
+  const message = (name: string) => problems.find((p) => p.path.endsWith(`/${name}`))?.message ?? "";
+  assert.match(message("audit-"), /folder name must be lowercase/);
+  assert.match(message("Audit"), /folder name must be lowercase/);
+  assert.match(message("plan"), /"plan" is a built-in kind/);
+  assert.match(message("empty"), /add SKILL\.md/);
+  assert.match(message("mismatch"), /name "other" must match the folder name "mismatch"/);
+  assert.match(message("nodesc"), /description is required/);
+  assert.match(message("disable"), /disable-model-invocation must be true or false/);
+  assert.match(message("access"), /access must be read or write/);
+  assert.match(message("reviewed"), /workflows run no reviewers/);
+  assert.match(message("invoked"), /disable-model-invocation: true/);
+  assert.match(message("blank"), /body is blank/);
+  assert.match(message("legacy.md"), /move to .*legacy\/SKILL\.md/);
+  assert.equal(problems.length, 12);
 });
 
-test("workflow loader: required sections and reviewers are validated", async (t) => {
-  const dir = await files(t, {
-    "no-workflow.md": workflowFile({ access: "read", description: "x", body: `## Recursive question\n\nWhat?\n` }),
-    "empty.md": workflowFile({ access: "read", description: "x", body: `## Workflow\n\n## Other\n\nText\n` }),
-    "no-question.md": workflowFile({ access: "read", description: "x", body: `## Workflow\n\nDo it.\n` }),
-    "none.md": workflowFile({ access: "read", description: "x", reviewers: "none" }),
-    "plan-review.md": workflowFile({ access: "read", description: "x", reviewers: "plan" }),
-    "nope.md": workflowFile({ access: "read", description: "x", reviewers: "nope" }),
-  });
-  const { kinds, problems } = loadWorkflows(dir, loadPrompts());
-  assert.ok(problems.some((problem) => /no-workflow\.md: add a "Workflow" section/.test(problem.message)));
-  assert.ok(problems.some((problem) => /empty\.md: add a "Workflow" section/.test(problem.message)));
-  assert.ok(problems.some((problem) => /no-question\.md: add a "Recursive question" section/.test(problem.message)));
-  assert.ok(problems.some((problem) => /nope\.md: reviewers "nope" is not a packaged roster \(plan, execute\)/.test(problem.message)));
-  assert.equal(kinds.get("none")?.reviewers, undefined);
-  assert.equal(kinds.get("plan-review")?.reviewers, "plan");
+test("skill tool: reads a package's listed files, nothing else", async (t) => {
+  const dir = await agentDir(t, { audit: { "SKILL.md": skillFile({ description: "Audit", access: "read" }), "references/table.md": "TABLE" } });
+  const outside = join(dir, "secret.md");
+  await writeFile(outside, "SECRET");
+  const skill = loadWorkflows(dir, loadPrompts().kinds).kinds.get("audit")!.workflow!.skill;
+  const read = skillTool([skill])!;
+  assert.equal(await read.run({ name: "audit" }, AbortSignal.timeout(1000)), skill.body);
+  assert.equal(await read.run({ name: "audit", path: "references/table.md" }, AbortSignal.timeout(1000)), "TABLE");
+  assert.throws(() => read.run({ name: "audit", path: "../secret.md" }, AbortSignal.timeout(1000)), /has no file/);
+  assert.throws(() => read.run({ name: "audit", path: "SKILL.md" }, AbortSignal.timeout(1000)), /has no file/);
 });
 
-test("workflows cannot launch through worq_spawn, and shared kinds cannot launch as workflows", async (t) => {
+test("model-invocable workflows spawn like kinds; user-only ones and review options are refused", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "documentation.md": workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, {
+    documentation: workflowFile({ access: "read", description: "Write docs" }),
+    private: workflowFile({ access: "read", description: "Mine", disable: "true" }),
+  });
   const { prompts } = userPrompts(agentDirPath);
-  const { worq } = setup(root, state, {}, {}, undefined, prompts);
-  await assert.rejects(worq.spawn("documentation", "Write docs", { title: "Write docs" }), /is a user-invoked workflow; launch it with \/worq workflow/);
-  await assert.rejects(worq.spawn("nope", "Write docs", { title: "Write docs" }), /Unknown kind nope[\s\S]*Workflows are launched with \/worq workflow/);
-  await assert.rejects(worq.runWorkflow(prompts.kinds.get("plan")!, "Write docs"), /is a shared kind; launch it with worq_spawn/);
-  assert.equal(worq.size, 0);
+  let skills: string[] = [];
+  const { worq, next } = setup(root, state, {
+    "agent.documentation": async (turn) => { skills = (turn.spec.skills ?? []).map((s) => s.name); await turn.tool("submit", planSubmission); },
+  }, {}, undefined, prompts);
+  await assert.rejects(worq.spawn("private", "x", { title: "Write docs" }), /user-only workflow[\s\S]*\/worq workflow/);
+  await assert.rejects(worq.spawn("nope", "x", { title: "Write docs" }), /Unknown kind nope; use execute \| plan \| documentation/);
+  await assert.rejects(worq.spawn("documentation", "x", { title: "Write docs", mode: "fast" }), /do not apply to workflows/);
+  await assert.rejects(worq.spawn("documentation", "x", { title: "Write docs", verify: true }), /do not apply to workflows/);
+  await assert.rejects(worq.runWorkflow(prompts.kinds.get("plan")!, "Write docs"), /is a built-in kind; launch it with worq_spawn/);
+  const agent = await worq.spawn("documentation", "Write the CLI docs", { title: "Write docs" });
+  assert.equal(agent.ref, "write-docs");
+  await next("review-ready", agent.ref);
+  assert.deepEqual(skills, ["documentation"], "the workflow's own package is readable through the skill tool");
+  assert.deepEqual(agent.reviews, []);
+  await worq.cancel(agent.ref);
 });
 
 test("runWorkflow uses the workflow ref and either the written task or the user's direction", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "documentation.md": workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
   const { prompts } = userPrompts(agentDirPath);
   const tasks: string[] = [];
   const { worq, next } = setup(root, state, {
@@ -217,7 +204,7 @@ test("runWorkflow uses the workflow ref and either the written task or the user'
 test("a running workflow is listable, steerable and cancellable", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "documentation.md": workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
   const { prompts } = userPrompts(agentDirPath);
   const { worq } = setup(root, state, { "agent.documentation": async () => { await new Promise<void>(() => {}); } }, {}, undefined, prompts);
   const agent = await worq.runWorkflow(prompts.kinds.get("documentation")!);
@@ -230,10 +217,10 @@ test("a running workflow is listable, steerable and cancellable", async (t) => {
   assert.ok(agent.ended);
 });
 
-test("read workflow without a roster: Workflow result artifact, no reviewers, no-reviewer notes", async (t) => {
+test("read workflow: Workflow result artifact, no reviewers, no-reviewer notes", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "documentation.md": workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
   const { prompts } = userPrompts(agentDirPath);
   let system = "";
   let finish = "";
@@ -251,41 +238,17 @@ test("read workflow without a roster: Workflow result artifact, no reviewers, no
   assert.doesNotMatch(finish, /for independent review/);
   assert.ok(!seen.some((spec) => spec.name.startsWith("reviewer.")));
   assert.deepEqual(agent.reviews, []);
-  assert.equal(agent.reviewPolicyLabel, "no configured reviewers");
+  assert.equal(agent.reviewPolicyLabel, "none (workflow)");
   assert.match(ready.text, /No reviewers ran: this result is unverified\./);
   assert.equal(agent.plan?.path, ".agents/plans/plan-documentation-workflow.md");
   assert.match(await readFile(join(root, agent.plan!.path), "utf8"), /^# Workflow result: documentation\n/);
   await worq.cancel(agent.ref);
 });
 
-test("read workflow with reviewers: the selected roster runs and is named in the policy", async (t) => {
-  const { dir, root, state } = await repo();
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "reviewed.md": workflowFile({ access: "read", description: "Reviewed docs", reviewers: "plan" }) });
-  const { prompts } = userPrompts(agentDirPath);
-  let finish = "";
-  const reviewers: string[] = [];
-  const { worq, next } = setup(root, state, {
-    "agent.reviewed": async (turn) => {
-      finish = turn.spec.tools.find((tool) => tool.name === "submit")!.description;
-      await turn.tool("submit", planSubmission);
-    },
-    reviewer: async (turn) => { reviewers.push(turn.spec.name); await turn.tool("report", pass); },
-  }, {}, undefined, prompts);
-  const agent = await worq.runWorkflow(prompts.kinds.get("reviewed")!);
-  const ready = await next("review-ready", agent.ref);
-  assert.match(finish, /^Submit your result for independent review\. Worq saves it to \.agents\/plans\/\./);
-  assert.deepEqual(reviewers.sort(), ["reviewer.decision", "reviewer.defeater", "reviewer.pair", "reviewer.subtraction"]);
-  assert.equal(agent.reviewPolicyLabel, "roster plan");
-  assert.match(worq.list(agent.ref), /review: roster plan/);
-  assert.match(ready.text, /decision: pass/);
-  await worq.cancel(agent.ref);
-});
-
-test("write workflow pins worq/<ref>, never merges, and runs no reviewers by default", async (t) => {
+test("write workflow pins worq/<ref>, never merges, and runs no reviewers", async (t) => {
   const { dir, root, state, git } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "change-log.md": workflowFile({ access: "write", description: "Change the log" }) });
+  const agentDirPath = await agentDir(t, { "change-log": workflowFile({ access: "write", description: "Change the log" }) });
   const { prompts } = userPrompts(agentDirPath);
   let system = "";
   let finish = "";
@@ -302,7 +265,7 @@ test("write workflow pins worq/<ref>, never merges, and runs no reviewers by def
   assert.equal(agent.branch, "worq/change-log-workflow");
   const ready = await next("review-ready", agent.ref);
   assert.match(system, /No independent reviewers run for this workflow/);
-  assert.match(finish, /^Submit your work\. Ends your turn\.$/);
+  assert.match(finish, /^Submit your result\. Ends your turn\.$/);
   assert.ok(!seen.some((spec) => spec.name.startsWith("reviewer.")));
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
@@ -317,7 +280,7 @@ test("write workflow pins worq/<ref>, never merges, and runs no reviewers by def
 test("a review-ready workflow notice names cancel and its capacity slot, and the agent stays live", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { "documentation.md": workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
   const { prompts } = userPrompts(agentDirPath);
   const { worq, next } = setup(root, state, {
     "agent.documentation": async (turn) => { await turn.tool("submit", planSubmission); },
@@ -336,8 +299,8 @@ test("an invalid workflow file does not affect a successful plan spawn", async (
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const agentDirPath = await agentDir(t, {
-    "broken.md": workflowFile({ access: "read", description: "Broken", body: `## Workflow\n\nNo question.\n` }),
-    "documentation.md": workflowFile({ access: "read", description: "Write docs" }),
+    broken: workflowFile({ access: "read" }),
+    documentation: workflowFile({ access: "read", description: "Write docs" }),
   });
   const { prompts, problems } = userPrompts(agentDirPath);
   assert.equal(problems.length, 1);

@@ -63,6 +63,8 @@ export interface Spec {
   cwd: string;
   system: string;
   tools: Tool[];
+  /** Session-specific skill packages (a workflow's own), indexed and readable alongside the shared ones. */
+  skills?: readonly import("../runtime/skills.ts").Skill[];
   emit(event: SessionEvent): void;
   /** Aborts session opening; an adapter must not leave a live session behind it. */
   signal: AbortSignal;

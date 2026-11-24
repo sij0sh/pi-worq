@@ -73,7 +73,7 @@ export class Agent {
   get reviewPolicyLabel() {
     if (this.kind.access === "write" && !this.verify) return "explicitly skipped";
     if (this.reviewPolicy) return this.reviewPolicy;
-    if (this.kind.invocation === "user") return this.kind.reviewers ? `roster ${this.kind.reviewers}` : "no configured reviewers";
+    if (this.kind.workflow) return "none (workflow)";
     return this.kind.name === "plan" && this.mode === "fast" ? "pending roster selection" : "kind roster";
   }
   readonly branch?: string;
@@ -262,15 +262,14 @@ export class Agent {
         tools.push(...writeTools(cwd), ...box.tools);
       }
       const write = this.kind.access === "write";
-      const user = this.kind.invocation === "user";
-      const reviewed = !user || Boolean(this.kind.reviewers);
-      const noReviewers = user && !this.kind.reviewers ? "\n\nNo independent reviewers run for this workflow; submit a self-contained result." : "";
+      const workflow = this.kind.workflow;
+      const noReviewers = workflow ? "\n\nNo independent reviewers run for this workflow; submit a self-contained result." : "";
       this.conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, admitCloseout: this.admitCloseout, pending: () => this.openPqs,
-        spec: { observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
+        spec: { observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(workflow ? { skills: [workflow.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
-          description: write ? `Submit your work${reviewed ? " for independent review" : ""}.` : user ? `Submit your result${reviewed ? " for independent review" : ""}. Worq saves it to .agents/plans/.` : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
+          description: workflow ? `Submit your result.${write ? "" : " Worq saves it to .agents/plans/."}` : write ? "Submit your work for independent review." : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
           validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
@@ -444,7 +443,7 @@ export class Agent {
     if (this.kind.access === "read") {
       const plan = report as PlanReport;
       const path = `.agents/plans/plan-${this.ref}.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report: plan, label: this.kind.invocation === "user" ? "Workflow result" : "Plan" });
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report: plan, label: this.kind.workflow ? "Workflow result" : "Plan" });
       await writeScoped(root, path, markdown, { create: !this.plan });
       if (this.planRound !== undefined && this.plan?.path === path) this.deps.telemetry?.source(this.id, this.planRound, true);
       this.planRound = this.round;
@@ -459,14 +458,13 @@ export class Agent {
       this.submission = workText(report as WorkReport);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
-    const skipped = this.kind.access === "write" && !this.verify;
-    const user = this.kind.invocation === "user";
-    const rosterName = user ? this.kind.reviewers : this.kind.name;
-    const configured = skipped || !rosterName ? [] : prompts.reviewers(rosterName);
-    const focused = !user && this.kind.name === "plan" && this.mode === "fast"
+    const workflow = Boolean(this.kind.workflow);
+    const skipped = workflow || (this.kind.access === "write" && !this.verify);
+    const configured = skipped ? [] : prompts.reviewers(this.kind.name);
+    const focused = this.kind.name === "plan" && this.mode === "fast"
       ? configured.find(r => r.name === "subtraction") : undefined;
     const roster = focused ? [focused] : configured;
-    this.reviewPolicy = focused ? "focused (subtraction)" : configured.length ? (user ? `roster ${this.kind.reviewers}` : "kind roster") : "no configured reviewers";
+    this.reviewPolicy = workflow ? "none (workflow)" : focused ? "focused (subtraction)" : configured.length ? "kind roster" : "no configured reviewers";
     const revision: Revision = { run: this.id, round: this.round, identity, status: 'reviewing', source: false, reviews: [] };
     this.revision = revision;
     this.deps.telemetry?.revision(revision);
@@ -483,7 +481,7 @@ export class Agent {
     const status = !roster.length ? (skipped ? 'skipped' : 'inconclusive') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
     this.deps.telemetry?.revision({ ...revision, status, ready: true, source: true, reviews: reports }, true);
     this.set("review-ready");
-    this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() + `\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.${user ? `\nThis workflow stays live until /worq cancel ${this.ref}; it keeps one limits.agents slot.` : ""}` });
+    this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() + `\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.${workflow ? `\nThis workflow stays live until /worq cancel ${this.ref}; it keeps one limits.agents slot.` : ""}` });
   }
   private async reviewer(name: string, prompt: string, slot: number, artifacts: (count: number) => void): Promise<ReviewRecord> {
     const { driver, prompts, limits, root, semaphore } = this.deps;

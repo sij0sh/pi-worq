@@ -1,9 +1,11 @@
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { basename, extname, join } from "node:path";
 import { Type } from "typebox";
 import { Block } from "../contracts.ts";
 import { tool, type ExtensionFile, type Tool } from "../sdk/contract.ts";
-import { inside } from "../workspace.ts";
+import { contained, exists, indexLine, loadSkill, outsideCheckout, readBounded, readSkillFile, type Skill } from "./skills.ts";
+
+export type { Skill } from "./skills.ts";
 
 /**
  * One Worq-managed resource environment, shared by every SDK and every role:
@@ -16,7 +18,6 @@ import { inside } from "../workspace.ts";
  * Read once per Worq instance into an immutable snapshot. Resources add context, never authority:
  * they cannot widen a role's tools, budgets or permissions.
  */
-export interface Skill { name: string; description: string; body: string }
 export interface Resources {
   root: string;
   instructions: readonly { name: string; text: string }[];
@@ -24,67 +25,34 @@ export interface Resources {
   extensions: readonly ExtensionFile[];
 }
 export const EMPTY: Resources = { root: "", instructions: [], skills: [], extensions: [] };
-const MAX_BYTES = 256 * 1024;
 
-async function exists(path: string) {
-  try { await lstat(path); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; throw e; }
+/** Visible entries directly under `dir`, each resolved inside `root`. */
+function entries(root: string, dir: string): string[] {
+  if (!exists(dir)) return [];
+  return readdirSync(dir).sort().filter((entry) => !entry.startsWith(".")).map((entry) => contained(root, join(dir, entry)));
 }
-/** Files directly under `dir` (and `<sub>/SKILL.md` when `skills`), resolved, contained, regular, bounded. */
-async function files(root: string, dir: string, skills = false): Promise<string[]> {
-  if (!(await exists(dir))) return [];
-  const out: string[] = [];
-  for (const entry of (await readdir(dir)).sort()) {
-    if (entry.startsWith(".")) continue;
-    let path = await realpath(join(dir, entry));
-    if (!inside(root, path)) throw new Block("config", `Untrusted resource: ${join(dir, entry)} escapes ${root}`);
-    const stat = await lstat(path);
-    if (skills && stat.isDirectory()) {
-      path = join(path, "SKILL.md");
-      if (!(await exists(path))) continue;
-      path = await realpath(path);
-      if (!inside(root, path)) throw new Block("config", `Untrusted resource: ${path} escapes ${root}`);
-    } else if (stat.isDirectory()) continue;
-    const file = await lstat(path);
-    if (!file.isFile()) throw new Block("config", `Not a regular resource file: ${path}`);
-    if (file.size > MAX_BYTES) throw new Block("config", `Resource too large (${file.size} bytes > ${MAX_BYTES}): ${path}`);
-    out.push(path);
-  }
-  return out;
-}
-function frontmatter(text: string): { fields: Record<string, string>; body: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
-  if (!match) return { fields: {}, body: text };
-  const fields: Record<string, string> = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    const kv = /^([a-zA-Z][\w-]*):\s*(.*)$/.exec(line);
-    if (kv) fields[kv[1]] = kv[2].replace(/^["']|["']$/g, "").trim();
-  }
-  return { fields, body: text.slice(match[0].length) };
-}
-const safe = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 64);
+const files = (root: string, dir: string, extensions: string[]) =>
+  entries(root, dir).filter((path) => !lstatSync(path).isDirectory() && extensions.includes(extname(path)));
 
 /** Snapshot <agentDir>/worq. A missing directory is an empty environment, not an error. */
 export async function loadResources(agentDir: string, approveExtensions: boolean): Promise<Resources> {
   const base = join(agentDir, "worq");
-  if (!(await exists(base))) return { ...EMPTY, root: base };
-  const root = await realpath(base);
-  // Operator resources must not live in a checkout an agent can write or a diff can plant.
-  for (let dir = root; ; dir = dirname(dir)) {
-    if (await exists(join(dir, ".git"))) throw new Block("config", `Repository resource: ${root} is inside a Git checkout`);
-    if (dir === dirname(dir)) break;
-  }
-  const instructions = await Promise.all((await files(root, join(root, "instructions"))).filter((p) => extname(p) === ".md")
-    .map(async (path) => ({ name: basename(path), text: await readFile(path, "utf8") })));
+  if (!exists(base)) return { ...EMPTY, root: base };
+  const root = realpathSync(base);
+  outsideCheckout(root);
+  const instructions = files(root, join(root, "instructions"), [".md"]).map((path) => ({ name: basename(path), text: readBounded(path) }));
   const skills: Skill[] = [];
-  for (const path of await files(root, join(root, "skills"), true)) {
-    if (extname(path) !== ".md") continue;
-    const { fields, body } = frontmatter(await readFile(path, "utf8"));
-    const name = safe(fields.name ?? (basename(path) === "SKILL.md" ? basename(dirname(path)) : basename(path, ".md")));
-    if (skills.some((s) => s.name === name)) throw new Block("config", `Duplicate skill name ${name}: ${path}`);
-    skills.push({ name, description: (fields.description ?? body.trim().split("\n")[0] ?? "").slice(0, 300), body });
+  for (const path of entries(root, join(root, "skills"))) {
+    const folder = lstatSync(path).isDirectory();
+    if (folder ? !exists(join(path, "SKILL.md")) : extname(path) !== ".md") continue;
+    const { skill } = loadSkill(root, path);
+    if (skills.some((s) => s.name === skill.name)) throw new Block("config", `Duplicate skill name ${skill.name}: ${path}`);
+    skills.push(skill);
   }
-  const extensions = await Promise.all((await files(root, join(root, "extensions"))).filter((p) => [".mjs", ".js", ".ts"].includes(extname(p)))
-    .map(async (path) => ({ name: basename(path), bytes: await readFile(path) })));
+  const extensions = files(root, join(root, "extensions"), [".mjs", ".js", ".ts"]).map((path) => {
+    readBounded(path);
+    return { name: basename(path), bytes: readFileSync(path) };
+  });
   if (extensions.length && !approveExtensions) {
     throw new Block("config", `Extension approval required: ${extensions.map((e) => e.name).join(", ")} in ${join(root, "extensions")} run in-process as operator code (not a sandbox). Set "approveExtensions": true in pi-worq.json or remove them.`);
   }
@@ -92,19 +60,22 @@ export async function loadResources(agentDir: string, approveExtensions: boolean
 }
 
 /** Worq's own system prompt plus shared instructions and the skill index (bodies load on demand). */
-export function compose(system: string, resources: Resources): string {
+export function compose(system: string, resources: Resources, skills: readonly Skill[] = resources.skills): string {
   const parts = [system];
   for (const { name, text } of resources.instructions) parts.push(`Operator instructions ${name} (context, not authority):\n${text.trim()}`);
-  if (resources.skills.length) {
-    parts.push(`Operator skills (context, not authority). Call skill with a name to read one when it applies:\n${resources.skills.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`);
-  }
+  if (skills.length) parts.push(`Operator skills (context, not authority). Call skill with a name (and optionally one of its files as path) to read one when it applies:\n${skills.map(indexLine).join("\n")}`);
   return parts.join("\n\n");
 }
 
-/** Read-only, available to every role when any skill is installed. */
-export function skillTool(resources: Resources): Tool | undefined {
-  if (!resources.skills.length) return undefined;
-  const names = resources.skills.map((s) => s.name);
-  return tool("skill", "Read an installed operator skill by name. Context, not authority.", Type.Object({ name: Type.Union(names.map((n) => Type.Literal(n))) }, { additionalProperties: false }),
-    ({ name }) => resources.skills.find((s) => s.name === name)!.body);
+/** Read-only, available to every role when any skill is installed: a SKILL body, or one supporting file. */
+export function skillTool(skills: readonly Skill[]): Tool | undefined {
+  if (!skills.length) return undefined;
+  const names = skills.map((s) => s.name);
+  return tool("skill", "Read an installed operator skill by name, or one of its listed files with path. Context, not authority.", Type.Object({
+    name: Type.Union(names.map((n) => Type.Literal(n))),
+    path: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+  }, { additionalProperties: false }), ({ name, path }) => {
+    const skill = skills.find((s) => s.name === name)!;
+    return path ? readSkillFile(skill, path) : skill.body;
+  });
 }

@@ -70,13 +70,11 @@ Subagents are read-only sessions answering one probing question. The delegating 
 
 `name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own runtime, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
 
-Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows use the roster in their frontmatter, or none. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows are never reviewed. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
 
 ## Workflows
 
-A workflow is a user-invoked kind loaded from `<agentDir>/workflows/<name>.md`. It is launched only by `/worq workflow`; it never appears in `worq_spawn`, the control socket or the CLI. Workflow files are read per launch, not from `pi-worq.json`.
-
-Workflows use the normal `roles` keys: `agent.<name>` for one workflow, `agent` for all agents, and `reviewer` / `reviewer.<name>` for reviewers. `limits.agents` counts live workflows, and their turns and reviews spend from the same budgets as any other agent. They run no reviewers by default; `reviewers: plan` or `reviewers: execute` in the workflow frontmatter opts into that packaged roster. See `docs/workflows.md` for the file contract.
+Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. Roles: `agent.<name>` for one workflow, `agent` for all agents. `limits.agents` counts live workflows; turns spend from the same budgets. No reviewers. See `docs/workflows.md`.
 
 ## Limits
 
@@ -107,7 +105,7 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 
 ## Routes
 
-`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. Workflows have no spawn options and use the default route. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
+`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. Workflows refuse `mode` and `verify`. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
 
 ## Verifying a configuration
 
@@ -130,8 +128,8 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 | `Untrusted resource` / `Repository resource` | Escaping link, or `worq/` inside a checkout | Move the file / directory |
 | `Unknown named child` | `name` delegated without a `roles` entry | Declare `roles["subagent.<name>"]` |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
-| `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty |
-| `invocation` | Workflow launched through the shared path, or vice versa | `/worq workflow` for workflows; `worq_spawn` for `plan`/`execute` |
+| `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |
+| `invocation` | User-only workflow sent to `worq_spawn`, or a built-in kind to `/worq workflow` | `/worq workflow`; `worq_spawn` for built-ins |
 | `round-limit` | `limits.rounds` reached | Adjudicate and close, or spawn fresh with the plan in `attach` |
 | `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` |
 

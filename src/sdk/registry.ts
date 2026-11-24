@@ -39,8 +39,6 @@ export async function createDriver(host: HostServices, config: Config, resources
   };
   // Lazily import only the SDKs a role can reach: the built-in "pi" plus every declared preset.
   await Promise.all([...new Set(["pi", ...config.sdks])].filter((sdk) => sdks[sdk]).map(load));
-  const skill = skillTool(resources);
-  const skills = resources.skills.map((s) => s.name);
 
   return {
     capabilities(role) {
@@ -53,13 +51,17 @@ export async function createDriver(host: HostServices, config: Config, resources
       const caps = sdk.capabilities(runtime);
       assertRuntime(runtime, caps, resources.extensions.length);
       const thinking = runtime.thinking ?? (caps.thinking.includes("low") ? "low" : undefined);
+      const { skills: own = [], ...rest } = spec;
+      const packages = [...resources.skills, ...own.filter((s) => !resources.skills.some((r) => r.name === s.name))];
+      const skill = skillTool(packages);
+      const skills = packages.map((s) => s.name);
       const emit = (event: SessionEvent) => spec.emit(event.type === "telemetry" && "setup" in event.value
         ? { type: "telemetry", value: { setup: { ...event.value.setup, skills } } } : event);
       spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "built-in"}` });
       const handle = await sdk.open({
-        ...spec, emit, runtime, thinking, extensions: resources.extensions,
-        system: compose(spec.system, resources),
-        tools: skill && !spec.tools.some((t) => t.name === skill.name) ? [...spec.tools, skill] : spec.tools,
+        ...rest, emit, runtime, thinking, extensions: resources.extensions,
+        system: compose(spec.system, resources, packages),
+        tools: skill && !rest.tools.some((t) => t.name === skill.name) ? [...rest.tools, skill] : rest.tools,
       });
       if (spec.signal.aborted) { handle.dispose(); throw spec.signal.reason; }
       let fallback = runtime.fallbackModel !== runtime.model ? runtime.fallbackModel : undefined;

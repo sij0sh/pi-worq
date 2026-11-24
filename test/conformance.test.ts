@@ -356,7 +356,7 @@ test("registry: createDriver routes by runtime, prepares the shared environment,
   const sdks = { pi: recordingSdk(FULL_CAPS, seen, switched), test: recordingSdk(FULL_CAPS, seen, switched) };
   const fast: Runtime = { name: "fast", sdk: "test", model: "m/a", fallbackModel: "m/b", path: "/runtimes/fast", via: "/roles/subagent" };
   const config = configFor((role) => role === "subagent" ? fast : { ...MAIN }, ["test"]);
-  const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint" }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
+  const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
   const driver = await createDriver({}, config, resources, sdks);
   for (const role of ["agent.plan", "subagent", "reviewer.intent"]) {
     const handle = await driver.open(roleSpec(role));

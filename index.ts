@@ -11,7 +11,8 @@ import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
 import { createDriver } from "./src/sdk/registry.ts";
-import { loadPrompts, loadWorkflows } from "./src/prompts.ts";
+import { loadPrompts, type Kind } from "./src/prompts.ts";
+import { loadWorkflows, type Workflows } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/sdk/contract.ts";
 import { statePath } from "./src/workspace.ts";
@@ -58,8 +59,16 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
 export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string; telemetry?: Telemetry } = {}) {
   return function worq(pi: ExtensionAPI) {
     const prompts = loadPrompts();
-    const table = ops([...prompts.kinds.keys()]);
-    const kinds = [...prompts.kinds.values()].map((kind) => `${kind.name}: ${kind.description}`).join("; ");
+    const agentDir = () => options.agentDir?.() ?? getAgentDir();
+    // Workflows are read once per extension load: worq_spawn's kind list is fixed at registration.
+    let workflows: Workflows;
+    try { workflows = loadWorkflows(agentDir(), prompts.kinds); }
+    catch (error) { workflows = { dir: join(agentDir(), "workflows"), kinds: new Map(), problems: [{ path: join(agentDir(), "workflows"), message: errorText(error) }] }; }
+    const catalog: ReadonlyMap<string, Kind> = new Map([...prompts.kinds, ...workflows.kinds]);
+    const spawnable = [...catalog.values()].filter((kind) => !kind.workflow?.userOnly);
+    const table = ops(spawnable.map((kind) => kind.name));
+    const kinds = spawnable.map((kind) => `${kind.name}: ${kind.description}`).join("; ");
+    let warned = false;
     let instance: Worq | undefined;
     let starting: Promise<Worq> | undefined;
     let socket: Awaited<ReturnType<typeof serve>> | undefined;
@@ -108,7 +117,6 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         : { triggerTurn: false });
       status();
     };
-    const agentDir = () => options.agentDir?.() ?? getAgentDir();
     /** One Worq per Pi session: config, shared resource snapshot and SDK router are built once. */
     const ensure = async (ctx: ExtensionContext): Promise<Worq> => {
       ui = ctx;
@@ -119,7 +127,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
         const host = { get model() { return ctx.model; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, config, resources);
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
       })().finally(() => { starting = undefined; });
       return starting;
     };
@@ -161,18 +169,17 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       if (ctx.mode === "tui") ctx.ui.notify(clean(text), level);
       else process.stderr.write(`${clean(text)}\n`);
     };
-    /** The one user entry point: choose an installed workflow, then optional extra instructions. */
+    const problems = (ctx: ExtensionContext) => { for (const problem of workflows.problems) say(ctx, `! ${problem.path}: ${problem.message}`, "warning"); };
+    /** The user entry point for every installed workflow (user-only or not): choose one, then optional extra instructions. */
     const launchWorkflow = async (ctx: ExtensionContext) => {
       if (ctx.mode !== "tui") { say(ctx, "Workflow launcher requires a TUI."); return; }
-      const dir = join(agentDir(), "workflows");
-      const { kinds, problems } = loadWorkflows(dir, prompts);
-      for (const problem of problems) say(ctx, `! ${problem.message}`, "warning");
-      if (!kinds.size) {
-        say(ctx, `No workflows installed. Add ${join(dir, "<name>.md")} with access, description, a "Workflow" section and a "Recursive question" section.`);
+      problems(ctx);
+      if (!workflows.kinds.size) {
+        say(ctx, `No workflows loaded. Add ${join(workflows.dir, "<name>", "SKILL.md")} with name and description frontmatter, then restart Pi.`);
         return;
       }
-      const list = [...kinds.values()];
-      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access} · ${kind.description}`, kind]));
+      const list = [...workflows.kinds.values()];
+      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access}${kind.workflow?.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
       const choice = await ctx.ui.select("Launch workflow", [...labels.keys()]);
       if (choice === undefined) return;
       const kind = labels.get(choice);
@@ -222,10 +229,10 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           pi.appendEntry(ENABLED, { on: true });
           if (!value) {
             await ensure(ctx);
-            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}. Workflows: /worq workflow.`);
+            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${spawnable.map((kind) => kind.name).join(", ")}. Workflows: /worq workflow.`);
             return;
           }
-          if (prompts.kinds.has(value)) { say(ctx, `Usage: /worq ${value} <request>`, "error"); return; }
+          if (catalog.has(value)) { say(ctx, `Usage: /worq ${value} <request>`, "error"); return; }
           pi.sendUserMessage(value, { deliverAs: "followUp" });
         } catch (error) { say(ctx, errorText(error), "error"); }
       },
@@ -262,6 +269,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       // Resume/fork: restore the last /worq choice on this branch.
       const last = ctx.sessionManager.getBranch().filter((e) => e.type === "custom" && e.customType === ENABLED).at(-1);
       if (last && last.type === "custom") enable(Boolean((last.data as { on?: boolean } | undefined)?.on));
+      if (!warned && ctx.mode === "tui") { warned = true; problems(ctx); }
       if (socket) return;
       try { socket = await serve(statePath(), (op, args) => run(ctx, op, args)); }
       catch (error) { if (ctx.mode === "tui") say(ctx, `Worq control socket unavailable: ${errorText(error)}`, "warning"); }

@@ -41,11 +41,15 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 ## Workflows
 
-A workflow is a user-invoked agent kind. Add one Markdown file at `<agentDir>/workflows/<name>.md`; `/worq workflow` opens a native menu of installed workflows, then asks for optional instructions. Empty instructions run the workflow as written; escape at either step cancels. A newly added file appears in the next launcher without restarting Pi.
+A workflow is a skill package: `<agentDir>/workflows/<name>/SKILL.md` (frontmatter `name`, `description`, optional `disable-model-invocation`, optional `access`) plus any supporting folders (`references/`, `scripts/`, …). Read once when Pi loads Worq; restart to pick up changes.
 
-Workflows are deliberately absent from `worq_spawn`, the control socket and the `worq` CLI: only you can launch one. A launch activates `worq_list`, `worq_send` and `worq_cancel`, never `worq_spawn`, and does not change the stored `/worq` on/off choice. `/worq off` still blocks Main's spawns while an explicit `/worq workflow` launch is honored.
+- `disable-model-invocation: true` → user-only: launched by `/worq workflow` alone.
+- absent/`false` → also a `worq_spawn` kind (and control socket/CLI), so Main can launch it.
+- `access: read` → read-only, result saved to `.agents/plans/plan-<ref>.md` (`# Workflow result:`). Absent → write: own worktree, pins `worq/<ref>`, never merges.
+- Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
+- No reviewers. `mode`/`verify` are refused for workflows.
 
-A workflow result is the usual actionable `review-ready` notice. It stays live until `/worq cancel <ref>` and keeps one `limits.agents` slot. Read workflows save `.agents/plans/plan-<ref>.md` with a `# Workflow result:` heading; write workflows pin `worq/<ref>` and never merge. Workflows run no reviewers by default; `reviewers: plan` or `reviewers: execute` opts into a packaged roster. The ref base is `<name>-workflow`; a collision adds a numeric suffix. See `docs/workflows.md` for the file contract and every launcher warning.
+`/worq workflow` lists every workflow, then asks for optional instructions (empty = run as written; escape cancels). It activates `worq_list`/`worq_send`/`worq_cancel`, never `worq_spawn`, and is honored under `/worq off`. The result is the usual `review-ready` notice; the workflow stays live until `/worq cancel <ref>` and holds one `limits.agents` slot. Ref base `<name>-workflow` from the menu, the title from `worq_spawn`. See `docs/workflows.md`.
 
 ## Vocabulary
 
@@ -53,8 +57,8 @@ A workflow result is the usual actionable `review-ready` notice. It stays live u
 |---|---|
 | Main | your Pi session |
 | Agent | SDK session launched by Main, or by you through a workflow; has a kind |
-| Workflow | user-invoked kind in `<agentDir>/workflows/<name>.md`; launched only by `/worq workflow` |
-| Kind | shared: `prompts/kinds/<name>.md` · user: `<agentDir>/workflows/<name>.md`; recursive question, access (`read`/`write`), `invocation` |
+| Workflow | skill package `<agentDir>/workflows/<name>/SKILL.md`; `/worq workflow`, plus `worq_spawn` unless `disable-model-invocation: true` |
+| Kind | built-in: `prompts/kinds/<name>.md` · workflow: `<agentDir>/workflows/<name>/SKILL.md`; access (`read`/`write`) |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
 | Reviewer | sealed session fired on submit; roster `prompts/reviewers/<roster>/*.md`, run in parallel |
@@ -83,7 +87,7 @@ Verdicts: `pass · fail · inconclusive · plan-fault · not-applicable · unkno
 
 Read tools: `search` accepts a relative file or directory path; `read_file` accepts a 1-based `offset` and a `limit` of 1–160 lines. For factual lookups, a short `submit` summary with source citations is enough.
 
-Adding a shared kind, workflow, or reviewer = adding one Markdown file.
+Adding a built-in kind or reviewer = one Markdown file; a workflow = one skill folder.
 
 ## Config
 

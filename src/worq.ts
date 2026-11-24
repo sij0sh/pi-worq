@@ -10,6 +10,8 @@ export interface WorqDeps {
   telemetry?: import('./telemetry.ts').Telemetry;
   driver: Driver;
   prompts: Prompts;
+  /** Every launchable kind: built-ins plus installed workflows. Defaults to `prompts.kinds`. */
+  kinds?: ReadonlyMap<string, Kind>;
   config: Config;
   /** Installed native extension count; every role's SDK must be able to load them. */
   extensions?: number;
@@ -46,21 +48,23 @@ export class Worq {
     return agent;
   }
 
+  private get kinds() { return this.deps.kinds ?? this.deps.prompts.kinds; }
   async spawn(kindName: string, task: string, opts: { title: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
-    const { prompts } = this.deps;
-    const kind = prompts.kinds.get(kindName);
-    if (kind?.invocation === "user") throw new Block("invocation", `${kindName} is a user-invoked workflow; launch it with /worq workflow`);
-    if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}. Workflows are launched with /worq workflow`);
+    const kind = this.kinds.get(kindName);
+    if (kind?.workflow?.userOnly) throw new Block("invocation", `${kindName} is a user-only workflow (disable-model-invocation); launch it with /worq workflow`);
+    const spawnable = [...this.kinds.values()].filter((k) => !k.workflow?.userOnly).map((k) => k.name);
+    if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${spawnable.join(" | ")}`);
+    if (kind.workflow && (opts.verify !== undefined || opts.mode !== undefined)) throw new Block("invalid-payload", "verify and mode do not apply to workflows (no review)");
     if (kind.access !== "write" && opts.verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
     return this.admit(kind, task, { ...opts, base: nameFrom(opts.title) });
   }
-  /** The user's one launch path for `invocation: "user"` kinds. Shared kinds stay on worq_spawn. */
+  /** The user's launch path for any installed workflow. Built-in kinds stay on worq_spawn. */
   async runWorkflow(kind: Kind, direction?: string): Promise<Agent> {
-    if (kind.invocation !== "user") throw new Block("invocation", `${kind.name} is a shared kind; launch it with worq_spawn`);
+    if (!kind.workflow) throw new Block("invocation", `${kind.name} is a built-in kind; launch it with worq_spawn`);
     const prompt = (direction ?? "").trim();
     if (prompt.length > 8000) throw new Block("invalid-payload", "Workflow direction exceeds 8000 characters");
     const task = prompt || `Run the ${kind.name} workflow on this repository and submit its result.`;
-    return this.admit(kind, task, { title: kind.name.replace(/-/g, " "), base: `${kind.name}-workflow`, verify: true });
+    return this.admit(kind, task, { title: kind.name.replace(/-/g, " "), base: `${kind.name}-workflow` });
   }
   private async admit(kind: Kind, task: string, { title, base, attach = [], verify = true, mode, reason }: { title: string; base: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
     const { prompts, config } = this.deps;

@@ -75,7 +75,7 @@ test("prompts: kinds and reviewer rosters are data", () => {
   assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "plan"]);
   assert.equal(prompts.kinds.get("plan")!.access, "read");
   assert.equal(prompts.kinds.get("execute")!.access, "write");
-  assert.ok([...prompts.kinds.values()].every((kind) => kind.invocation === "shared"));
+  assert.ok([...prompts.kinds.values()].every((kind) => !kind.workflow));
   assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
   assert.deepEqual(prompts.reviewers("execute").map((r) => r.name), ["intent"]);
 });
@@ -249,8 +249,13 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
 
 test("the /worq workflow launcher selects a workflow, takes optional instructions and never enables worq_spawn", async (t) => {
   const { dir, root, state } = await repo();
-  const agentDir = join(dir, "agent");
-  await mkdir(agentDir);
+  const agentDir = await mkdtemp(join(tmpdir(), "worq-agent-"));
+  t.after(() => rm(agentDir, { recursive: true, force: true }));
+  // Workflows are read once at extension load; installed before it.
+  const install = async (name: string, text: string) => { await mkdir(join(agentDir, "workflows", name), { recursive: true }); await writeFile(join(agentDir, "workflows", name, "SKILL.md"), text); };
+  await install("docs", "---\nname: docs\ndescription: Write the docs\naccess: read\ndisable-model-invocation: true\n---\n\nWrite it.\n");
+  await install("shared", "---\ndescription: Shared docs\naccess: read\n---\n\nWrite it.\n");
+  await install("broken", "---\naccess: read\n---\n\nNo description.\n");
   t.after(() => rm(dir, { recursive: true, force: true }));
   process.env.WORQ_STATE_DIR = state;
   t.after(() => { delete process.env.WORQ_STATE_DIR; });
@@ -299,19 +304,10 @@ test("the /worq workflow launcher selects a workflow, takes optional instruction
     assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "review-ready"), `expected review-ready for ${ref}`);
   };
 
-  // No workflows installed: the notice names the directory and the file contract.
+  // Every workflow is in the menu (user-only marked); invalid siblings are reported.
   await command!("workflow", ctx);
-  assert.match(last(/No workflows installed/) ?? "", new RegExp(`Add ${agentDir}/workflows/<name>\\.md`));
-  assert.equal(selects.length, 0);
-
-  // A workflow added mid-session appears in the next launcher call; invalid siblings are reported.
-  await mkdir(join(agentDir, "workflows"));
-  const docs = "---\naccess: read\ndescription: Write the docs\n---\n\n## Workflow\n\nWrite it.\n\n## Recursive question\n\nWhat is missing?\n";
-  await writeFile(join(agentDir, "workflows", "docs.md"), docs);
-  await writeFile(join(agentDir, "workflows", "broken.md"), "---\naccess: read\ndescription: Broken\n---\n\n## Workflow\n\nNo question.\n");
-  await command!("workflow", ctx);
-  assert.match(last(/broken\.md: add a "Recursive question" section/) ?? "", /broken\.md/);
-  assert.deepEqual(selects.at(-1), ["docs · read · Write the docs"]);
+  assert.match(last(/broken: description is required/) ?? "", /broken/);
+  assert.deepEqual(selects.at(-1), ["docs · read · user-only · Write the docs", "shared · read · Shared docs"]);
   assert.equal(launchedRef(), "docs-workflow");
   await settle("docs-workflow");
   const workflowTools = tools.map((tool) => tool.name);
@@ -320,8 +316,9 @@ test("the /worq workflow launcher selects a workflow, takes optional instruction
   assert.ok(!active.includes("worq_spawn"));
   assert.ok(!entries.some((entry) => entry.customType === "worq-enabled"), "a workflow launch does not enable Main's spawn");
   const spawn = tools.find((tool) => tool.name === "worq_spawn")!;
-  assert.deepEqual((spawn.parameters as unknown as { properties: { kind: { enum: string[] } } }).properties.kind.enum, ["execute", "plan"]);
-  assert.doesNotMatch(spawn.description, /docs/);
+  assert.deepEqual((spawn.parameters as unknown as { properties: { kind: { enum: string[] } } }).properties.kind.enum, ["execute", "plan", "shared"]);
+  assert.match(spawn.description, /shared: Shared docs/);
+  assert.doesNotMatch(spawn.description, /Write the docs/, "user-only workflows are not offered to the model");
   assert.ok(!("workflow" in ops(["plan", "execute"])), "workflows are not a control op");
   await assert.rejects(spawn.execute("id", { kind: "docs", title: "Docs", task: "x" }, undefined, undefined, ctx), /kind/);
   await command!("cancel docs-workflow", ctx);
