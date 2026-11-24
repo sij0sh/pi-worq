@@ -276,15 +276,13 @@ test("write workflow pins worq/<ref>, never merges, and runs no reviewers", asyn
   assert.ok(!seen.some((spec) => spec.name.startsWith("reviewer.")));
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
-  assert.ok(existsSync(agent.work!));
-  const work = agent.work!;
-  await worq.cancel(agent.ref);
-  assert.equal(agent.state, "closed");
-  assert.ok(!existsSync(work), "worktree removed");
+  assert.equal(agent.work, undefined, "terminal workflow removed its worktree");
+  assert.equal(worq.all().filter(a => !a.ended).length, 0);
+  assert.equal(agent.state, "review-ready");
   git("rev-parse", "--verify", `worq/${agent.ref}`);
 });
 
-test("a review-ready workflow notice names cancel and its capacity slot, and the agent stays live", async (t) => {
+test("a terminal workflow notice identifies skipped review and releases capacity", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
@@ -295,11 +293,10 @@ test("a review-ready workflow notice names cancel and its capacity slot, and the
   const agent = await worq.runWorkflow(prompts.kinds.get("documentation")!);
   const ready = await next("review-ready", agent.ref);
   assert.match(ready.text, /review-ready/);
-  assert.match(ready.text, new RegExp(`This workflow stays live until /worq cancel ${agent.ref}; it keeps one limits\\.agents slot\\.`));
-  assert.ok(!agent.ended);
-  assert.equal(worq.all().filter((candidate) => !candidate.ended).length, 1);
-  assert.equal(worq.size, 1);
-  await worq.cancel(agent.ref);
+  assert.match(ready.text, /Review batch: skipped/);
+  assert.match(ready.text, /Review is sealed/);
+  assert.ok(agent.ended);
+  assert.equal(worq.all().filter(a => !a.ended).length, 0);
 });
 
 test("an invalid workflow file does not affect a successful plan spawn", async (t) => {

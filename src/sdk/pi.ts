@@ -100,12 +100,13 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
       await loadExtensions(resources, spec.extensions);
       spec.signal.throwIfAborted();
       spec.emit({ type: "log", text: `Pi model ${model.provider}/${model.id}` });
+      const manager = SessionManager.inMemory(spec.cwd, undefined, spec.checkpoint ? JSON.parse(spec.checkpoint) : undefined);
       const { session } = await createAgentSession({
         cwd: spec.cwd, model, ...(level ? { thinkingLevel: level } : {}), resourceLoader: resources,
         tools: tools.map((t) => t.name), customTools: tools,
         ...(host.agentDir ? { agentDir: host.agentDir } : {}),
         ...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
-        sessionManager: SessionManager.inMemory(spec.cwd),
+        sessionManager: manager,
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
       });
       const setup = () => { try { report({ setup: { model: label(session.model && `${session.model.provider}/${session.model.id}`), thinking: label(session.thinkingLevel), skills: [] } }); } catch { /* display only */ } };
@@ -146,6 +147,11 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
           const { usage, stopReason } = event.message;
           const completed = stopReason !== "error" && stopReason !== "aborted";
           failed = stopReason === "error";
+          if (failed) {
+            // Record a bounded status code only; provider bodies can contain credentials or prompt text.
+            const status = event.message.errorMessage?.match(/^(?:HTTP(?: error)?\s+)?([45]\d{2})(?:\b|:)/i)?.[1];
+            spec.emit({ type: "log", text: status ? `Pi assistant error (reported HTTP status ${status})` : "Pi assistant ended with stopReason=error" });
+          }
           if (completed) report({ cache: { read: usage?.cacheRead, write: usage?.cacheWrite, input: usage?.input, speed: started !== undefined && usage?.output > 0 ? usage.output * 1000 / Math.max(1, performance.now() - started) : undefined } });
           const said = (event.message.content as { type: string; text?: string }[]).flatMap((c) => c.type === "text" && c.text?.trim() ? [c.text] : []).join(" ");
           if (said) spec.emit({ type: "text", text: said, completed });
@@ -154,12 +160,21 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         if (event.type === "agent_end" || event.type === "compaction_end") { report({ phase: "idle" }); context(); }
       });
       return {
+        checkpoint() {
+          if (session.isStreaming) return undefined;
+          const bytes = JSON.stringify([manager.getHeader(), ...manager.getBranch()]);
+          return Buffer.byteLength(bytes) <= 512 * 1024 ? bytes : undefined;
+        },
         async prompt(text, options) {
           if (options?.toolFree) session.setActiveToolsByName([]);
           failed = false;
           let began = false;
           try { await session.prompt(text, { preflightResult: (state) => { began = state === "started"; } }); }
-          catch (error) { if (began) throw error; return "preflight-failed"; }
+          catch {
+            spec.emit({ type: "log", text: began ? "Pi prompt threw after request admission" : "Pi prompt threw before request admission" });
+            if (began) throw new Block("model", "Pi prompt failed after request admission");
+            return "preflight-failed";
+          }
           return failed ? "failed" : "completed";
         },
         async steer(text) {

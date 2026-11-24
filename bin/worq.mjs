@@ -11,7 +11,7 @@ const usage = `Usage: worq [--pid N] <command>
   list [ref]                  agents, or one agent in full
   log <ref> [-f]              agent activity (-f follows)
   spawn <kind> --title "Short title" [--attach <plan>]... [--mode fast|thorough] <task>         start an agent
-  send <ref> <text>           steer, answer, or start the next round
+  send <ref> <text>           steer or answer
   cancel <ref|all>            close or cancel; branch kept
   configure <ref> [--model provider/id] [--thinking level]   change a live agent's runtime`;
 const ctl = join(statePath(), "ctl");

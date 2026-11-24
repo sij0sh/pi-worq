@@ -1,6 +1,6 @@
 # Workflows
 
-A workflow is an operator-installed **skill package** that runs as an agent kind: own SDK session, `delegate`/`ask_main`, rounds, worktree isolation, telemetry, `worq_list`/`worq_send`/`worq_cancel`. Same format and loader (`src/runtime/skills.ts`) as shared skills under `<agentDir>/worq/skills/`.
+A workflow is an operator-installed **skill package** that runs as an agent kind: own SDK session, `delegate`/`ask_main`, terminal handoff, worktree isolation, telemetry, `worq_list`/`worq_send`/`worq_cancel`. Same format and loader (`src/runtime/skills.ts`) as shared skills under `<agentDir>/worq/skills/`.
 
 ## Install
 
@@ -48,13 +48,13 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 ## Lifecycle
 
 - **No reviewers.** Prompt says the result must be self-contained; digest says `No reviewers ran: this result is unverified.`; policy `none (workflow)`.
-- Completion is the actionable `review-ready` notice. The workflow stays live until `/worq cancel <ref>` and holds one `limits.agents` slot. `/worq send` starts another round when authorized.
+- Completion is the terminal `review-ready` notice. The slot is released and the result remains available through `worq_list`.
 - Read: `PlanReport` saved to `.agents/plans/plan-<ref>.md`, headed `# Workflow result: <title>`.
 - Write: `WorkReport`, commit pinned on `worq/<ref>`. Worq never merges; verify before merging by hand.
 
 ## Configuration
 
-Workflows are kinds; `roles` keys apply: `agent.<name>` one workflow, `agent` all agents. `limits.rounds`, `asks`, `agentTurns`, `agentMinutes`, `runTurns` apply unchanged.
+Workflows are kinds; `roles` keys apply: `agent.<name>` one workflow, `agent` all agents. `limits.asks`, `agentTurns`, `agentMinutes`, `runTurns` apply unchanged.
 
 ```json
 { "runtimes": { "deep": { "model": "provider/model", "thinking": "high" } }, "roles": { "agent.foundation": "deep" } }

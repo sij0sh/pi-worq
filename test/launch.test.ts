@@ -5,7 +5,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { launchPicker } from '../src/launch-picker.ts';
 import { loadConfig, MAIN } from '../src/runtime/config.ts';
 import { prepareLaunch, type LaunchRequest } from '../src/runtime/launch.ts';
-import { rm } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { loadPrompts } from '../src/prompts.ts';
 import { Worq } from '../src/worq.ts';
 import type { Spec } from '../src/sdk/contract.ts';
@@ -52,7 +52,7 @@ test('harness changes refresh the model and levels; cancellation never confirms'
   s.input('a'); assert.equal((await b).thinking, 'low');
 });
 
-test('worker keeps its override on repair; each new reviewer selects once', async t => {
+test('worker and selected reviewer each pick once for the sealed batch', async t => {
   const { dir, root, state } = await repo();
   const config = loadConfig(dir), seen: Spec[] = [], picked: string[] = [];
   const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, reviewer: async turn => { await turn.tool('report', pass); } }, seen);
@@ -66,8 +66,8 @@ test('worker keeps its override on repair; each new reviewer selects once', asyn
   const first = next();
   const agent = await worq.spawn('plan', 'Plan the change', { title: 'Review change', mode: 'fast' });
   await first;
-  const second = next(); agent.send('revise'); await second;
-  assert.deepEqual(seen.map(s => s.name), ['agent.plan', 'reviewer.subtraction', 'reviewer.subtraction']);
+  assert.throws(() => agent.send('revise'), /review-ready/);
+  assert.deepEqual(seen.map(s => s.name), ['agent.plan', 'reviewer.subtraction']);
   assert.equal(picked.length, seen.length);
   assert.ok(seen.every(s => s.runtime?.model === 'p/b' && s.runtime.thinking === 'high'));
   assert.match(worq.list(agent.ref), /"model":"p\/b"/);
@@ -94,4 +94,26 @@ test('defaults skip discovery without UI or with countdown disabled', async () =
   assert.equal((await prepareLaunch(config, driver, 0, 'agent.plan', '', request().signal)).model, 'p/main');
   config.launch = { countdownSeconds: 0, interactive: true };
   assert.equal((await prepareLaunch(config, driver, 0, 'agent.plan', '', request().signal, surface().pick)).model, 'p/main');
+});
+
+
+test('repository and clean-write checks precede runtime selection; dirty planning still launches', async t => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(`${root}/app.py`, 'dirty');
+  const picked: string[] = [];
+  function at(cwd: string) {
+    const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, reviewer: async turn => { await turn.tool('report', pass); } });
+    driver.catalog = async () => new Map();
+    return new Worq({ driver, config: loadConfig(dir), prompts: loadPrompts(), state, cwd, select: async req => { picked.push(req.label); return req.initial; }, notify() {} });
+  }
+  const outside = at(dir), inside = at(root);
+  t.after(async () => { await outside.shutdown(); await inside.shutdown(); });
+  await assert.rejects(outside.spawn('plan', 'check', { title: 'Outside repo' }), /repository/i);
+  await assert.rejects(inside.spawn('execute', 'check', { title: 'Dirty execute' }), /commit or stash/i);
+  assert.deepEqual(picked, []);
+  const plan = await inside.spawn('plan', 'check', { title: 'Dirty plan', mode: 'fast' });
+  await plan.done;
+  assert.equal(plan.state, 'review-ready');
+  assert.equal(picked.length, 2);
 });

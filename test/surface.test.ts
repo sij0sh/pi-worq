@@ -212,7 +212,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.deepEqual(handlers.context({ messages: [assistant, ...passive, ask, grant] }).messages, [assistant, ask, grant]);
   assert.equal(handlers.context({ messages: [assistant, ask, grant] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
-  assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /closed/);
+  assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /already review-ready/);
   assert.ok(!active.some(name => name.startsWith("worq_")));
   await command!("", ctx);
   assert.ok(active.includes("worq_spawn"));
@@ -227,8 +227,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   await waitForRound(1);
   assert.match((await run(process.execPath, [cli, "list", fastRef], { env })).stdout, /review: focused \(subtraction\)/);
   await command!(`send ${fastRef} Remove the watcher`, ctx);
-  await waitForRound(2);
-  assert.deepEqual(fastReviews, ["reviewer.subtraction", "reviewer.subtraction"]);
+  assert.deepEqual(fastReviews, ["reviewer.subtraction"]);
+  assert.match((await run(process.execPath, [cli, "list", fastRef], { env })).stdout, /review-ready · round 1/);
   assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, / · execute · /);
   await command!(`cancel ${fastRef}`, ctx);
   const failedRun = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Fail it" }, undefined, undefined, ctx);

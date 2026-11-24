@@ -42,6 +42,7 @@ export type Sessions = Map<string, SessionControl>;
 
 /** What a caller supplies; the Conversation turns the adapter's event stream into these sinks. */
 export interface ConversationSpec {
+  checkpoint?: string;
   runtime?: import('./sdk/contract.ts').Runtime;
   /** Role key: agent.<kind>, subagent[.<name>], reviewer.<name>. */
   name: string;
@@ -209,13 +210,17 @@ export class Conversation<T extends TSchema> {
         this.prepaid = false;
     }
   }
+  checkpoint() {
+    if (this.inbox.length || (this.options.pending?.() ?? 0) > 0) return undefined;
+    return this.handle?.checkpoint?.();
+  }
   private async open() {
     if (this.handle) return this.handle;
     const { spec, driver } = this.options;
     const caps = driver.capabilities(spec.name, spec.runtime);
     if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     const handle = await driver.open({
-      id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.signal,
+      id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, checkpoint: spec.checkpoint, skills: spec.skills, signal: this.signal,
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
     });
@@ -313,7 +318,7 @@ export class Conversation<T extends TSchema> {
         }
         if (failed) {
           if (await handle.fallback()) { next = this.inbox.shift() ?? CONTINUE; continue; }
-          throw new Block("model", `${this.options.spec.name}: model request failed`);
+          throw new Block("model", `${this.options.spec.name}: ${outcome === "preflight-failed" ? "model prompt rejected before request" : "model request failed"}`);
         }
         const queued = this.inbox.shift();
         if (queued !== undefined) { next = queued; continue; }

@@ -92,7 +92,7 @@ Every value is optional; absent keys use these defaults.
 | `agents` | 4 | Live agents; spawn fails as `at-capacity` |
 | `subagents` | 6 | PQs per run (`pq-limit`) |
 | `parallel` | 4 | Concurrent subagents and reviewers |
-| `rounds` | 3 | Main-authorized rounds per agent; `worq_send` fails as `round-limit` at the cap |
+| `rounds` | 3 | Legacy setting accepted for compatibility; each candidate now has one review batch |
 | `asks` | 3 | `ask_main` calls per session |
 | `agentTurns` | 80 | Turns in one agent session |
 | `subagentTurns` | 16 | Turns in one subagent session |
@@ -101,12 +101,12 @@ Every value is optional; absent keys use these defaults.
 | `subagentMinutes` | 5 | Wall clock for one subagent session |
 | `reviewerMinutes` | 10 | Wall clock for one reviewer session |
 | `askMinutes` | 15 | How long `ask_main` waits before returning "unanswered" |
-| `runTurns` | 1000 | Cumulative turns for one agent: worker, retries, PQs and reviews, all rounds |
+| `runTurns` | 1000 | Cumulative turns for one agent: worker, PQs, the selected batch and any authorized finalization |
 | `continuationTurns` | 0 | Extra cumulative turns Main may grant |
 | `checkpointSeconds` | 15 | How long a depleted run waits between requests for a grant |
 | `services` | 2 | Services an execute reviewer may start (`service-limit`) |
 
-Two separate budgets are at work. Per-session limits (`agentTurns`, `agentMinutes`, `rounds`, `asks`) are hard — no grant raises them. `runTurns` is a pool shared by everything one agent does, so a reviewer or a repair round spends from the same account.
+Two separate budgets are at work. Per-session limits (`agentTurns`, `agentMinutes`, `asks`) are hard — no grant raises them. `runTurns` is a pool shared by everything one agent does, so a reviewer spends from the same account.
 
 Near the pool's end Worq reports the remaining allowance. If a grant is still available, the `checkpoint` wakes Main, which may answer `worq send <ref> "/continue N"` to grow the pool by `N`. Between requests a depleted run with headroom waits up to `checkpointSeconds` for approval; a streaming turn cannot be paused, so approve before the stop. Without grant headroom, exhaustion fails the agent with `run-limit`. Low-budget notices without headroom and per-session turn/time warnings are visible but do not wake Main or enter its model context.
 
@@ -137,7 +137,6 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
 | `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |
 | `invocation` | User-only workflow sent to `worq_spawn`, or a built-in kind to `/worq workflow` | `/worq workflow`; `worq_spawn` for built-ins |
-| `round-limit` | `limits.rounds` reached | Adjudicate and close, or spawn fresh with the plan in `attach` |
 | `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` |
 
 ## Recipes

@@ -124,6 +124,7 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
         fallbacks--;
         return true;
       },
+      checkpoint: () => spec.name === "agent.plan" ? "fake-active-branch" : undefined,
       dispose() {},
     };
     return handle;

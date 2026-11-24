@@ -105,7 +105,7 @@ test("duplicate PQ questions retain independent answers while queued", async (t)
 
 const finding = { witness: "Criterion D1 ignores trailing newline", basis: "observed app.py:1", consequence: "output mismatch", change: "state the newline" };
 
-test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan reviewers, Main rounds, close", async (t) => {
+test("plan agent: PQ delegation, plan saved to .agents/plans, parallel reviewers, sealed handoff", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const reviewers: string[] = [];
@@ -158,20 +158,84 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.ok(agentTexts.some((x) => x.includes("Answer (observed): app.py:1")));
   assert.equal(seen.find((s) => s.name === "agent.plan")?.name.split(".")[0], "agent");
 
-  assert.match(worq.send(agent.ref, "Accept defeater-1: state the newline"), /Round 2 started/);
-  assert.match((await next("review-ready", agent.ref, 2)).text, /unresolved review issues/, "a repair attempt does not clear a repeated finding");
-  assert.equal(agent.round, 2);
-  assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline/);
-  assert.match(worq.list(), /Uppercase the greeting \(uppercase-the-greeting\) · plan · review-ready · round 2/);
-  assert.match(worq.list(agent.ref), /^Uppercase the greeting \(uppercase-the-greeting\) · plan · review-ready · round 2\b[\s\S]*PQs:[\s\S]*Reviews:/);
-
-  assert.match(await worq.cancel(agent.ref), /closed/);
-  assert.equal(agent.state, "closed");
-  assert.throws(() => worq.send(agent.ref, "more"), /closed/);
+  assert.equal(agent.batch, "complete", "a substantive failure still completes the batch");
+  assert.ok(agent.ended);
+  assert.equal(worq.sessions.size, 0);
+  assert.equal(agent.round, 1);
+  assert.throws(() => worq.send(agent.ref, "more"), /review-ready/);
+  assert.equal(await readFile(join(root, agent.plan.path), "utf8"), saved);
   const record = JSON.parse(await readFile(join(state, agent.ref, "record.json"), "utf8"));
-  assert.equal(record.state, "closed");
+  assert.equal(record.state, "review-ready");
   assert.ok(!JSON.stringify(record).includes(agent.id));
   assert.doesNotMatch(JSON.stringify(record), /\bd1\b/);
+});
+
+test("material pivot claims the sealed planning checkpoint once and writes only a separate unreviewed plan", async t => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let payload: any;
+  let reviews = 0;
+  const { worq, next } = setup(root, state, {
+    "agent.plan": async turn => {
+      if (turn.spec.checkpoint) {
+        assert.equal(turn.spec.checkpoint, "fake-active-branch");
+        payload = JSON.parse(turn.text);
+      }
+      await turn.tool("submit", planSubmission);
+    },
+    reviewer: async turn => { reviews++; await turn.tool("report", { verdict: "fail", summary: "Material pivot", findings: [{ witness: "The alternate direction changes the scope." }] }); },
+  });
+  const agent = await worq.spawn("plan", "Plan it", { title: "Pivot plan" });
+  await next("review-ready", agent.ref);
+  const original = await readFile(join(root, agent.plan!.path), "utf8");
+  const command = { materialPivot: true, directionSettled: true, independentReviewRequired: false, reviewedDigest: agent.reviewedDigest, decision: "Use the new direction", unresolved: ["Check ownership"] };
+  const send = (data: unknown) => worq.send(agent.ref, `/finalize ${JSON.stringify(data)}`);
+  assert.throws(() => send({ ...command, independentReviewRequired: true }), /Main must confirm/);
+  assert.throws(() => send({ ...command, reviewedDigest: "wrong" }), /digest mismatch/);
+  assert.equal(agent.batch, "complete", "substantive fail is a complete review");
+  const before = reviews;
+  assert.match(send(command), /Finalizing/);
+  assert.throws(() => send(command), /unused checkpoint/);
+  await next("review-ready", agent.ref, 2);
+  assert.equal(agent.finalization?.status, "unreviewed");
+  assert.equal(reviews, before);
+  assert.equal(payload.reviewed, original);
+  assert.deepEqual(payload.findings, agent.reviews);
+  assert.equal(payload.decision, command.decision);
+  assert.equal(await readFile(join(root, agent.plan!.path), "utf8"), original);
+  assert.match(await readFile(join(root, agent.finalization!.path!), "utf8"), /NOT INDEPENDENTLY REVIEWED[\s\S]*Check ownership/);
+});
+
+test("incomplete review and discarded continuity cannot reopen a sealed plan", async t => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let incomplete = true;
+  const { worq, next } = setup(root, state, {
+    "agent.plan": async turn => { if (turn.spec.checkpoint) throw new Error("finalization model unavailable"); await turn.tool("submit", planSubmission); },
+    "reviewer.pair": async turn => { if (incomplete) throw new Error("offline reviewer"); await turn.tool("report", pass); },
+    reviewer: async turn => { await turn.tool("report", pass); },
+  });
+  const finalize = (agent: Awaited<ReturnType<typeof worq.spawn>>) => worq.send(agent.ref, `/finalize ${JSON.stringify({ materialPivot: true, directionSettled: true, independentReviewRequired: false, reviewedDigest: agent.reviewedDigest, decision: "Pivot", unresolved: [] })}`);
+  const partial = await worq.spawn("plan", "Plan it", { title: "Partial batch" });
+  await next("review-ready", partial.ref);
+  assert.equal(partial.batch, "incomplete");
+  assert.throws(() => finalize(partial), /complete planning batch/);
+  assert.match(worq.list(partial.ref), /decision: pass[\s\S]*Reviewer error: offline reviewer/);
+  incomplete = false;
+  const complete = await worq.spawn("plan", "Plan it", { title: "Complete batch" });
+  await next("review-ready", complete.ref);
+  await worq.cancel(complete.ref);
+  assert.throws(() => finalize(complete), /checkpoint unavailable or expired/);
+  const failure = await worq.spawn("plan", "Plan it", { title: "Failed pivot" });
+  await next("review-ready", failure.ref);
+  const original = await readFile(join(root, failure.plan!.path), "utf8");
+  finalize(failure);
+  await next("review-ready", failure.ref, 2);
+  assert.equal(failure.finalization?.status, "failed");
+  assert.match(failure.finalization?.error ?? "", /finalization model unavailable/);
+  assert.equal(await readFile(join(root, failure.plan!.path), "utf8"), original);
+  assert.equal(failure.batch, "complete");
+  assert.throws(() => finalize(failure), /unused checkpoint/);
 });
 
 test("a compact factual answer can be submitted, and compact findings still flag a wrong claim", async (t) => {
@@ -234,11 +298,8 @@ test("execute agent: plan explicitly attached, own worktree and branch, verifier
   assert.match(ready.text, new RegExp(`Branch worq/${exec.ref}`));
   assert.doesNotMatch(ready.text, /git merge|worq_spawn|worq_send/);
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "baseline untouched: Worq never merges");
-  const work = exec.work!;
-  assert.ok(existsSync(work));
-  await worq.cancel(exec.ref);
-  assert.equal(exec.state, "closed");
-  assert.ok(!existsSync(work), "worktree removed");
+  assert.ok(exec.ended);
+  assert.equal(exec.work, undefined, "worktree removed before terminal notice");
   git("merge", "-q", `worq/${exec.ref}`);
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('HELLO')\n");
 });
@@ -299,17 +360,16 @@ test("limits, refusals and failures", async (t) => {
   const a = await worq.spawn("plan", "One", { title: "One plan" });
   const ready = await next("review-ready", a.ref);
   assert.match(ready.text, /review-ready · unresolved review issues/);
-  assert.match(ready.text, /pair: unknown \(reviewer crashed\)/);
+  assert.throws(() => worq.send(a.ref, "/finalize {}"), /complete planning batch/);
+  assert.match(ready.text, /pair: unknown \(Reviewer error: reviewer crashed\)/);
   assert.match(worq.list(a.ref), /Reviews: unresolved review issues/);
-  assert.throws(() => worq.send(a.ref, "again"), /used its 1 rounds/);
+  assert.throws(() => worq.send(a.ref, "again"), /review-ready/);
   await assert.rejects(worq.spawn("plan", "Needs plan", { title: "Needs plan", attach: ["ffff"] }), /exact plan name/);
   await assert.rejects(worq.spawn("review", "x", { title: "Review work" }), /Unknown kind/);
 
-  // Dirty baseline blocks an execute agent; it fails and Main is told.
+  // Dirty baseline rejects execute at admission.
   await writeFile(join(root, "app.py"), "dirty\n");
-  const b = await worq.spawn("execute", "Do it", { title: "Do it" });
-  const failed = await next("failed", b.ref);
-  assert.match(failed.text, /Commit or stash/);
+  await assert.rejects(worq.spawn("execute", "Do it", { title: "Do it" }), /Commit or stash/);
   execFileSync("git", ["checkout", "app.py"], { cwd: root });
 
   // Agent that never submits: nudged once, then fails without leaving a worktree.
@@ -322,7 +382,6 @@ test("limits, refusals and failures", async (t) => {
   await worq.cancel(a.ref);
   const d = await worq.spawn("plan", "Two", { title: "Two plan" });
   const e = await worq.spawn("plan", "Three", { title: "Three plan" });
-  await assert.rejects(worq.spawn("plan", "Four", { title: "Four plan" }), /at-capacity|agents are live/);
   await worq.cancel("all");
   assert.ok([d, e].every((x) => x.ended));
 });
@@ -351,7 +410,7 @@ test("fast plans use a focused reviewer and fall back to the configured roster",
   });
   const agent = await failed.worq.spawn("plan", "Focused reviewer fails", { title: "Focused reviewer fails", mode: "fast" });
   const notice = await failed.next("review-ready", agent.ref);
-  assert.match(notice.text, /subtraction: unknown \(reviewer failed\)/);
+  assert.match(notice.text, /subtraction: unknown \(Reviewer error: reviewer failed\)/);
   assert.match(notice.text, /unresolved review issues/);
   assert.deepEqual(agent.reviews.map(r => r.name), ["subtraction"]);
   await failed.worq.cancel(agent.ref);
@@ -594,35 +653,31 @@ test("an open PQ blocks optional closeout with exactly two shared turns left", a
 });
 
 
-test("a later handoff keeps the prior reviewed SHA separate from partial work", async (t) => {
-  const { dir, root, state } = await repo();
+test("cleanup preserves a changed recovery SHA without extending verification", async (t) => {
+  const { dir, root, state, git } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
+  let worker: string;
+  const shas = new Set<string>();
   const { worq, next } = setup(root, state, {
     "agent.execute": async (turn) => {
-      if (turn.text.startsWith("{")) {
-        await writeFile(join(turn.spec.cwd, "app.py"), "reviewed");
-        await turn.tool("submit", { summary: "First candidate" });
-      } else if (turn.text.startsWith("Main reviewed")) {
-        await writeFile(join(turn.spec.cwd, "app.py"), "partial");
-      }
+      worker = turn.spec.cwd;
+      await writeFile(join(worker, "app.py"), "reviewed");
+      await turn.tool("submit", { summary: "First candidate" });
     },
-    reviewer: async (turn) => { await turn.tool("report", pass); },
-  }, { agentTurns: 2 });
+    reviewer: async (turn) => {
+      shas.add(execFileSync("git", ["rev-parse", "HEAD"], { cwd: turn.spec.cwd, encoding: "utf8" }).trim());
+      await writeFile(join(worker, "app.py"), "unreviewed recovery");
+      await turn.tool("report", pass);
+    },
+  });
   const agent = await worq.spawn("execute", "Change greeting", { title: "Change greeting" });
-  await next("review-ready", agent.ref);
-  const prior = agent.candidate;
-  assert.ok(prior);
-  worq.send(agent.ref, "Refine the greeting");
-  await agent.done;
-  assert.equal(agent.state, "handed-off");
-  assert.equal(agent.candidate, prior);
-  assert.notEqual(agent.handoff?.partial, prior);
-  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
-  assert.equal(handoff.priorReview.candidate, prior);
-  assert.equal(handoff.unreviewed.partialCommit, agent.handoff?.partial);
-  assert.ok(handoff.priorReview.reviews.length);
+  const ready = await next("review-ready", agent.ref);
+  assert.deepEqual([...shas], [agent.candidate]);
+  assert.notEqual(agent.recoverySha, agent.candidate);
+  assert.equal(git("rev-parse", agent.branch!).toString().trim(), agent.recoverySha);
+  assert.match(ready.text, new RegExp(`Recovery SHA ${agent.recoverySha}: UNVERIFIED / not merge-ready`));
+  assert.throws(() => worq.send(agent.ref, "Try again"), /review-ready/);
 });
-
 
 test("caller cancellation during closeout remains cancellation", async (t) => {
   const { dir, root, state } = await repo();

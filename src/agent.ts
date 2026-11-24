@@ -16,7 +16,16 @@ import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot,
 import { label, type Revision, type Telemetry } from './telemetry.ts';
 
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed" | "handed-off";
-export const ENDED: AgentState[] = ["closed", "cancelled", "failed", "handed-off"];
+const checkpoints = new Map<string, { bytes: string; timer: ReturnType<typeof setTimeout> }>();
+function claimCheckpoint(id: string) {
+  const saved = checkpoints.get(id);
+  if (!saved) return undefined;
+  clearTimeout(saved.timer);
+  checkpoints.delete(id);
+  return saved.bytes;
+}
+
+export const ENDED: AgentState[] = ["review-ready", "closed", "cancelled", "failed", "handed-off"];
 export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed" | "handed-off"; ref: string; text: string }
 export interface Attachment { path: string; text: string }
 export interface Delegation { role?: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
@@ -59,7 +68,7 @@ const notStarted = (label: string) => new Block("busy", `${label} has no live se
 
 /**
  * One Main-spawned Pi SDK agent. Lifecycle per round: running (may delegate PQs, ask Main) → submit →
- * reviewing (roster runs in parallel, sealed) → review-ready (Main adjudicates) → next round on worq_send.
+ * reviewing (one parallel batch) → terminal review-ready (Main adjudicates).
  * Never spawns, retries or merges on its own.
  */
 export class Agent {
@@ -87,6 +96,17 @@ export class Agent {
   finished?: number;
   error?: string;
   candidate?: string;
+  recoverySha?: string;
+  private checkpointRuntime?: Runtime;
+  private finalizing?: { controller: AbortController; done: Promise<void> };
+  finalization?: { status: "running" | "unreviewed" | "failed"; path?: string; digest?: string; error?: string };
+
+  async discardContinuity() {
+    claimCheckpoint(this.id);
+    this.finalizing?.controller.abort(new Block("cancelled", "Finalization cancelled by Main"));
+    await this.finalizing?.done;
+  }
+  batch?: "complete" | "skipped" | "incomplete";
   handoff?: { path?: string; partial?: string; error?: string; inline?: string };
   private unresolved?: string;
   diffstat?: string;
@@ -103,11 +123,9 @@ export class Agent {
   private dir?: string;
   private project?: Project;
   private conversation?: Conversation<typeof PlanReport | typeof WorkReport>;
-  private next?: { resolve(text: string): void; reject(error: unknown): void };
   private revision?: Revision;
   private planRound?: number;
   private priorReviewRound?: number;
-  private closing = false;
   private asks = 0;
   private spent = 0;
   private grant = 0;
@@ -180,10 +198,9 @@ export class Agent {
   get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
   launch() {
     this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title, Boolean(this.kind.workflow));
-    const self = this;
     this.deps.sessions?.set(this.id, {
       key: this.id, ref: this.ref, role: `agent.${this.kind.name}`, label: this.headline,
-      get consequence() { return self.state === "review-ready" ? "Closes the run; its branch is kept." : "Stops the agent and every PQ and reviewer it owns; its branch is kept."; },
+      consequence: "Stops the agent and every PQ and reviewer it owns; its branch is kept.",
       runtime: () => this.conversation?.runtime ?? this.deps.runtime,
       pending: () => this.conversation?.pendingChange,
       cancel: async () => { await this.cancel(); return `${this.ref} ${this.state}`; },
@@ -212,13 +229,13 @@ export class Agent {
     return {
       ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
       budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
-      worktree: this.work, branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      worktree: this.work, branch: this.branch, candidate: this.candidate, recoverySha: this.recoverySha, batch: this.batch, reviewedDigest: this.reviewedDigest, finalization: this.finalization, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
       handoff: this.handoff, reviews: this.reviews, started: this.started, finished: this.finished,
     };
   }
 
-  /** Main's one talk verb: steer, answer, or start the next round, depending on state. */
+  /** Main's one talk verb: steer an active run or answer an open ask. */
   send(textIn: string): string {
     const message = textIn.trim();
     if (message.startsWith("/continue")) {
@@ -229,6 +246,7 @@ export class Agent {
       this.log(`Main approved ${count} more run turns`);
       return `Cumulative allowance ${this.deps.limits.runTurns + this.grant}`;
     }
+    if (message.startsWith("/finalize ")) return this.finalize(message.slice(10));
     if (!message) throw new Block("empty", "Nothing to send");
     this.log(`← main: ${message}`);
     switch (this.state) {
@@ -238,23 +256,17 @@ export class Agent {
       case "waiting":
         this.ask?.resolve(`Main: ${message}`);
         return `Answered ${this.ref}`;
-      case "review-ready":
-        if (this.round >= this.deps.limits.rounds) throw new Block("round-limit", `${this.ref} used its ${this.deps.limits.rounds} rounds; adjudicate the existing evidence or close the run`);
-        this.next?.resolve(`Main reviewed round ${this.round} and asks for another round:\n${message}`);
-        return `Round ${this.round + 1} started for ${this.ref}`;
       case "starting": case "reviewing":
         throw new Block("busy", `${this.ref} is ${this.state}; wait for its next message`);
       default:
         throw new Block("ended", `${this.ref} is ${this.state}`);
     }
   }
-  /** Stop everything this agent owns. From review-ready this is a normal close. Bounded. */
+  /** Stop everything this live agent owns. Bounded. */
   async cancel() {
     if (this.ended) return;
-    this.closing = this.state === "review-ready";
     this.deps.telemetry?.state(this.id, "cancelling");
-    this.controller.abort(new Block("cancelled", this.closing ? "Closed by Main" : "Cancelled by Main"));
-    this.next?.reject(this.signal.reason);
+    this.controller.abort(new Block("cancelled", "Cancelled by Main"));
     this.start();
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([this.done.catch(() => {}), new Promise<void>((resolve) => { timer = setTimeout(resolve, 15_000); })]);
@@ -292,25 +304,22 @@ export class Agent {
           validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
-      let message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
-      for (;;) {
-        if (this.revision) this.deps.telemetry?.source(this.id, this.revision.round);
-        this.deps.telemetry?.live.delete(this.id);
-        this.revision = undefined;
-        this.round++;
-        this.unresolved = undefined;
-        this.set("running");
-        const report = await this.conversation.run(message);
-        await this.review(report);
-        this.priorReviewRound = this.round;
-        message = await new Promise<string>((resolve, reject) => {
-          this.next = { resolve, reject };
-          if (signal.aborted) reject(signal.reason);
-        });
-        this.next = undefined;
+      const message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      this.round = 1;
+      this.set("running");
+      const report = await this.conversation.run(message);
+      this.checkpointRuntime = this.conversation.runtime ?? this.deps.runtime;
+      const checkpoint = this.kind.name === "plan" ? this.conversation.checkpoint() : undefined;
+      this.conversation.dispose();
+      this.conversation = undefined;
+      await this.review(report);
+      if (checkpoint && this.batch === "complete" && checkpoints.size < 8) {
+        const timer = setTimeout(() => claimCheckpoint(this.id), 15 * 60_000);
+        timer.unref();
+        checkpoints.set(this.id, { bytes: checkpoint, timer });
       }
     } catch (error) {
-      if (signal.aborted && signal.reason?.code !== "run-limit") this.state = this.closing ? "closed" : "cancelled";
+      if (signal.aborted && signal.reason?.code !== "run-limit") this.state = "cancelled";
       else if (!signal.aborted && error instanceof WorkerHandoff) {
         handoff = error;
         this.state = "handed-off";
@@ -340,7 +349,7 @@ export class Agent {
           status: "handed-off", round: this.round, objective: this.task, trigger: handoff.trigger,
           workerTurns: handoff.turns, sharedTurns: { spent: this.spent, allowance: limits.runTurns + this.grant },
           unreviewed: { ordinary: handoff.ordinary || "No completed ordinary assistant text observed.", closeout: handoff.closeout || undefined, unresolvedQuestion: this.unresolved, openPqs: open, partialCommit: this.handoff.partial },
-          priorReview: { round: this.priorReviewRound, candidate: this.candidate, plan: this.plan?.path, planRound: this.planRound, reviews: this.reviews },
+          priorReview: { round: this.priorReviewRound, candidate: this.candidate, recoverySha: this.recoverySha, batch: this.batch, reviewedDigest: this.reviewedDigest, finalization: this.finalization, plan: this.plan?.path, planRound: this.planRound, reviews: this.reviews },
           recovery: { worktree: this.work, branch: this.branch, error: this.handoff.error, cleanup: this.work ? "Main owns later cleanup; ignored files remain in the worktree." : undefined },
         }, null, 2);
         const file = join(this.dir!, `handoff-${this.round}.json`);
@@ -360,14 +369,19 @@ export class Agent {
         // Never remove the only copy of interrupted work.
         try {
           const reviewed = this.candidate;
-          this.candidate = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
-          if (this.candidate !== reviewed && this.revision) this.deps.telemetry?.source(this.id, this.revision.round);
+          const recovered = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
+          if (recovered !== reviewed) {
+            this.recoverySha = recovered;
+            this.log(`Recovery SHA ${recovered}: UNVERIFIED / not merge-ready`);
+            if (this.revision) this.deps.telemetry?.source(this.id, this.revision.round);
+          }
           await removeWorktree(this.project.root, this.work);
           this.work = undefined;
         } catch (error) {
           this.log(`Worktree retained at ${this.work}: ${errorText(error)}`);
         }
       }
+      if (this.state === "reviewing") this.state = "review-ready";
       this.deps.telemetry?.state(this.id, this.state, this.state === 'failed' ? 'failure' : undefined);
       const interrupted = this.deps.telemetry?.live.get(this.id);
       if (interrupted?.status === 'reviewing') this.deps.telemetry?.revision({ ...interrupted, status: 'inconclusive' }, true);
@@ -376,6 +390,7 @@ export class Agent {
       this.finished = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
+      if (this.state === "review-ready") this.deps.notify({ type: "review-ready", ref: this.ref, text: `${this.digest()}\nReview is sealed. If changes are needed, start a fresh plan with fresh independent review.` });
       if (this.handoff) this.deps.notify({ type: "handed-off", ref: this.ref, text: [
         `${this.headline} handed-off (round ${this.round}); partial work is unreviewed.`,
         this.handoff.path, this.candidate && `Prior candidate: ${this.candidate}`, this.plan && `Prior plan: ${this.plan.path}`, this.work && `Retained worktree: ${this.work} (Main owns cleanup).`,
@@ -383,6 +398,55 @@ export class Agent {
       ].filter(Boolean).join("\n") });
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
       if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
+    }
+  }
+
+  get reviewedDigest() { return this.plan && createHash("sha256").update(this.plan.text).digest("hex"); }
+
+  private finalize(json: string): string {
+    if (json.length > 24_000) throw new Block("finalization", "Decision exceeds size limit");
+    if (this.state !== "review-ready" || this.kind.name !== "plan" || this.batch !== "complete" || !this.plan || this.finalization) throw new Block("finalization", "Requires a terminal, complete planning batch with an unused checkpoint");
+    let input;
+    try { input = JSON.parse(json); } catch { throw new Block("finalization", "Expected a JSON material-pivot decision"); }
+    if (input?.materialPivot !== true || input?.directionSettled !== true || input?.independentReviewRequired !== false || typeof input?.decision !== "string" || !input.decision.trim() || input.decision.length > 4000 || !Array.isArray(input.unresolved) || input.unresolved.length > 16 || input.unresolved.some((v: unknown) => typeof v !== "string" || v.length > 1000)) throw new Block("finalization", "Main must confirm materialPivot:true, directionSettled:true, independentReviewRequired:false, decision and unresolved requirements");
+    const digest = this.reviewedDigest!;
+    if (input.reviewedDigest !== digest) throw new Block("finalization", "Reviewed plan digest mismatch");
+    if (this.spent >= this.deps.limits.runTurns + this.grant) throw new Block("run-limit", "No remaining authorized turns");
+    const checkpoint = claimCheckpoint(this.id);
+    if (!checkpoint) throw new Block("finalization", "Original Pi checkpoint unavailable or expired; start a fresh independently reviewed plan");
+    const payload = JSON.stringify({ reviewed: this.plan.text, findings: this.reviews, reviewedDigest: digest, decision: input.decision, unresolved: input.unresolved });
+    this.finalization = { status: "running" };
+    this.publish();
+    const controller = new AbortController();
+    const done = this.runFinalization(checkpoint, payload, this.plan.path, digest, input.unresolved, controller.signal).finally(() => { this.finalizing = undefined; });
+    this.finalizing = { controller, done };
+    return `Finalizing ${this.ref} once; the result will not be independently reviewed.`;
+  }
+
+  private async runFinalization(checkpoint: string, payload: string, reviewedPath: string, digest: string, unresolved: string[], caller: AbortSignal) {
+    const { driver, limits, root } = this.deps;
+    const runtime = this.checkpointRuntime;
+    const signal = AbortSignal.any([caller, AbortSignal.timeout(Math.min(limits.agentMinutes * 60_000, 120_000))]);
+    const conversation = new Conversation({
+      driver, signal, beforeAttempt: async () => { if (this.spent >= limits.runTurns + this.grant) throw new Block("run-limit", "No remaining authorized turns"); }, chargeTurn: () => { this.spent++; }, warning: this.warning,
+      turns: Math.min(limits.agentTurns, 4), minutes: limits.agentMinutes,
+      spec: { runtime, checkpoint, name: "agent.plan", cwd: root, tools: [], system: "Finalize the plan once following Main’s settled material pivot. Preserve unresolved requirements. Submit a full revised plan. This is not independent review or execution authorization.", log: line => this.log(line) },
+      finish: { name: "submit", description: "Submit the unreviewed finalization.", schema: PlanReport },
+    });
+    try {
+      const report = await conversation.run(payload);
+      const path = `.agents/plans/plan-${this.ref}-finalized.md`;
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: 1, task: this.task, report, label: "Finalized plan" });
+      const bytes = `> NOT INDEPENDENTLY REVIEWED. No inherited approval. Reviewed evidence: ${reviewedPath} (SHA-256 ${digest}).\n\nUnresolved requirements (Main): ${JSON.stringify(unresolved)}\n\n${markdown}`;
+      signal.throwIfAborted();
+      await writeScoped(root, path, bytes, { create: true });
+      this.finalization = { status: "unreviewed", path, digest: createHash("sha256").update(bytes).digest("hex") };
+    } catch (error) {
+      this.finalization = { status: "failed", error: errorText(error) };
+    } finally {
+      conversation.dispose();
+      this.publish();
+      this.deps.notify({ type: "review-ready", ref: this.ref, text: this.finalization?.path ? `Finalized plan: ${this.finalization.path} — NOT INDEPENDENTLY REVIEWED. Main must explicitly adopt it for authorized execution.` : `Finalization failed: ${this.finalization?.error}. Original reviewed evidence is unchanged.` });
     }
   }
 
@@ -510,10 +574,11 @@ export class Agent {
       return result;
     }));
     signal.throwIfAborted();
+    this.batch = skipped ? "skipped" : !roster.length || this.reviews.some(r => r.verdict === "unknown") ? "incomplete" : "complete";
+    if (this.kind.access === "read") writeFileSync(join(this.dir!, "reviewed-plan.md"), this.submission!, { mode: 0o600, flag: "wx" });
     const status = !roster.length ? (skipped ? 'skipped' : 'inconclusive') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
     this.deps.telemetry?.revision({ ...revision, status, ready: true, source: true, reviews: reports }, true);
-    this.set("review-ready");
-    this.deps.notify({ type: "review-ready", ref: this.ref, text: `${this.digest()}\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.${workflow ? `\nThis workflow stays live until /worq cancel ${this.ref}; it keeps one limits.agents slot.` : ""}` });
+
   }
   private async reviewer(name: string, prompt: string, slot: number, artifacts: (count: number) => void): Promise<ReviewRecord> {
     const { driver, prompts, limits, root, semaphore } = this.deps;
@@ -564,7 +629,7 @@ export class Agent {
       return { name, ...out, verdict: out.verdict as Verdict, artifacts: [...(out.artifacts ?? []), ...(box?.saved ?? [])] };
     } catch (error) {
       if (this.signal.aborted) throw error;
-      return { name, verdict: "unknown", error: cancelled ? "Review cancelled by Main" : errorText(error) };
+      return { name, verdict: "unknown", error: cancelled ? "Review cancelled by Main" : `Reviewer error: ${errorText(error)}` };
     } finally {
       this.deps.sessions?.delete(key);
       this.deps.telemetry?.state(key, this.signal.aborted || cancelled ? 'cancelled' : completed ? 'done' : 'failed');
@@ -580,8 +645,8 @@ export class Agent {
   digest() {
     const write = this.kind.access === "write";
     const head = `${this.headline} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
-    const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    return [head, where, "Reviews:",
+    const where = write ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
+    return [head, where, `Review batch: ${this.batch ?? "incomplete"}`, ...(this.reviewedDigest ? [`Reviewed digest: ${this.reviewedDigest}`] : []), ...(this.recoverySha ? [`Recovery SHA ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []), "Reviews:",
       ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }),
       `Full findings: worq_list(${this.ref}). This notice does not authorize further action.`,
     ].join("\n");

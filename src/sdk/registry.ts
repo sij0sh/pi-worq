@@ -113,7 +113,8 @@ export async function createDriver(host: HostServices, config: Config, resources
           if (change.model !== undefined) fallback = undefined;
           spec.emit({ type: "log", text: `runtime changed by Main: ${next.model ?? "default model"}, thinking ${next.thinking ?? "uncontrolled"}` });
         },
-        dispose: () => handle.dispose(),
+        checkpoint: () => handle.checkpoint?.(),
+      dispose: () => handle.dispose(),
       };
     },
   };

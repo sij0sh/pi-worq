@@ -56,6 +56,7 @@ export type SessionEvent =
 
 /** Role-level session request: what the core asks the router for. */
 export interface Spec {
+  checkpoint?: string;
   runtime?: Runtime;
   /** One identity per Conversation. */
   id: string;
@@ -86,6 +87,7 @@ export interface RuntimeChange { model?: string; thinking?: string }
 export type PromptOutcome = "completed" | "preflight-failed" | "failed" | "aborted";
 /** One live SDK session. */
 export interface Handle {
+  checkpoint?(): string | undefined;
   /** Resolves when the session goes idle. May assume the handle is idle. */
   prompt(text: string, options?: { toolFree: boolean }): Promise<PromptOutcome>;
   /** Optional: deliver into the running turn; throws when it cannot. Absent → the core queues. */

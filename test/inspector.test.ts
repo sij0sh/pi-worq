@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { agentDock } from '../src/dock.ts';
@@ -54,26 +55,32 @@ test('plan revisions bind exact reviewed bytes; keep legacy text out of the proj
   const { root, state, dir } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const data = new Telemetry();
-  const captured = new Map<number, string>();
+  const captured: string[] = [];
   const task = 'Printable Private Task Mango';
   let round = 0;
   const { worq, next } = setup(root, state, {
     'agent.plan': async turn => { await turn.tool('submit', { ...planSubmission, summary: `Report Secret ${++round}` }); },
     reviewer: async turn => {
-      const { round, submission } = JSON.parse(turn.text);
-      captured.set(round, submission);
+      const { submission } = JSON.parse(turn.text);
+      captured.push(submission);
       await turn.tool('report', { ...pass, summary: 'Reviewer Secret' });
     },
   }, {}, data);
   t.after(() => worq.shutdown());
   const agent = await worq.spawn('plan', task, { title: 'Inspect plans' });
   await next('review-ready', agent.ref);
-  worq.send(agent.ref, 'Try a second round');
-  await next('review-ready', agent.ref, 2);
+  assert.throws(() => worq.send(agent.ref, 'Try a second round'), /review-ready/);
+  const fresh = await worq.spawn('plan', task, { title: 'Inspect plans again' });
+  await next('review-ready', fresh.ref);
+  assert.notEqual(agent.plan!.path, fresh.plan!.path);
   assert.equal(data.settled.length, 2);
-  for (const r of data.settled) assert.deepEqual(r.identity, { digest: createHash('sha256').update(captured.get(r.round)!).digest('hex') });
-  assert.equal(data.settled[0].rewritten, true);
-  assert.equal(data.settled[0].source, false);
+  for (const run of [agent, fresh]) {
+    const bytes = await readFile(join(root, run.plan!.path), 'utf8');
+    assert.ok(captured.includes(bytes));
+    assert.deepEqual(data.settled.find(r => r.run === run.id)?.identity, { digest: createHash('sha256').update(bytes).digest('hex') });
+  }
+  assert.ok(!data.settled[0].rewritten);
+  assert.equal(data.settled[0].source, true);
   assert.equal(data.settled[1].source, true);
   const safe = JSON.stringify({ revisions: data.settled, activity: data.activity, rows: [...data.rows] });
   assert.doesNotMatch(safe, /Printable Private Task Mango|printable-private-task-mango|Reviewer Secret|Report Secret|\.agents\/plans\//);
@@ -182,7 +189,7 @@ test('dock shows each agent’s context usage and model window instead of skills
   assert.doesNotMatch(dock.render(73)[1]!, /CTX/);
 });
 
-test('20-column dock retains actor and status without counting failures as live', () => {
+test('20-column dock retains actor and status without counting terminal outcomes as live', () => {
   const data = new Telemetry();
   data.add('failed', '0000', 'plan');
   data.state('failed', 'failed', 'failure');
@@ -193,10 +200,10 @@ test('20-column dock retains actor and status without counting failures as live'
   data.state('1', 'waiting', 'ask');
   data.state('2', 'review-ready', 'adjudicate');
   const narrow = dock.render(20);
-  assert.match(narrow.join(' '), /98 live/);
+  assert.match(narrow.join(' '), /97 live/);
   assert.ok(narrow.every(line => visibleWidth(line) <= 20));
   data.state('1', 'closed');
-  assert.match(dock.render(20)[0], /97 live/);
+  assert.match(dock.render(20)[0], /96 live/);
   const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
   panel.handleInput('\x1b');
   assert.match(panel.render(20).join(' '), /0002 rev-rdy Main/);

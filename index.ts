@@ -43,9 +43,9 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
   },
   worq_send: {
     op: "send",
-    description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
+    description: "Send text to an agent: steers it while running, answers its open question while waiting.",
     guidelines: [
-      "Before delivery, read worq_list and adjudicate findings on evidence, never by count. For a plan objection, first try dropping, narrowing, or deferring the optional choice behind it. Fix required gaps locally or ask only about consequential user-owned decisions. Send the requirement, material finding, and requested change; reference the plan instead of pasting its history. worq_send on a review-ready ref starts another round and requires authority to continue. Standing authorization covers routine read-only revisions without asking again; it never authorizes execution or merge. If a required outcome still blocks delivery, report it rather than spawning another planner just to reset the round cap.",
+      "Review-ready is terminal. Main adjudicates the sealed findings on evidence. For required changes or incomplete review, default to a fresh plan with the prior artifact attached and fresh independent review. Only Main may authorize a one-shot material pivot after a complete plan batch: send /finalize followed by JSON with materialPivot:true, directionSettled:true, independentReviewRequired:false, reviewedDigest, decision, and unresolved (array). The separate result is unreviewed and requires explicit adoption for authorized execution.",
     ],
   },
   worq_cancel: {
@@ -192,7 +192,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       const agent = await (await ensure(ctx)).runWorkflow(kind, extra);
       service();
       status();
-      say(ctx, `Launched workflow ${kind.name} as ${agent.ref}. /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers or starts another round; /worq cancel ${agent.ref} stops it.`);
+      say(ctx, `Launched workflow ${kind.name} as ${agent.ref}. /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers while running; /worq cancel ${agent.ref} stops it.`);
     };
 
     // Passive notices are visible and persisted, but never steer an unrelated Main turn.

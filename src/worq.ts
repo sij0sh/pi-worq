@@ -6,7 +6,7 @@ import { one, reviewLines, reviewStatus } from "./render.ts";
 import { modelChoices, prepareLaunch, type ModelChoice, type SelectLaunch } from './runtime/launch.ts';
 import type { Driver, RuntimeChange } from "./sdk/contract.ts";
 import type { SessionControl, Sessions } from "./session.ts";
-import { reserveName, readPlan, repository } from "./workspace.ts";
+import { baselineProject, reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {
   select?: SelectLaunch;
@@ -78,8 +78,10 @@ export class Worq {
     const pending = { label: `${title} · ${kind.name} · pending launch` };
     this.starting.add(pending);
     try {
+      const preflight = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+      const root = await repository(this.deps.cwd, preflight);
+      if (kind.access === "write") await baselineProject(root, preflight);
       const runtime = await this.select(`agent.${kind.name}`, title, signal);
-      const root = await repository(this.deps.cwd, AbortSignal.any([signal, AbortSignal.timeout(10_000)]));
       const attachments = await this.attachments(root, attach);
       signal.throwIfAborted();
       const { ref, dir } = await reserveName(root, this.deps.state, base);
@@ -131,8 +133,12 @@ export class Worq {
       a.handoff?.error && `Handoff recovery error: ${a.handoff.error}`,
       a.handoff?.inline,
       a.plan && `${a.handoff ? "Prior plan" : "Plan"}: ${a.plan.path}`,
-      a.branch && `Branch: ${a.branch}${!a.handoff && a.candidate ? ` @ ${a.candidate.slice(0, 10)}` : ""}`,
+      a.branch && `Branch: ${a.branch}${!a.handoff && a.candidate ? ` @ ${a.candidate}` : ""}`,
       a.handoff && a.candidate && `Prior candidate: ${a.candidate}`,
+      a.batch && `Review batch: ${a.batch}`,
+      a.reviewedDigest && `Reviewed digest: ${a.reviewedDigest}`,
+      a.finalization && `Finalization: ${a.finalization.status} ${a.finalization.path ?? a.finalization.error ?? ""}${a.finalization.digest ? ` (SHA-256 ${a.finalization.digest}; NOT INDEPENDENTLY REVIEWED)` : ""}`,
+      a.recoverySha && `Recovery SHA ${a.recoverySha}: UNVERIFIED / not merge-ready`,
       a.diffstat && a.diffstat,
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
@@ -170,13 +176,17 @@ export class Worq {
         this.admissions = new AbortController();
       }
       const live = this.all().filter((a) => !ENDED.includes(a.state));
-      await Promise.all(live.map((a) => a.cancel()));
+      await Promise.all(live.map(a => a.cancel()));
+      await Promise.all([...this.agents.values()].map(a => a.discardContinuity()));
       const stopped = live.map(a => `${a.ref} (${a.state})`);
       if (pending) stopped.push(`${pending} pending launch${pending === 1 ? '' : 'es'}`);
       return stopped.length ? `Stopped ${stopped.join(', ')}` : 'No live agents';
     }
     const agent = this.get(ref);
-    if (agent.ended) return `${agent.ref} already ${agent.state}`;
+    if (agent.ended) {
+      await agent.discardContinuity();
+      return `${agent.ref} already ${agent.state}`;
+    }
     await agent.cancel();
     return `${agent.ref} ${agent.state}${agent.work ? `; retained worktree ${agent.work}` : agent.branch ? `; branch ${agent.branch} kept` : ""}`;
   }

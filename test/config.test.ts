@@ -112,15 +112,16 @@ test("config: every refusal carries a stable code", async () => {
   assert.throws(() => assertRuntime(runtime, MINIMAL_CAPS), byCode("capability"));
 });
 
-/** A misconfigured role fails at spawn, before the repository, the ref or any worktree exists. */
+/** A misconfigured role fails at spawn, before any worker is launched. */
 async function spawnFailure(fail: unknown, role: string, selected = true): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "worq-spawn-"));
+  const { dir, root, state } = await repo();
   const config = await configOf(fail);
-  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), config, state: join(dir, "state"), cwd: dir, notify() {} });
-  // `dir` is not a git repository: reaching repository() would raise something else.
-  await assert.rejects(worq.spawn("plan", "plan it", { title: "Plan work" }),
-    (error: unknown) => selected ? error instanceof Block && error.code === "capability" && error.message.includes(role) : error instanceof Error && !(error instanceof Block && error.code === "capability"),
-    `spawn fails on ${role} before any work`);
+  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), config, state, cwd: root, notify() {} });
+  try {
+    const spawn = worq.spawn("plan", "plan it", { title: "Plan work" });
+    if (selected) await assert.rejects(spawn, (error: unknown) => error instanceof Block && error.code === "capability" && error.message.includes(role));
+    else await (await spawn).done;
+  } finally { await worq.shutdown(); await rm(dir, { recursive: true, force: true }); }
 }
 
 test("config: spawn validates only the selected agent role", async () => {

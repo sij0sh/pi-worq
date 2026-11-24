@@ -37,7 +37,7 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
 - **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
-- **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, ask Main to execute with that plan in the explicit `attach` list. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
+- **Continue only when authorized:** Review-ready is terminal. If changes are needed, start a fresh plan with the prior artifact and findings. To execute an existing plan, ask Main to launch execute with that plan in the explicit `attach` list. Only Main may merge, with explicit authority and exact-SHA verification.
 
 ## Workflows
 
@@ -49,7 +49,7 @@ A workflow is a skill package: `<agentDir>/workflows/<name>/SKILL.md` (frontmatt
 - Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
 - No reviewers. `mode`/`verify` are refused for workflows.
 
-`/worq workflow` lists every workflow, then asks for optional instructions (empty = run as written; escape cancels). It activates `worq_list`/`worq_send`/`worq_cancel`, never `worq_spawn`, and is honored under `/worq off`. The result is the usual `review-ready` notice; the workflow stays live until `/worq cancel <ref>` and holds one `limits.agents` slot. Ref base `<name>-workflow` from the menu, the title from `worq_spawn`. See `docs/workflows.md`.
+`/worq workflow` lists every workflow, then asks for optional instructions (empty = run as written; escape cancels). It activates `worq_list`/`worq_send`/`worq_cancel`, never `worq_spawn`, and is honored under `/worq off`. Completion releases the slot; the result remains available through `worq_list`.
 
 ## Vocabulary
 
@@ -70,10 +70,12 @@ A workflow is a skill package: `<agentDir>/workflows/<name>/SKILL.md` (frontmatt
 |---|---|---|
 | `worq_spawn` | `kind`, `title`, `task`, `attach?`, `verify?`, `mode?` | start an agent; give it a 2–4 word title; `attach` lists exact plan names or repo-relative plan paths; `verify:false` (execute only) skips the verifier |
 | `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
-| `worq_send` | `ref`, `text` | running → steer · waiting → answer · review-ready → next round |
+| `worq_send` | `ref`, `text` | running → steer · waiting → answer · eligible terminal plan → explicit `/finalize` only |
 | `worq_cancel` | `ref` or `all` | close/cancel; kills subagents, reviewers, processes; removes worktree; keeps branch |
 
-States: `starting · running · waiting · reviewing · review-ready · closed · cancelled · failed`.
+States: `starting · running · waiting · reviewing · review-ready · handed-off · closed · cancelled · failed`.
+
+A terminal review-ready run releases its slot. Main accepts adequate work as-is; for changes, default to a fresh run with the prior artifact and findings and fresh review. Only after a complete planning batch, a settled material pivot, and an explicit decision that independent review is no longer required, Main may use `worq send REF '/finalize {"materialPivot":true,"directionSettled":true,"independentReviewRequired":false,"reviewedDigest":"…","decision":"…","unresolved":[]}'`. The digest binds the exact reviewed version. Pi continuity is process-local, limited to eight checkpoints of up to 512 KiB for at most 15 minutes, and discarded on cancellation or shutdown. A missing checkpoint requires a fresh run. A single claim consumes it even on failure. The resulting separate path and digest are unreviewed; the original remains the authoritative reviewed version. Main must explicitly adopt a finalization, and it cannot substitute for required review.
 Verdicts: `pass · fail · inconclusive · plan-fault · not-applicable · unknown` (crash/timeout/invalid; never pass).
 
 ## Profiles
@@ -143,7 +145,7 @@ For complex work, delegate independent questions whose answers could change the 
 
 Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` for costly failures and independent, decision-changing questions (`worq spawn execute --title "Update report" --mode fast "task"`). For plans, `fast` uses the existing subtraction reviewer to check requirements and unnecessary scope, falling back to the full kind roster if that reviewer is absent. Default and `thorough` plans use the full roster. Neither mode changes execute review, models, thinking, tools or caps. The optional spawn field `reason` records why Main chose the route. Omit mode for the default. `worq list <ref>` shows route, review policy, cumulative turns and role settings with JSON sources.
 
-`limits.runTurns` (default 1000) covers the worker, retries, PQs and review roster across rounds. Per-session turn/time warnings and run warnings without grant headroom are display-only. If `limits.continuationTurns` (default 0) leaves room for a grant, near exhaustion an actionable checkpoint lets Main use `worq send REF '/continue N'`. Between requests a depleted run with headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. No grant raises a per-session turn/time limit, round cap, service quota or concurrency limit.
+`limits.runTurns` (default 1000) covers the worker, PQs, selected review batch and any authorized finalization. Per-session turn/time warnings and run warnings without grant headroom are display-only. If `limits.continuationTurns` (default 0) leaves room for a grant, near exhaustion an actionable checkpoint lets Main use `worq send REF '/continue N'`. Between requests a depleted run with headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. No grant raises a per-session turn/time limit, service quota or concurrency limit.
 
 Shared resources live in `<agentDir>/worq/`: `instructions/*.md` (appended to every system prompt), `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool) and `extensions/*.{mjs,js,ts}` (native Pi extensions; require `"approveExtensions": true`). Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own; extensions run operator code in-process, not a sandbox. Named PQs: map `roles["subagent.evidence"]` to a preset, then delegate with `name: "evidence"`. No candidate discovery is enabled.
 
