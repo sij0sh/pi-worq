@@ -91,7 +91,7 @@ Subagents are read-only sessions answering one probing question. The delegating 
 
 `name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own model, thinking level and pins, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
 
-Reviewers are not selected by name. The kind's roster runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
 
 ## Limits
 
@@ -122,13 +122,13 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 
 ## Routes
 
-`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker; it changes no model, thinking level, tool, budget or required reviewer. The optional `reason` records why. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
+`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
 
 ## Verifying a configuration
 
 - `worq list <ref>` shows route, review policy, `spent/allowance` turns, and each role's resolved settings with source paths.
 - The agent log contains `Role <role>: <provider>/<model>, thinking <level>; sources {…}`, written when the session opens.
-- Skipped verification is reported explicitly: the detail line reads `review: explicitly skipped` instead of `kind review roster`.
+- Skipped verification is reported explicitly: the detail line reads `review: explicitly skipped` instead of the selected review policy.
 
 ## Failures and fixes
 

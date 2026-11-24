@@ -97,7 +97,7 @@ export class Worq {
     return [
       `${a.ref} · ${a.kind.name} · ${a.state} · round ${a.round}`,
       `Task: ${a.task}`,
-      `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.verify ? "kind roster" : "explicitly skipped"}`,
+      `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.reviewPolicyLabel}`,
       `Run turns: ${a.view().budget.spent}/${a.view().budget.allowance}`,
       ...[...new Set([`agent.${a.kind.name}`, ...a.delegations.map(d => d.role ?? "subagent"), ...a.reviews.map(r => `reviewer.${r.name}`)])].map(role => {
         try { return `${role}: ${JSON.stringify(this.deps.config.model(role))}`; } catch (e) { return `${role}: ${String(e)}`; }

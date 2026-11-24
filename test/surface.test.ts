@@ -107,8 +107,14 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
+  const fastReviews: string[] = [];
   const scripts: Record<string, Script> = {
     "agent.plan": async turn => {
+      if (turn.text.startsWith("Main reviewed round 1")) {
+        assert.match(turn.text, /Remove the watcher/);
+        await turn.tool("submit", { ...planSubmission, summary: "Use one direct report, no background process." });
+        return;
+      }
       if (JSON.parse(turn.text).task === "Fail it") throw new Error("Fixture failure");
       if (JSON.parse(turn.text).task === "Plan it") {
         assert.match(await turn.tool("ask_main", { question: "Which greeting?" }), /Use HELLO/);
@@ -116,7 +122,13 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
       await turn.tool("submit", planSubmission);
     },
     "agent.execute": async turn => { await turn.tool("submit", { summary: "No changes" }); },
-    reviewer: async turn => { await turn.tool("report", pass); },
+    reviewer: async turn => {
+      if (JSON.parse(turn.text).request === "Simplify the report") {
+        assert.match(turn.system, /flag missing required outcomes as well as unnecessary scope/);
+        fastReviews.push(turn.spec.name);
+      }
+      await turn.tool("report", pass);
+    },
   };
   createWorq({ driver: () => fakeDriver(scripts), agentDir: () => agentDir })(pi as never);
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
@@ -198,6 +210,20 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(!active.some(name => name.startsWith("worq_")));
   await command!("", ctx);
   assert.ok(active.includes("worq_spawn"));
+  const fast = await spawn.execute("id", { kind: "plan", mode: "fast", task: "Simplify the report" }, undefined, undefined, ctx);
+  const fastRef = fast.details.ref;
+  const waitForRound = async (round: number) => {
+    const ready = () => notices.some(({ message }) => message.details.ref === fastRef && message.details.type === "review-ready" && message.content.includes(`round ${round} review-ready`));
+    for (let i = 0; i < 100 && !ready(); i++) await new Promise(r => setTimeout(r, 25));
+    assert.ok(ready(), `expected fast plan round ${round}`);
+  };
+  await waitForRound(1);
+  assert.match((await run(process.execPath, [cli, "list", fastRef], { env })).stdout, /review: focused \(subtraction\)/);
+  await command!(`send ${fastRef} Remove the watcher`, ctx);
+  await waitForRound(2);
+  assert.deepEqual(fastReviews, ["reviewer.subtraction", "reviewer.subtraction"]);
+  assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, / · execute · /);
+  await command!(`cancel ${fastRef}`, ctx);
   const failedRun = await spawn.execute("id", { kind: "plan", task: "Fail it" }, undefined, undefined, ctx);
   for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));

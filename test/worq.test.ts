@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadPrompts } from "../src/prompts.ts";
 import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
 
 const finding = { witness: "Criterion D1 ignores trailing newline", basis: "observed app.py:1", consequence: "output mismatch", change: "state the newline" };
@@ -124,7 +125,7 @@ test("execute agent: @plan attached, own worktree and branch, verifier sees pinn
   });
   const plan = await worq.spawn("plan", "Uppercase the greeting");
   await next("review-ready", plan.ref);
-  const exec = await worq.spawn("execute", `Implement @${plan.ref}`);
+  const exec = await worq.spawn("execute", `Implement @${plan.ref}`, true, "fast");
   assert.deepEqual(exec.attachments.map((a) => a.ref), [plan.ref]);
   const ready = await next("review-ready", exec.ref);
   assert.match(attached, /Change the greeting to uppercase/);
@@ -155,7 +156,7 @@ test("execute with verify:false: no reviewer runs and the digest says the diff i
       await turn.tool("submit", { summary: "Uppercased", changes: ["app.py"], checksRun: ["cat app.py"] });
     },
   });
-  const exec = await worq.spawn("execute", "Uppercase the greeting", false);
+  const exec = await worq.spawn("execute", "Uppercase the greeting", false, "fast");
   const ready = await next("review-ready", exec.ref);
   assert.match(texts[0], /"verify": false/);
   assert.equal(seen.filter((s) => s.profile === "reviewer").length, 0, "no reviewer ran");
@@ -228,17 +229,47 @@ test("limits, refusals and failures", async (t) => {
   assert.ok([d, e].every((x) => x.ended));
 });
 
-test("run turn checkpoints share the roster budget; fast does not skip reviewers", async (t) => {
+test("fast plans use a focused reviewer and fall back to the configured roster", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const prompts = loadPrompts();
+  const { worq, next, seen } = setup(root, state, {
+    "agent.plan": turn => turn.tool("submit", planSubmission).then(() => {}),
+    reviewer: turn => turn.tool("report", pass).then(() => {}),
+  }, {}, undefined, {
+    ...prompts,
+    reviewers: kind => prompts.reviewers(kind).filter(r => r.name !== "subtraction"),
+  });
+  const fallback = await worq.spawn("plan", "Fallback plan", true, "fast");
+  await next("review-ready", fallback.ref);
+  assert.deepEqual(fallback.reviews.map(r => r.name), ["decision", "defeater", "pair"]);
+  assert.match(worq.list(fallback.ref), /review: kind roster/);
+  assert.ok(seen.filter(s => s.profile === "reviewer").every(s => !s.system.includes("only reviewer on this fast plan")));
+  await worq.cancel(fallback.ref);
+
+  const failed = setup(root, state, {
+    "agent.plan": turn => turn.tool("submit", planSubmission).then(() => {}),
+    "reviewer.subtraction": () => { throw new Error("reviewer failed"); },
+  });
+  const agent = await failed.worq.spawn("plan", "Focused reviewer fails", true, "fast");
+  const notice = await failed.next("review-ready", agent.ref);
+  assert.match(notice.text, /subtraction: unknown \(reviewer failed\)/);
+  assert.match(notice.text, /unresolved review issues/);
+  assert.deepEqual(agent.reviews.map(r => r.name), ["subtraction"]);
+  await failed.worq.cancel(agent.ref);
+});
+
+test("run turn checkpoints share the full roster budget", async (t) => {
   for (const approve of [false, true]) {
     const { dir, root, state } = await repo();
     t.after(() => rm(dir, { recursive: true, force: true }));
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const { worq, next } = setup(root, state, {
-      "agent.plan": async turn => { assert.match(turn.text, /"route": "fast"/); await gate; await turn.tool("submit", planSubmission); },
+      "agent.plan": async turn => { assert.match(turn.text, /"route": "thorough"/); await gate; await turn.tool("submit", planSubmission); },
       reviewer: turn => turn.tool("report", pass).then(() => {}),
     }, { checkpointSeconds: 1, runTurns: 1, continuationTurns: 4 });
-    const agent = await worq.spawn("plan", "plan it", true, "fast");
+    const agent = await worq.spawn("plan", "plan it", true, "thorough");
     assert.match((await next("checkpoint", agent.ref)).text, /4 available for explicit approval/);
     assert.throws(() => worq.send(agent.ref, "/continue 5"));
     release();

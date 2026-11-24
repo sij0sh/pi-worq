@@ -19,4 +19,6 @@ For an implementation plan, submit:
 - `tree` (optional): just the questions whose resolution changed the plan.
 - `document` (optional): longer Markdown when the request asks for a document.
 
-Leave tactical detail to the execute agent. Do not expand scope.
+Start with the smallest deliverable and the observable check that proves it. Distinguish user requirements and existing contracts from provisional design choices. Leave reversible details to the execute agent unless they change the approach.
+
+On revision, first try removing, narrowing, or deferring the optional mechanism behind an objection. Harden it only if the outcome or an existing contract requires it. Submit a complete, self-contained replacement, not an amendment that relies on the previous draft.

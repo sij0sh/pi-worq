@@ -21,9 +21,9 @@ const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || t
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit unless the spawn sets verify:false.",
+    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit (verify:false skips execute review only).",
     guidelines: [
-      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with the original request and independent review. Do not infer write permission from a bare request.",
+      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with the original request and independent review. Use fast for bounded, reversible plans; keep the full roster when distinct lenses could change a consequential decision. Do not infer write permission from a bare request.",
     ],
   },
   worq_list: {
@@ -39,7 +39,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "send",
     description: "Send text to an agent: steers it while running, answers its open question while waiting, or starts its next round when review-ready.",
     guidelines: [
-      "Before delivering a Worq result, read the findings with worq_list. Adjudicate material findings on evidence, never by count. Correct them within authorized scope or explicitly report them as unresolved. worq_send on a review-ready ref starts another round; do not use it without authority to continue.",
+      "Before delivery, read worq_list and adjudicate findings on evidence, never by count. For a plan objection, first try dropping, narrowing, or deferring the optional choice behind it. Fix required gaps locally or ask only about consequential user-owned decisions. Send the requirement, material finding, and requested change; reference the plan instead of pasting its history. worq_send on a review-ready ref starts another round and requires authority to continue. Standing authorization covers routine read-only revisions without asking again; it never authorizes execution or merge. If a required outcome still blocks delivery, report it rather than spawning another planner just to reset the round cap.",
     ],
   },
   worq_cancel: {

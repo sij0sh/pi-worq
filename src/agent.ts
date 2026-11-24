@@ -67,6 +67,11 @@ export class Agent {
   readonly verify: boolean;
   readonly reason?: string;
   readonly mode?: "fast" | "thorough";
+  private reviewPolicy?: string;
+  get reviewPolicyLabel() {
+    if (this.kind.access === "write" && !this.verify) return "explicitly skipped";
+    return this.reviewPolicy ?? (this.kind.name === "plan" && this.mode === "fast" ? "pending roster selection" : "kind roster");
+  }
   readonly branch?: string;
   readonly owner = process.pid;
   state: AgentState = "starting";
@@ -392,20 +397,26 @@ export class Agent {
       this.submission = workText(report as WorkReport);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
-    const roster = this.kind.access === "read" || this.verify ? prompts.reviewers(this.kind.name) : [];
+    const skipped = this.kind.access === "write" && !this.verify;
+    const configured = skipped ? [] : prompts.reviewers(this.kind.name);
+    const focused = this.kind.name === "plan" && this.mode === "fast"
+      ? configured.find(r => r.name === "subtraction") : undefined;
+    const roster = focused ? [focused] : configured;
+    this.reviewPolicy = focused ? "focused (subtraction)" : configured.length ? "kind roster" : "no configured reviewers";
     const revision: Revision = { run: this.id, round: this.round, identity, status: 'reviewing', source: false, reviews: [] };
     this.revision = revision;
     this.deps.telemetry?.revision(revision);
     const reports: Revision['reviews'] = [];
     this.reviews = await Promise.all(roster.map(async (r, i) => {
       let artifacts = 0;
-      const result = await this.reviewer(r.name, r.prompt, i, count => { artifacts = count; });
+      const brief = focused ? `${r.prompt}\n\nYou are the only reviewer on this fast plan. First check that the smallest plan satisfies the original request and preserves relevant contracts; flag missing required outcomes as well as unnecessary scope. Look for a concrete case where the proposed checks pass but a requested outcome fails.` : r.prompt;
+      const result = await this.reviewer(r.name, brief, i, count => { artifacts = count; });
       reports[i] = { name: label(r.name)!, verdict: result.verdict, findings: result.findings?.map(f => f.need === true) ?? [], artifacts };
       this.deps.telemetry?.revision({ ...revision, reviews: reports.filter(Boolean) });
       return result;
     }));
     signal.throwIfAborted();
-    const status = !roster.length ? (this.verify ? 'inconclusive' : 'skipped') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
+    const status = !roster.length ? (skipped ? 'skipped' : 'inconclusive') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
     this.deps.telemetry?.revision({ ...revision, status, ready: true, source: true, reviews: reports }, true);
     this.set("review-ready");
     this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() + `\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.` });
