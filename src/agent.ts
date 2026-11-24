@@ -195,8 +195,8 @@ export class Agent {
   }
 
   private get children(): SubagentDeps {
-    const { driver, prompts, semaphore, telemetry, sessions } = this.deps;
-    return { driver, guard: prompts.guard, semaphore, runtime: () => this.conversation?.runtime ?? this.deps.runtime, telemetry, sessions, warning: this.warning,
+    const { driver, semaphore, telemetry, sessions } = this.deps;
+    return { driver, semaphore, runtime: () => this.conversation?.runtime ?? this.deps.runtime, telemetry, sessions, warning: this.warning,
       launched: (role, runtime, label) => { this.launches.push({ role, runtime, label }); } };
   }
 
@@ -222,7 +222,7 @@ export class Agent {
       const unreviewed = this.reviewed ? "" : "\n\nNo independent review runs for this agent; submit a self-contained result.";
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${unreviewed}\n\n${prompts.guard}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${unreviewed}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
           description: `Submit your result${this.reviewed ? " for independent review" : ""}.${write ? "" : " Worq saves it to .agents/plans/."}`,

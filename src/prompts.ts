@@ -18,11 +18,10 @@ export interface Kind {
   /** The package's own files, indexed and readable alongside shared skills. */
   skill?: Skill;
 }
-/** Shared process prompts: protocol, guard, PQ and review. Agent kinds come from the installed catalog. */
+/** Shared process prompts: protocol, PQ and review. Agent kinds come from the installed catalog. */
 export interface Prompts {
   dir: string;
   protocol: string;
-  guard: string;
   pq: string;
   review: string;
 }
@@ -50,12 +49,11 @@ function read(path: string) {
   if (!body) throw new Block("prompt-file", `${path} is blank`);
   return body;
 }
-/** Process prompts shared by every kind: protocol, guard, PQ and review. */
+/** Process prompts shared by every kind: protocol, PQ and review. */
 export function loadPrompts(dir = fileURLToPath(new URL("../prompts/", import.meta.url))): Prompts {
   return {
     dir,
     protocol: read(join(dir, "protocol.md")),
-    guard: read(join(dir, "guard.md")),
     pq: read(join(dir, "pq.md")),
     review: read(join(dir, "review.md")),
   };

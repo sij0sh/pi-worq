@@ -26,7 +26,6 @@ export class Semaphore {
 
 export interface SubagentDeps {
   driver: Driver;
-  guard: string;
   semaphore: Semaphore;
   /** The owner's effective runtime at child launch: children never pick their own. */
   runtime(): Runtime | undefined;
@@ -96,7 +95,7 @@ export async function runSubagent<T extends TSchema>(deps: SubagentDeps, a: Assi
     const cwd = workspace?.cwd ?? a.cwd;
     conversation = new Conversation({
       driver: deps.driver, signal, warning: deps.warning, turns: a.turns, minutes: a.minutes,
-      spec: { runtime, observe: telemetry?.sink(a.key), name: a.role, cwd, tools: workspace?.tools ?? readTools(cwd), system: `${a.system}\n\n${deps.guard}`, log: a.log },
+      spec: { runtime, observe: telemetry?.sink(a.key), name: a.role, cwd, tools: workspace?.tools ?? readTools(cwd), system: a.system, log: a.log },
       finish: { description: a.description, schema: a.schema },
     });
     const value = await conversation.run(a.payload);

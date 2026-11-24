@@ -37,7 +37,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `access` | no | `read`: no worktree or write/process tools, result saved as a plan file. Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
 | `review` | no | `true`: one independent review per submission. Absent/`false`: none. |
 
-Unknown keys are ignored. The body has no required sections; the agent also receives the Worq protocol, guard and `submit` tool.
+Unknown keys are ignored. The body has no required sections; the agent also receives the Worq protocol and `submit` tool.
 
 ## Supporting files
 
