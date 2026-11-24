@@ -12,14 +12,17 @@ const theme = { fg: (_: string, value: string) => value } as never;
 test('PQ gets a width-safe question preview and complete detail', () => {
   const data = new Telemetry();
   const question = 'Which source 株 explains why the greeting appears twice in the output?';
-  data.add('private-owner', 'check-greeting', 'plan');
+  data.add('private-owner', 'check-greeting', 'plan', undefined, undefined, undefined, 'Check greeting');
   data.add('private-child', 'check-greeting', 'PQ', 'private-owner', undefined, question);
   const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
   for (const width of [18, 36, 84]) {
     const lines = dock.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width));
-    assert.match(lines.join('\n'), /Which/);
+    assert.ok(lines.some(line => /^\s*↳ Which/.test(line)));
   }
+  assert.match(dock.render(84).join('\n'), /● Check greeting/);
+  const owner = new Inspector(data, 'check-greeting', theme, () => 24, () => {}, () => {}, 'private-owner');
+  assert.match(owner.render(120).join('\n'), /Check greeting \(check-greeting\)/);
   const panel = new Inspector(data, 'check-greeting', theme, () => 24, () => {}, () => {}, 'private-child');
   assert.match(panel.render(120).map(line => line.split(' │ ')[1] ?? '').join('').replace(/ +/g, ' '), /Which source 株 explains why the greeting appears twice in the output\?/);
   assert.doesNotMatch(panel.render(120).join('\n'), /private-owner|private-child/);

@@ -91,8 +91,10 @@ test("process tools: a private short TMPDIR, the interpreter on PATH, and both r
     const vars = JSON.parse(env.split("\n")[2]);
     const tmp = vars.TMPDIR;
     assert.equal(dirname(tmp), tmpdir());
-    assert.match(basename(tmp), /^worq-/);
-    assert.ok((await lstat(tmp)).isDirectory());
+    assert.match(basename(tmp), new RegExp(`^worq-${process.pid.toString(36)}-[0-9a-z]{1,7}$`));
+    const info = await lstat(tmp);
+    assert.ok(info.isDirectory());
+    if (process.platform !== "win32") assert.equal(info.mode & 0o777, 0o700);
     assert.equal(vars.PATH.split(delimiter)[0], dirname(process.execPath));
     if (process.platform === "win32") assert.equal(vars.TEMP, tmp);
     await box.close();

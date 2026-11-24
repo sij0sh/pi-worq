@@ -163,7 +163,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.equal(agent.round, 2);
   assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline/);
   assert.match(worq.list(), /Uppercase the greeting \(uppercase-the-greeting\) · plan · review-ready · round 2/);
-  assert.match(worq.list(agent.ref), /PQs:[\s\S]*Reviews:/);
+  assert.match(worq.list(agent.ref), /^Uppercase the greeting \(uppercase-the-greeting\) · plan · review-ready · round 2\b[\s\S]*PQs:[\s\S]*Reviews:/);
 
   assert.match(await worq.cancel(agent.ref), /closed/);
   assert.equal(agent.state, "closed");

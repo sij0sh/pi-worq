@@ -122,7 +122,7 @@ export class Inspector {
     const lines = this.data.activity.slice().reverse().flatMap(e => {
       const row = this.data.rows.get(e.key);
       if (!row || (this.ref && row.ref !== this.ref)) return [];
-      const source = `${row.title ?? row.ref}${row.parent ? ` ${row.question ? `PQ: ${row.question}` : row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
+      const source = row.question ?? `${row.title ?? row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
       return [`${source} · ${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''} · ${age(e.at)} ago`];
     });
     if (!lines.length) lines.push('No activity observed.');

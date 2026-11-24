@@ -36,8 +36,8 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const [cache,speed,turns] = metrics(r);
       if(w < 35 && r.question && r.parent) return cell(`↳ ${r.question}`,w);
       if(w < 35) return cell(`${r.title ?? r.ref} ${r.actor ? `${r.state} Main` : `${r.role} ${r.state}`}`,w);
-      const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.parent ? r.role : r.title ?? `${r.role} ${r.ref}`}`;
-      const activity = r.parent && r.question ? r.question : r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
+      const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : r.title ?? `${r.role} ${r.ref}`)}`;
+      const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
       const rest = table(['',activity,age,cache,speed,turns,String(r.setup?.skills.length??'—')]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;
     })];
