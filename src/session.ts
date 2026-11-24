@@ -39,12 +39,13 @@ export interface Spec {
   observe?(value: Observation): void;
   log(line: string): void;
   turn(): void;
+  completedText?(text: string): void;
   /** A tool call failed (including SDK-side argument validation, which runs before Tool.run). */
   toolError(name: string, message: string): void;
 }
 /** One live SDK session. `prompt` resolves when the session goes idle; true means the model request failed before starting. */
 export interface Handle {
-  prompt(text: string): Promise<boolean>;
+  prompt(text: string, options?: { toolFree: boolean }): Promise<boolean>;
   /** Duty: deliver a message into the running turn. Throws when it cannot reach this run. */
   steer(text: string): Promise<void>;
   readonly streaming: boolean;
@@ -79,6 +80,18 @@ export const NUDGE = "You ended your turn without calling your finish tool. Re-a
 const CONTINUE = "The previous model request failed. Continue the same assignment from the conversation and tool results so far.";
 
 
+export class WorkerHandoff extends Error {
+  readonly turns: number;
+  readonly ordinary: string;
+  readonly closeout: string;
+  readonly trigger: string;
+  readonly quiescent: boolean;
+  constructor(turns: number, ordinary: string, closeout: string, trigger: string, quiescent = true) {
+    super("Worker turn budget exhausted");
+    this.turns = turns; this.ordinary = ordinary; this.closeout = closeout; this.trigger = trigger; this.quiescent = quiescent;
+  }
+}
+
 export interface ConversationOptions<T extends TSchema> {
   driver: Driver;
   spec: Omit<Spec, "id" | "tools" | "turn" | "toolError"> & { tools: Tool[] };
@@ -91,6 +104,7 @@ export interface ConversationOptions<T extends TSchema> {
   chargeTurn?: () => void;
   warning?: (message: string) => void;
   pending?: () => number;
+  admitCloseout?: () => boolean;
 }
 
 /**
@@ -107,6 +121,10 @@ export class Conversation<T extends TSchema> {
   private wake?: () => void;
   private turns = 0;
   private prepaid = false;
+  private phase: "ordinary" | "closeout" | "fenced" = "fenced";
+  private ordinary = "";
+  private closeout = "";
+  private excess?: AbortController;
   private readonly budget = new AbortController();
   readonly signal: AbortSignal;
   private timer?: ReturnType<typeof setTimeout>;
@@ -156,19 +174,39 @@ export class Conversation<T extends TSchema> {
     this.handle = await driver({
       ...spec,
       id: this.id,
-      tools: [this.finishTool(), ...spec.tools],
+      tools: [this.finishTool(), ...spec.tools].map((tool) => this.options.admitCloseout ? {
+        ...tool, run: (...args) => {
+          if (this.phase !== "ordinary") throw new Block("turn-limit", "Tool dispatch is closed");
+          return tool.run(...args);
+        },
+      } : tool),
+      completedText: (text) => {
+        if (!this.options.admitCloseout || !text.trim()) return;
+        if (this.phase === "ordinary") this.ordinary = `${this.ordinary}\n${text}`.trim().slice(-8000);
+        if (this.phase === "closeout") this.closeout = `${this.closeout}\n${text}`.trim().slice(-4000);
+      },
       turn: () => {
+        if (this.options.admitCloseout && !this.prepaid &&
+            (this.phase !== "ordinary" || this.turns >= this.options.turns)) {
+          this.phase = "fenced";
+          this.excess?.abort();
+          return;
+        }
         if (!this.prepaid) this.charge();
         this.prepaid = false;
       },
-      toolError: (name, message) => { if (name === this.options.finish.name) this.rejected = message.slice(0, 800); },
+      toolError: (name, message) => {
+        if ((!this.options.admitCloseout || this.phase === "ordinary") && name === this.options.finish.name) this.rejected = message.slice(0, 800);
+      },
     });
     return this.handle;
   }
   /** Deliver a message: steers a streaming session, otherwise queues it for the next prompt. */
   deliver(text: string) {
+    if (this.options.admitCloseout && this.phase !== "ordinary") return;
     const handle = this.handle;
     if (handle?.streaming) void handle.steer(text).catch(() => {
+      if (this.options.admitCloseout && this.phase !== "ordinary") return;
       this.options.spec.log("message queued: the harness cannot steer it into the running turn");
       this.inbox.push(text);
       this.poke();
@@ -190,6 +228,10 @@ export class Conversation<T extends TSchema> {
 
   async run(first: string): Promise<Static<T>> {
     this.result = undefined;
+    this.ordinary = this.closeout = "";
+    this.phase = "ordinary";
+    this.excess = new AbortController();
+    this.prepaid = false;
     const caller = this.options.signal;
     caller.throwIfAborted();                // a caller abort never prompts
     this.budget.signal.throwIfAborted();    // a spent budget is terminal: no prompt
@@ -201,14 +243,22 @@ export class Conversation<T extends TSchema> {
       if (gate.aborted) fail(); else gate.addEventListener("abort", fail, { once: true });
     });
     void aborted.catch(() => {});
-    let stopped = false;
-    const stopOnce = async () => { if (!stopped) { stopped = true; await this.stop(); } };
+    const excess = new Promise<undefined>((resolve) => this.excess!.signal.addEventListener("abort", () => resolve(undefined), { once: true }));
+    let stopping: Promise<boolean> | undefined;
+    const stopOnce = (force = false) => stopping ??= this.stop(force);
     try {
+      if (this.options.admitCloseout && this.turns >= this.options.turns) {
+        throw new WorkerHandoff(this.turns, "", "", "prompt admission");
+      }
       const handle = await Promise.race([this.open(), aborted]);
       let next = first;
       let nudged = false;
       let corrections = 0;
       for (;;) {
+        if (this.options.admitCloseout && this.turns >= this.options.turns) {
+          gate.throwIfAborted();
+          throw new WorkerHandoff(this.turns, this.ordinary, "", "prompt admission");
+        }
         if (this.turns < this.options.turns) await this.options.beforeAttempt?.(gate);
         gate.throwIfAborted();
         this.charge(); // Count attempts even when preflight fails before turn_start.
@@ -216,7 +266,7 @@ export class Conversation<T extends TSchema> {
         this.prepaid = true;
         const turn = handle.prompt(next);
         void turn.catch(() => {});        // an abandoned promise can still reject
-        const failed = await Promise.race([turn, aborted]);
+        const failed = await Promise.race([turn, aborted, excess]);
         if (gate.aborted) {
           await stopOnce();               // caller or budget abort: stop the turn, once
           if (caller.aborted) throw caller.reason;
@@ -224,6 +274,14 @@ export class Conversation<T extends TSchema> {
           throw gate.reason;
         }
         if (this.result !== undefined) return this.result;
+        if (this.options.admitCloseout && this.turns >= this.options.turns) {
+          if (failed === undefined || this.excess.signal.aborted) {
+            const quiescent = await stopOnce(true);
+            gate.throwIfAborted();
+            throw new WorkerHandoff(this.turns, this.ordinary, "", "automatic turn admission", quiescent);
+          }
+          await this.handoff(handle, gate, aborted, excess, stopOnce);
+        }
         if (failed) {
           if (await handle.fallback()) { this.options.spec.log("Model failed; switched to fallback"); next = this.inbox.shift() ?? CONTINUE; continue; }
           throw new Block("model", `${this.options.spec.name}: model request failed`);
@@ -253,18 +311,56 @@ export class Conversation<T extends TSchema> {
       if (gate.aborted) await stopOnce();  // at most once, only after an abort
       if (caller.aborted) throw caller.reason;
       if (this.result !== undefined) return this.result;
+      if (!gate.aborted && this.options.admitCloseout && this.turns >= this.options.turns && !(error instanceof WorkerHandoff)) {
+        this.phase = "fenced";
+        const quiescent = await stopOnce(true);
+        gate.throwIfAborted();
+        throw new WorkerHandoff(this.turns, this.ordinary, "", "ordinary request did not settle normally", quiescent);
+      }
       throw error;
     } finally {
+      this.phase = "fenced";
       this.pause();
     }
   }
+  private async handoff(handle: Handle, gate: AbortSignal, aborted: Promise<never>, excess: Promise<undefined>, stopOnce: (force: boolean) => Promise<boolean>): Promise<never> {
+    let text = "";
+    gate.throwIfAborted();
+    let quiescent = !handle.streaming;
+    if (quiescent && this.options.admitCloseout?.()) {
+      this.phase = "closeout";
+      this.prepaid = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      try {
+        const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 15_000); });
+        const result = await Promise.race([
+          handle.prompt("End this session. Do not use tools. Write a concise handoff for Main: completed work, evidence, blockers and next steps.", { toolFree: true }),
+          deadline, excess, aborted,
+        ]);
+        settled = result !== undefined && !handle.streaming;
+        if (settled && result === false && !this.prepaid && this.phase === "closeout") text = this.closeout;
+      } catch { /* The host record does not depend on model closeout. */ }
+      finally {
+        this.phase = "fenced";
+        clearTimeout(timer);
+        quiescent = settled || await stopOnce(true);
+      }
+    } else if (!quiescent) {
+      this.phase = "fenced";
+      quiescent = await stopOnce(true);
+    }
+    gate.throwIfAborted();
+    throw new WorkerHandoff(this.turns, this.ordinary, text, "last ordinary turn settled", quiescent);
+  }
   /** Abort the live turn, bounded to 5s. */
-  async stop() {
+  async stop(force = false) {
     const handle = this.handle;
-    if (!handle?.streaming) return;
+    if (!handle || (!force && !handle.streaming)) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([handle.abort().catch(() => {}), new Promise<void>((resolve) => { timer = setTimeout(resolve, 5000); })]);
+    const stopped = await Promise.race([handle.abort().then(() => true, () => false), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 5000); })]);
     clearTimeout(timer);
+    return stopped && !handle.streaming;
   }
   dispose() { clearTimeout(this.softTimer); clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
 }
