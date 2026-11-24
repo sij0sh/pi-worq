@@ -22,12 +22,12 @@ import { isRef, Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
 const ENABLED = "worq-enabled";
-const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "failed" || type === "parked";
+const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "failed" || type === "parked" || type === "done";
 
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name; reviewed kinds get one independent review per submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
+    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. Every agent gets exactly one independent review of its first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
     ],
@@ -43,9 +43,9 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
   },
   worq_send: {
     op: "send",
-    description: "Send text to an agent: steers it while running, answers its open question while waiting, resumes its session with a fresh budget while parked.",
+    description: "Send text to an agent: steers it while running, answers its open question while waiting; while parked after its review, delivers your feedback for its one final revision (no further review; it ends as done on submit), or resumes an out-of-budget agent with a fresh budget.",
     guidelines: [
-      "A parked agent keeps its session (and worktree) until closed. Main alone decides what follows a submission and its review: accept and close; resume the same agent with targeted corrections (worq_send); spawn a fresh agent for a fundamentally different approach; or ask the user to settle a decision. Each resubmission gets one fresh independent review.",
+      "A parked agent keeps its session (and worktree) until closed. Main alone decides what follows its review: accept and close (worq_cancel); send filtered feedback once (worq_send) — the agent makes one final revision without another review and ends as done; spawn a fresh agent for a fundamentally different approach; or ask the user to settle a decision. After an out-of-budget park, worq_send only resumes with a fresh budget.",
     ],
   },
   worq_cancel: {
@@ -70,7 +70,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     const spawnable = [...catalog.values()].filter((kind) => !kind.userOnly);
     const table = ops();
     const kinds = spawnable.length
-      ? spawnable.map((kind) => `${kind.name} (${kind.access}${kind.review ? ", reviewed" : ""}): ${kind.description}`).join("; ")
+      ? spawnable.map((kind) => `${kind.name} (${kind.access}): ${kind.description}`).join("; ")
       : "none installed for Main; the user can add packages under <agentDir>/workflows/";
     let warned = false;
     let instance: Worq | undefined;
@@ -190,7 +190,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         say(ctx, `No agent packages installed. Add ${join(workflows.dir, "<name>", "SKILL.md")} with name and description frontmatter, then restart Pi.`);
         return;
       }
-      const labels = new Map([...catalog.values()].map((kind) => [`${kind.name} · ${kind.access}${kind.review ? " · reviewed" : ""}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
+      const labels = new Map([...catalog.values()].map((kind) => [`${kind.name} · ${kind.access}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
       const choice = await ctx.ui.select("Launch SDK agent", [...labels.keys()]);
       const kind = choice === undefined ? undefined : labels.get(choice);
       if (!kind) return;

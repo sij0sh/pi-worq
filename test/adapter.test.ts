@@ -101,7 +101,7 @@ test("a new folder package and a new adapter launch through worq_spawn and the C
   const key = `__worqEcho${Date.now()}b`;
   await install(agentDir, "echo", adapterSource(key));
   await mkdir(join(agentDir, "workflows", "notes"), { recursive: true });
-  await writeFile(join(agentDir, "workflows", "notes", "SKILL.md"), "---\ndescription: Write release notes\naccess: read\nreview: true\n---\nWrite the release notes.\n");
+  await writeFile(join(agentDir, "workflows", "notes", "SKILL.md"), "---\ndescription: Write release notes\naccess: read\n---\nWrite the release notes.\n");
   process.env.WORQ_STATE_DIR = state;
   t.after(() => { delete process.env.WORQ_STATE_DIR; });
   const tools: { name: string; description: string; execute: Function }[] = [];
@@ -117,7 +117,7 @@ test("a new folder package and a new adapter launch through worq_spawn and the C
   // Production catalog, discovery and driver: no driver seam.
   createWorq({ agentDir: () => agentDir })(pi as never);
   const spawn = tools.find((tool) => tool.name === "worq_spawn")!;
-  assert.match(spawn.description, /notes \(read, reviewed\): Write release notes/);
+  assert.match(spawn.description, /notes \(read\): Write release notes/);
   const ctx = { mode: "print", cwd: root, model: undefined, thinkingLevel: undefined, modelRegistry: { find: () => undefined, getAvailable: () => [] },
     ui: { notify() {} }, sessionManager: { getBranch: () => [] } };
   await handlers.session_start({}, ctx);

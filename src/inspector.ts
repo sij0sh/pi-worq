@@ -11,8 +11,7 @@ const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' 
 const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
 export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
 const compact = (r: Row) => `${r.title ?? r.ref} ${r.state}${r.actor ? ` ${r.actor}` : ''}`;
-const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}`;
-const childIdentity = (row: Row) => `${row.review ? `${reviewId(row.review)} review` : row.role} ${row.state}`;
+const childIdentity = (row: Row) => `${row.review ? 'review' : row.role} ${row.state}`;
 const identity = (r: Row, width: number) => width < 34 ? compact(r) : headline(r);
 export function outcome(o?: Outcome): string {
   if (!o) return 'outcome not recorded';
@@ -124,7 +123,7 @@ export class Inspector {
     const lines = this.data.activity.slice().reverse().flatMap(e => {
       const row = this.data.rows.get(e.key);
       if (!row || (this.ref && row.ref !== this.ref)) return [];
-      const source = row.question ?? `${row.title ?? row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
+      const source = row.question ?? `${row.title ?? row.ref}${row.parent ? ` ${row.role}` : ''}`;
       return [`${source} · ${e.text}${e.outcome ? ` · ${outcome(e.outcome)}` : ''} · ${age(e.at)} ago`];
     });
     if (!lines.length) lines.push('No activity observed.');
@@ -137,7 +136,7 @@ export class Inspector {
       const c = row.cache;
       const [cache, speed, turns] = metrics(row);
       const children = [...this.data.rows.values()].filter(r => r.parent === row.key && r.question);
-      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? `child of ${row.ref}${row.review ? ` · ${reviewId(row.review)}` : ''}` : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
+      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? `child of ${row.ref}` : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
         ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
         row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
         ...(row.setup?.sdk ? [`Harness: ${row.setup.sdk}`] : []), `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
@@ -149,11 +148,9 @@ export class Inspector {
     }
     const key = row.parent ?? row.key;
     const live = this.data.live.get(key);
-    const history = this.data.settled.filter(r => r.run === key && r.round !== live?.round).reverse();
-    return ['Session-only exact revision evidence', 'Full finding text not copied · merge not observed',
-      ...(this.data.evidenceGap ? [`Evidence gap · ${this.data.evidenceGap} settled rounds evicted session-wide`] : []),
-      ...(!live && !history.length ? ['Evidence not recorded'] : []), ...[...(live ? [live] : []), ...history].flatMap(r => [
-        `Round ${r.round} · review ${r.status}`, 'sha' in r.identity ? `SHA ${r.identity.sha}` : `Digest ${r.identity.digest}`,
+    return ['Session-only exact review evidence', 'Full finding text not copied · merge not observed',
+      ...(!live ? ['Evidence not recorded'] : []), ...(live ? [live] : []).flatMap(r => [
+        `Review ${r.status}`, 'sha' in r.identity ? `SHA ${r.identity.sha}` : `Digest ${r.identity.digest}`,
         ...(r.review ? [`${r.review.findings.length} findings · ${r.review.artifacts} saved artifacts`, ...r.review.findings.map((need, i) => `  #${i + 1}${need ? ' · requester needed' : ''}`)] : []),
       ])];
   }

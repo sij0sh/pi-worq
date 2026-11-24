@@ -78,7 +78,7 @@ test("shipped Plan and Execute are ordinary packages; one review prompt", () => 
   assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan"]);
   assert.equal(KINDS.get("plan")!.access, "read");
   assert.equal(KINDS.get("execute")!.access, "write");
-  assert.ok([...KINDS.values()].every((kind) => kind.review && !kind.userOnly && kind.skill));
+  assert.ok([...KINDS.values()].every((kind) => !kind.userOnly && kind.skill));
   assert.match(loadPrompts().review, /What consequential reason is there not to accept this result as-is\?/);
 });
 
@@ -113,7 +113,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const resumedReviews: string[] = [];
   const scripts: Record<string, Script> = {
     "agent.plan": async turn => {
-      if (turn.text === "Main: Remove the watcher") {
+      if (turn.text.startsWith("Main: Remove the watcher")) {
         await turn.tool("submit", { ...planSubmission, summary: "Use one direct report, no background process." });
         return;
       }
@@ -217,19 +217,18 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const nextRef = "surface-test-2";
   const launched = await run(process.execPath, [cli, "spawn", "plan", "--title", "Surface test", "--attach", ref, "--attach", `.agents/plans/plan-${ref}.md`, "Simplify the report"], { env });
   assert.match(launched.stdout, /Surface test \(surface-test-2\).*plan-surface-test\.md/);
-  const waitForRound = async (round: number) => {
-    const ready = () => notices.some(({ message }) => message.details.ref === nextRef && message.details.type === "parked" && message.content.includes(`round ${round} parked`));
+  const waitFor2 = async (type: string) => {
+    const ready = () => notices.some(({ message }) => message.details.ref === nextRef && message.details.type === type);
     for (let i = 0; i < 100 && !ready(); i++) await new Promise(r => setTimeout(r, 25));
-    assert.ok(ready(), `expected plan round ${round}`);
+    assert.ok(ready(), `expected ${type}`);
   };
-  await waitForRound(1);
+  await waitFor2("parked");
   await command!(`send ${nextRef} Remove the watcher`, ctx);
-  await waitForRound(2);
-  assert.equal(resumedReviews.length, 2, "each submission gets one review");
-  assert.match(resumedReviews[1], /no background process/);
-  assert.match((await run(process.execPath, [cli, "list", nextRef], { env })).stdout, /parked · round 2/);
+  await waitFor2("done");
+  assert.equal(resumedReviews.length, 1, "one review per agent; the feedback revision is not re-reviewed");
+  assert.doesNotMatch(resumedReviews[0], /no background process/);
+  assert.match((await run(process.execPath, [cli, "list", nextRef], { env })).stdout, / · done\b/);
   assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, / · execute · /);
-  await command!(`cancel ${nextRef}`, ctx);
   const failedRun = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Fail it" }, undefined, undefined, ctx);
   for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
@@ -329,7 +328,7 @@ test("/worq launches any package: select → optional instructions → explicit 
   const spawn = tools.find((tool) => tool.name === "worq_spawn")!;
   assert.equal(spawn.parameters.properties!.kind.enum, undefined);
   assert.match(spawn.description, /shared \(read\): Shared docs/);
-  assert.match(spawn.description, /plan \(read, reviewed\)/);
+  assert.match(spawn.description, /plan \(read\)/);
   assert.doesNotMatch(spawn.description, /Write the docs/, "user-only packages are not offered to the model");
   await assert.rejects(spawn.execute("id", { kind: "docs", title: "Docs", task: "x" }, undefined, undefined, ctx), /user-only/);
   await command!("cancel docs-run", ctx);

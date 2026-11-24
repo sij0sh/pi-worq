@@ -8,7 +8,7 @@ import { exists, loadSkill, outsideCheckout } from "./skills.ts";
 /**
  * The one agent catalog: skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write), `review` (true = independent review; absent = false).
+ * `access` (`read` explicit; absent = write). Every agent gets exactly one review; a `review` key is ignored.
  * Plan and Execute ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
 const NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -25,7 +25,7 @@ function load(root: string, path: string, name: string): Kind | string {
   if (meta.name !== undefined && meta.name !== name) return `name "${meta.name}" must match the folder name "${name}"`;
   if (!meta.description?.trim()) return "description is required (shown by /worq and worq_spawn)";
   if (!skill.body) return "SKILL.md body is blank";
-  try { return profile(name, meta, skill.body, { access: "write", review: false }, skill); }
+  try { return profile(name, meta, skill.body, { access: "write" }, skill); }
   catch (error) { return errorText(error); }
 }
 

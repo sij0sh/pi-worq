@@ -2,7 +2,7 @@ import type { Static, TSchema } from "typebox";
 import { Block, errorText } from "./contracts.ts";
 import { Conversation, type Sessions } from "./session.ts";
 import type { Driver, Runtime, Tool } from "./sdk/contract.ts";
-import type { ReviewIdentity, Telemetry } from "./telemetry.ts";
+import type { Telemetry } from "./telemetry.ts";
 import { readTools } from "./tools.ts";
 
 /** Bounded concurrency shared by every subagent. */
@@ -46,7 +46,8 @@ export interface Assignment<T extends TSchema> {
   role: string;
   /** Telemetry row role ("PQ", "review"). */
   row: string;
-  review?: ReviewIdentity;
+  /** The row is the agent's review. */
+  review?: boolean;
   question?: string;
   label: string;
   title: string;

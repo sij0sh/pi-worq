@@ -4,7 +4,7 @@ import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { test } from "node:test";
 import { reserveName } from "../src/workspace.ts";
-import { KINDS, pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
+import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
 
 test("readable claims serialize across linked worktrees and survive restart", async (t) => {
   const { dir, root, state } = await repo();
@@ -103,7 +103,7 @@ test("duplicate PQ questions retain independent answers while queued", async (t)
 
 const finding = { witness: "Criterion ignores trailing newline", basis: "observed app.py:1", consequence: "output mismatch", change: "state the newline" };
 
-test("plan agent: PQ delegation, plan saved, one review, parked; Main resumes the same session for a fresh review", async (t) => {
+test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback opens one final revision, then done", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const reviews: string[] = [];
@@ -119,7 +119,11 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main resumes th
         return; // end turn: wait for the PQ
       }
       if (turn.text.startsWith("[PQ]")) { await turn.tool("submit", planSubmission); return; }
-      if (turn.text.startsWith("Main: include the newline")) { await turn.tool("submit", { ...planSubmission, summary: "Revised: include newline" }); return; }
+      if (turn.text.startsWith("Main: include the newline")) {
+        assert.match(turn.text, /final revision[\s\S]*No further review runs/);
+        await turn.tool("submit", { ...planSubmission, summary: "Revised: include newline" });
+        return;
+      }
     },
     "subagent.evidence": async (turn) => {
       assert.equal(turn.spec.name, "subagent.evidence");
@@ -129,11 +133,11 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main resumes th
     },
     review: async (turn) => {
       assert.ok(!turn.spec.tools.some((x) => ["delegate", "ask_main", "write_file", "run_command"].includes(x.name)));
-      const payload = JSON.parse(turn.text) as { request: string; submission: string; round: number };
+      const payload = JSON.parse(turn.text) as { request: string; submission: string };
       assert.equal(payload.request, "Uppercase the greeting");
       assert.match(payload.submission, /# Plan/);
       reviews.push(payload.submission);
-      await turn.tool("submit", payload.round === 1 ? { verdict: "findings", summary: "One gap", findings: [finding] } : pass);
+      await turn.tool("submit", { verdict: "findings", summary: "One gap", findings: [finding] });
     },
   });
   const agent = await worq.spawn("plan", "Uppercase the greeting", { title: "Uppercase the greeting" });
@@ -154,22 +158,21 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main resumes th
   assert.equal([...worq.sessions.keys()].length, 1, "the parked owner keeps its live session");
   assert.ok(!agent.ended);
 
-  // Main resumes the same SDK session: no new agent session, one fresh review.
-  assert.match(worq.send(agent.ref, "include the newline"), /Resumed/);
-  await next("parked", agent.ref, 2);
-  assert.equal(agent.round, 2);
+  // Main's feedback reaches the same SDK session once; the revision is final, unreviewed, and ends the agent.
+  assert.match(worq.send(agent.ref, "include the newline"), /Sent feedback[\s\S]*final revision/);
+  const done = await next("done", agent.ref);
+  assert.match(done.text, /done · final revision submitted after review; not re-reviewed/);
+  assert.equal(agent.state, "done");
   assert.equal(seen.filter((s) => s.name === "agent.plan").length, 1);
-  assert.equal(reviews.length, 2);
-  assert.match(reviews[1], /Revised: include newline/);
-  assert.equal(agent.review?.verdict, "pass");
-  assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline/);
-  await worq.cancel(agent.ref);
-  assert.equal(agent.state, "closed");
+  assert.equal(reviews.length, 1, "no second review");
+  assert.equal(agent.review?.verdict, "findings", "the one review stays on record");
+  assert.match(await readFile(join(root, agent.plan.path), "utf8"), /Revised: include newline[\s\S]*|final revision after review/);
   assert.equal(worq.sessions.size, 0);
-  assert.throws(() => worq.send(agent.ref, "more"), /closed/);
+  assert.throws(() => worq.send(agent.ref, "more"), /done/);
+  assert.match(worq.list(agent.ref), /Phase: final revision submitted \(not re-reviewed\)/);
   const record = JSON.parse(await readFile(join(state, agent.ref, "record.json"), "utf8"));
-  assert.equal(record.state, "closed");
-  assert.equal(record.reviews.length, 2);
+  assert.equal(record.state, "done");
+  assert.equal(record.review.verdict, "findings");
   assert.ok(!JSON.stringify(record).includes(agent.id));
 });
 
@@ -241,26 +244,6 @@ test("execute agent: plan explicitly attached, own worktree and branch, review s
   await worq.cancel(plan.ref);
 });
 
-test("an unreviewed write package: no review runs and the digest says unreviewed", async (t) => {
-  const { dir, root, state } = await repo();
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const { worq, next, seen } = setup(root, state, {
-    "agent.execute": async (turn) => {
-      assert.match(turn.system, /No independent review runs/);
-      await turn.tool("write_file", { path: "app.py", content: "print('HELLO')\n" });
-      await turn.tool("submit", { summary: "Uppercased", report: "Checks run: cat app.py" });
-    },
-  }, {}, undefined, new Map([["execute", { ...KINDS.get("execute")!, review: false }]]));
-  await assert.rejects(worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting", verify: true }), /verify does not apply/);
-  const exec = await worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting" });
-  const ready = await next("parked", exec.ref);
-  assert.equal(seen.filter((s) => s.name === "review").length, 0, "no review ran");
-  assert.match(ready.text, /parked · unreviewed/);
-  assert.match(worq.list(exec.ref), /Review: none/);
-  assert.match(exec.diffstat!, /app\.py/);
-  await worq.cancel(exec.ref);
-});
-
 test("ask_main parks the agent until Main answers; steering reaches a running agent", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -296,7 +279,7 @@ test("limits, refusals and failures", async (t) => {
   const ready = await next("parked", a.ref);
   assert.match(ready.text, /parked · unverified/);
   assert.match(ready.text, /review: inconclusive \(Review error: reviewer crashed\)/);
-  assert.match(worq.list(a.ref), /Review \(round 1\): unverified/);
+  assert.match(worq.list(a.ref), /Review: unverified/);
   await assert.rejects(worq.spawn("plan", "Needs plan", { title: "Needs plan", attach: ["ffff"] }), /exact plan name/);
   await assert.rejects(worq.spawn("review", "x", { title: "Review work" }), /Unknown kind/);
 
@@ -336,8 +319,8 @@ test("parked agents hold no slot; resuming one needs a free slot", async (t) => 
   assert.throws(() => worq.send(parked.ref, "revise"), /at-capacity|agents are active/);
   release();
   await next("parked", busy.ref);
-  assert.match(worq.send(parked.ref, "revise"), /Resumed/);
-  await next("parked", parked.ref, 2);
+  assert.match(worq.send(parked.ref, "revise"), /Sent feedback/);
+  await next("done", parked.ref);
   await worq.cancel("all");
 });
 
@@ -362,7 +345,7 @@ test("budget exhaustion parks with the last response and an unreviewed partial c
   assert.ok(agent.recoverySha);
   assert.equal(git("show", `${agent.recoverySha}:app.py`).toString(), "partial\n");
   assert.equal(seen.filter((s) => s.name === "review").length, 0);
-  assert.match(worq.send(agent.ref, "finish"), /Resumed/);
+  assert.match(worq.send(agent.ref, "finish"), /Resumed .* with a fresh budget/);
   await next("parked", agent.ref, 2);
   assert.equal(agent.exhausted, undefined);
   assert.ok(agent.candidate);
@@ -376,7 +359,7 @@ test("an idle parked agent closes after limits.idleMinutes", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { worq, next } = setup(root, state, {
     "agent.plan": (turn) => turn.tool("submit", planSubmission).then(() => {}),
-  }, { idleMinutes: 1 }, undefined, new Map([["plan", { ...KINDS.get("plan")!, review: false }]]));
+  }, { idleMinutes: 1 });
   const agent = await worq.spawn("plan", "One", { title: "One plan" });
   await next("parked", agent.ref);
   t.mock.timers.tick(60_000);

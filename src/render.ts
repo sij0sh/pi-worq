@@ -4,10 +4,10 @@ export const one = (text: string, max = 240) => { const flat = text.replace(/\s+
 export const clean = (text: string) => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join("\n") : "- None";
 
-export function planMarkdown(input: { ref: string; title?: string; kind: string; round: number; task: string; report: Submission; label?: string }) {
-  const { ref, kind, round, task, report } = input;
+export function planMarkdown(input: { ref: string; title?: string; kind: string; final?: boolean; task: string; report: Submission; label?: string }) {
+  const { ref, kind, task, report } = input;
   return [
-    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
+    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · ${input.final ? "final revision after review" : "reviewed submission"} · ${new Date().toISOString().slice(0, 10)}`, "",
     "## Request", "", task, "", "## Summary", "", report.summary, ...(report.report ? ["", report.report] : []), "",
   ].join("\n");
 }
@@ -18,8 +18,8 @@ export function pqMessage(question: string, answer?: PqAnswer, error?: string, c
     answer.unresolved?.length && `Unresolved:\n${bullets(answer.unresolved)}`, answer.newQuestions?.length && `New questions:\n${bullets(answer.newQuestions)}`,
     "Integrate: what did this resolve, contradict, or newly make material?"].filter(Boolean).join("\n");
 }
-/** One review per submission. */
-export interface ReviewRecord extends Partial<ReviewReport> { round: number; verdict: Verdict; error?: string }
+/** The agent's one review. */
+export interface ReviewRecord extends Partial<ReviewReport> { verdict: Verdict; error?: string }
 export interface ReviewCaps {
   summary: number; witness: number; change: number; basis: number;
   /** Findings shown; absent means all of them. */
@@ -29,7 +29,7 @@ export interface ReviewCaps {
 }
 /** Full text, at the schema's own maxima (contracts.ts:53-55): what `worq_list` shows. */
 export const DETAIL: ReviewCaps = { summary: 1600, witness: 800, change: 500, basis: 400 };
-/** The round digest: the four most consequential findings, one line each. */
+/** The parked digest: the four most consequential findings, one line each. */
 export const DIGEST: ReviewCaps = { summary: 400, witness: 160, change: 80, basis: 80, limit: 4 };
 
 /** Indices to show, in order: the first `limit`, but never at the cost of a `need` finding. */

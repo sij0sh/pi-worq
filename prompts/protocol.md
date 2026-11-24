@@ -28,6 +28,6 @@ Request and delegation first, then established project conventions, then common 
 
 ## Finish
 
-Call `submit` when your recursive question closes. When your kind is reviewed, one independent review checks the submission. Your session then parks: Main may accept it, resume you with corrections (a "Main:" message starting a new round with a fresh budget), or close you. Resubmit a complete, self-contained result each round.
+Call `submit` when your recursive question closes. One independent review checks your first submission, then your session parks. Main either accepts it, or sends filtered feedback once (a "Main:" message): address it and `submit` your final, complete, self-contained result. No further review runs, and that submission ends your session. If you run out of budget first, Main may resume you with a fresh one; that is not a review.
 
 Worq identifies runs by readable names. Attachments in the input are explicit; at-sign mentions in task text are literal. PQ results are headed by their questions, not by IDs.

@@ -16,9 +16,10 @@ import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot,
 import type { Revision, Telemetry } from "./telemetry.ts";
 
 /** parked: submitted (or out of budget), session and worktree retained until Main resumes or closes it. */
-export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "parked" | "closed" | "cancelled" | "failed";
-export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
-export interface AgentEvent { type: "parked" | "ask" | "warning" | "failed"; ref: string; text: string }
+export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "parked" | "done" | "closed" | "cancelled" | "failed";
+export const ENDED: AgentState[] = ["done", "closed", "cancelled", "failed"];
+/** done: the final revision was submitted and the agent ended. */
+export interface AgentEvent { type: "parked" | "ask" | "warning" | "failed" | "done"; ref: string; text: string }
 export interface Attachment { path: string; text: string }
 export interface Delegation { role: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
@@ -38,9 +39,13 @@ export interface AgentDeps {
   sessions?: Sessions;
 }
 
+/** What the agent reads when Main's feedback opens its final revision. */
+export const FINAL = "This is your final revision: address Main's feedback, then submit your complete result. No further review runs, and submitting ends your session.";
+
 /**
- * One Main-spawned SDK agent. Each round: running (may delegate PQs, ask Main) → submit →
- * one independent review (when the profile asks) → parked. Main resumes it with worq_send or closes it.
+ * One SDK agent, one review. Lifecycle: running (may delegate PQs, ask Main) → submit → one independent
+ * review → parked. Main accepts (closes) it, or sends feedback once: the agent revises, submits without
+ * review and ends as `done`. Budget exhaustion parks it unreviewed; worq_send resumes the same phase.
  * Never spawns, retries or merges on its own.
  */
 export class Agent {
@@ -50,12 +55,13 @@ export class Agent {
   readonly task: string;
   readonly attachments: Attachment[];
   readonly title: string;
-  /** The package's review policy. */
-  readonly reviewed: boolean;
   readonly branch?: string;
   readonly owner = process.pid;
   state: AgentState = "starting";
-  round = 0;
+  /** Main's feedback opened the final revision: the next submission is not reviewed and ends the agent. */
+  final = false;
+  /** The one independent review of the first submission. */
+  review?: ReviewRecord;
   started = Date.now();
   finished?: number;
   error?: string;
@@ -63,13 +69,12 @@ export class Agent {
   candidate?: string;
   /** Unreviewed commit of work left by budget exhaustion or close. */
   recoverySha?: string;
-  /** Why the latest round parked without a submission. */
+  /** Why the agent last parked without a submission. */
   exhausted?: string;
   diffstat?: string;
   plan?: { path: string; text: string };
   work?: string;
   submission?: string;
-  readonly reviews: ReviewRecord[] = [];
   readonly delegations: Delegation[] = [];
   readonly launches: { role: string; runtime: Runtime; label?: string }[] = [];
   ask?: { question: string; resolve(answer: string): void };
@@ -98,7 +103,6 @@ export class Agent {
     if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
-    this.reviewed = input.kind.review;
     if (input.kind.access === "write") this.branch = `worq/${input.ref}`;
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
@@ -109,8 +113,6 @@ export class Agent {
   /** Idle sessions hold no execution slot. */
   get active() { return !this.ended && this.state !== "parked"; }
   get openPqs() { return this.delegations.filter((d) => d.state === "queued" || d.state === "running").length; }
-  /** The current round's review, if it ran. */
-  get review() { return this.reviews.find((r) => r.round === this.round); }
   launch() {
     this.deps.telemetry?.add(this.id, this.ref, this.kind.name, undefined, undefined, undefined, this.title);
     this.deps.sessions?.set(this.id, {
@@ -150,10 +152,10 @@ export class Agent {
   }
   view() {
     return {
-      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
+      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, final: this.final, task: this.task,
       worktree: this.work, branch: this.branch, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
-      reviews: this.reviews, started: this.started, finished: this.finished,
+      review: this.review, started: this.started, finished: this.finished,
     };
   }
 
@@ -173,7 +175,9 @@ export class Agent {
       case "parked":
         this.log(`← main: ${message}`);
         this.wakeParked?.(`Main: ${message}`);
-        return `Resumed ${this.ref} (round ${this.round + 1})`;
+        return this.review && !this.final && !this.exhausted
+          ? `Sent feedback to ${this.ref}: final revision, no further review; it ends on submit`
+          : `Resumed ${this.ref} with a fresh budget`;
       case "starting": case "reviewing":
         throw new Block("busy", `${this.ref} is ${this.state}; wait for its next message`);
       default:
@@ -219,32 +223,36 @@ export class Agent {
         box = processTools(cwd, join(this.dir, "runtime"), { signal });
         tools.push(...writeTools(cwd), ...box.tools);
       }
-      const unreviewed = this.reviewed ? "" : "\n\nNo independent review runs for this agent; submit a self-contained result.";
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${unreviewed}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
-          description: `Submit your result${this.reviewed ? " for independent review" : ""}.${write ? "" : " Worq saves it to .agents/plans/."}`,
+          description: `Submit your result.${write ? "" : " Worq saves it to .agents/plans/."}`,
           validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "queued" || d.state === "running").map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
       let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      let done = false;
       while (message !== undefined) {
-        this.round++;
         this.exhausted = this.recoverySha = undefined;
         this.set("running");
-        try { await this.submit(await this.conversation.run(message)); }
-        catch (error) {
+        try {
+          await this.submit(await this.conversation.run(message));
+          if (this.final) { done = true; break; }
+        } catch (error) {
           // Budget exhaustion keeps the last response and partial work; Main may resume with a fresh budget.
           if (signal.aborted || this.conversation.disposed || !(error instanceof Block && (error.code === "turn-limit" || error.code === "time-limit"))) throw error;
           this.exhausted = errorText(error);
-          const partial = this.work && await pin(this.work, signal, `worq ${this.ref}: round ${this.round} partial (unreviewed)`);
+          const partial = this.work && await pin(this.work, signal, `worq ${this.ref}: partial (unreviewed)`);
           if (partial && partial !== this.candidate) this.recoverySha = partial;
         }
+        const wasExhausted = this.exhausted !== undefined;
         message = await this.park();
+        // Main's first message after the review is its feedback: it opens the final revision.
+        if (message !== undefined && this.review && !this.final && !wasExhausted) { this.final = true; message = `${message}\n\n${FINAL}`; }
       }
-      this.state = "closed";
+      this.state = done ? "done" : "closed";
     } catch (error) {
       if (signal.aborted) this.state = "cancelled";
       else { this.error = errorText(error); this.state = "failed"; }
@@ -272,13 +280,13 @@ export class Agent {
       const telemetry = this.deps.telemetry;
       telemetry?.state(this.id, this.state, this.state === "failed" ? "failure" : undefined);
       const interrupted = telemetry?.live.get(this.id);
-      if (interrupted?.status === "reviewing") telemetry?.revision({ ...interrupted, status: "inconclusive" }, true);
-      telemetry?.live.delete(this.id);
+      if (interrupted?.status === "reviewing") telemetry?.revision({ ...interrupted, status: "inconclusive" });
       telemetry?.changed();
       this.finished = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
+      if (this.state === "done") this.deps.notify({ type: "done", ref: this.ref, text: this.digest() });
       if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
@@ -356,44 +364,43 @@ export class Agent {
       });
   }
 
-  /** Record the submission (plan file or pinned commit), then one independent review when required. */
+  /** Record the submission (plan file or pinned commit); the first one gets the agent's one independent review. */
   private async submit(report: Submission) {
     const signal = this.signal;
-    this.set("reviewing");
+    if (!this.final) this.set("reviewing");
     let identity: Revision["identity"];
     if (this.kind.access === "read") {
       const path = `.agents/plans/plan-${this.ref}.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report });
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, final: this.final, task: this.task, report });
       await writeScoped(this.deps.root, path, markdown, { create: !this.plan });
       identity = { digest: createHash("sha256").update(markdown, "utf8").digest("hex") };
       this.plan = { path, text: markdown };
       this.submission = markdown;
       this.log(`plan saved to ${path}`);
     } else {
-      this.candidate = await pin(this.work!, signal, `worq ${this.ref}: round ${this.round}`);
+      this.candidate = await pin(this.work!, signal, `worq ${this.ref}: ${this.final ? "final" : "submission"}`);
       identity = { sha: this.candidate };
       this.diffstat = await git(this.work!, signal, "diff", "--stat", this.project!.baseline, this.candidate) || "No changes from the baseline";
       this.submission = reportText(report);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
-    if (!this.reviewed) return;
-    const revision: Revision = { run: this.id, round: this.round, identity, status: "reviewing" };
+    if (this.final || this.review) return;
+    const revision: Revision = { run: this.id, identity, status: "reviewing" };
     this.deps.telemetry?.revision(revision);
     const review = await this.runReview();
-    this.reviews.push(review);
-    this.deps.telemetry?.revision({ ...revision, status: review.verdict, review: { findings: review.findings?.map((f) => f.need === true) ?? [], artifacts: review.artifacts?.length ?? 0 } }, true);
+    this.review = review;
+    this.deps.telemetry?.revision({ ...revision, status: review.verdict, review: { findings: review.findings?.map((f) => f.need === true) ?? [], artifacts: review.artifacts?.length ?? 0 } });
   }
   private async runReview(): Promise<ReviewRecord> {
     const { prompts, limits, root } = this.deps;
-    const round = this.round;
     const candidate = this.candidate!;
     const dir = this.dir!;
     let saved: string[] = [];
     const workspace = this.kind.access === "write" ? async (signal: AbortSignal): Promise<Workspace> => {
-      const scratch = join(dir, `review-${round}`);
+      const scratch = join(dir, "review");
       await mkdir(scratch, { mode: 0o700 });
       const cwd = await snapshot(root, scratch, candidate, signal);
-      const box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(dir, "artifacts", `r${round}`), services: limits.services } });
+      const box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(dir, "artifacts"), services: limits.services } });
       return {
         cwd, tools: [...readTools(cwd), ...box.tools],
         check: async (s) => { saved = box.saved; return await intact(cwd, candidate, s) ? undefined : "Reviewer changed tracked files or the checked-out commit"; },
@@ -401,33 +408,35 @@ export class Agent {
       };
     } : undefined;
     const result = await runSubagent(this.children, {
-      key: `${this.id}:r${round}`, parent: this.id, ref: this.ref, role: "review", row: "review", review: { round },
-      label: `review · round ${round}`, title: this.title, consequence: "Cancels this review; it is recorded as inconclusive.",
+      key: `${this.id}:review`, parent: this.id, ref: this.ref, role: "review", row: "review", review: true,
+      label: "review", title: this.title, consequence: "Cancels this review; it is recorded as inconclusive.",
       system: prompts.review, schema: ReviewReport, description: "Return your independent review.", turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
       payload: JSON.stringify({
-        request: this.task, kind: this.kind.name, round, submission: this.submission,
+        request: this.task, kind: this.kind.name, submission: this.submission,
         ...(this.attachments.length ? { plans: this.attachments } : {}),
         ...(this.kind.access === "write" ? { commit: candidate, diffstat: this.diffstat } : {}),
       }, null, 2),
       cwd: root, signal: this.signal, log: (line) => this.log(`  review ${line}`), workspace,
     });
     this.signal.throwIfAborted();
-    if ("error" in result) return { round, verdict: "inconclusive", error: result.cancelled ? "Review cancelled by Main" : `Review error: ${result.error}` };
-    return { round, ...result.value, verdict: result.value.verdict as Verdict, artifacts: [...(result.value.artifacts ?? []), ...saved] };
+    if ("error" in result) return { verdict: "inconclusive", error: result.cancelled ? "Review cancelled by Main" : `Review error: ${result.error}` };
+    return { ...result.value, verdict: result.value.verdict as Verdict, artifacts: [...(result.value.artifacts ?? []), ...saved] };
   }
 
-  /** Display-only round notice; `worq_list` holds the full findings. */
+  /** Display-only notice; `worq_list` holds the full findings. */
   digest() {
-    const close = "worq_send resumes this session with corrections; worq_cancel closes it. This notice does not authorize further action.";
+    const close = "worq_cancel accepts and closes it; worq_send sends your filtered feedback once (final revision, no further review). This notice does not authorize further action.";
     if (this.exhausted) return [
-      `${this.headline} round ${this.round} parked: ${this.exhausted}. Nothing was submitted or reviewed.`,
+      `${this.headline} parked: ${this.exhausted}. Nothing was submitted${this.final ? "" : " or reviewed"}.`,
       `Last response: ${one(this.conversation?.last || "none", 1500)}`,
       ...(this.recoverySha ? [`Partial commit ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []),
       `worq_send resumes with a fresh budget; worq_cancel closes it.`,
     ].join("\n");
     const where = this.kind.access === "write" ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    return [`${this.headline} round ${this.round} parked · ${this.reviewed ? reviewStatus(this.review) : "unreviewed"}`, where,
-      ...(this.reviewed ? reviewLines(this.review, { ...DIGEST, label: `worq_list(${this.ref})` }) : []),
+    if (this.state === "done") return [`${this.headline} done · final revision submitted after review; not re-reviewed`, where,
+      `Verify the exact candidate before reporting success or merging. worq_list(${this.ref}) has the review.`].join("\n");
+    return [`${this.headline} parked · ${reviewStatus(this.review)}`, where,
+      ...reviewLines(this.review, { ...DIGEST, label: `worq_list(${this.ref})` }),
       `Full findings: worq_list(${this.ref}). ${close}`,
     ].join("\n");
   }

@@ -10,16 +10,15 @@ export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Se
   | { change: string | undefined } | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
 export const observe = <T>(sink: ((value: T) => void) | undefined, value: T) => { try { sink?.(value); } catch { /* display only */ } };
 export const label = (s: string | undefined) => s?.replace(/[^a-zA-Z0-9._+:/ -]/g, "?").slice(0, 96);
-/** One submission and its single independent review. */
+/** An agent's reviewed submission and its one independent review. */
 export interface Revision {
-  run: string; round: number; identity: { digest: string } | { sha: string };
+  run: string; identity: { digest: string } | { sha: string };
   status: "reviewing" | Verdict;
   review?: { findings: boolean[]; artifacts: number };
 }
 export interface Call { name: string; at: number; outcome?: Outcome }
-export interface ReviewIdentity { round: number }
 export interface Row {
-  key: string; ref: string; title?: string; role: string; parent?: string; review?: ReviewIdentity; born: number; since: number;
+  key: string; ref: string; title?: string; role: string; parent?: string; review?: boolean; born: number; since: number;
   state: AgentState | "queued" | "answered" | "done" | "cancelling"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
   phase?: "request" | "idle" | "closed"; setup?: Setup; context?: ContextEstimate & { at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
   /** Pending or in-progress runtime change, display text. */
@@ -30,10 +29,9 @@ export interface Row {
 export class Telemetry {
   readonly rows = new Map<string, Row>();
   readonly activity: { key: string; at: number; text: string; outcome?: Outcome }[] = [];
+  /** Per agent run: its one review's evidence. */
   readonly live = new Map<string, Revision>();
-  readonly settled: Revision[] = [];
   activityGap = 0;
-  evidenceGap = 0;
   private readonly listeners = new Set<() => void>();
   subscribe(fn: () => void) { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   changed() { for (const fn of this.listeners) observe(fn, undefined); }
@@ -41,7 +39,7 @@ export class Telemetry {
     this.activity.push({ key, at: Date.now(), text, outcome });
     if (this.activity.length > 240) { this.activity.shift(); this.activityGap++; }
   }
-  add(key: string, ref: string, role: string, parent?: string, review?: ReviewIdentity, question?: string, title?: string) {
+  add(key: string, ref: string, role: string, parent?: string, review?: boolean, question?: string, title?: string) {
     const now = Date.now();
     this.rows.set(key, { key, ref, title, role, parent, review, question: question?.replace(/[\p{C}\s]+/gu, ' ').slice(0, 800), born: now, since: now, state: parent ? "queued" : "starting", current: new Map(), cache: { responses: 0, read: 0, write: 0, reads: 0, writes: 0 } });
     this.event(key, parent ? "queued" : "starting"); this.changed();
@@ -95,12 +93,8 @@ export class Telemetry {
       this.changed();
     };
   }
-  revision(value: Revision, settled = false) {
+  revision(value: Revision) {
     this.live.set(value.run, value);
-    if (settled) {
-      this.settled.push(value);
-      if (this.settled.length > 20) { this.settled.shift(); this.evidenceGap++; }
-    }
     this.changed();
   }
 }

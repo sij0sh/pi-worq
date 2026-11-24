@@ -28,7 +28,7 @@ export interface LaunchRequest extends RuntimeRequest {
   task?: string;
   title?: string;
   attach?: string[];
-  /** Legacy wire field. true is redundant for reviewed packages; false is refused. */
+  /** Legacy wire field. true is redundant (every agent is reviewed once); false is refused. */
   verify?: boolean;
 }
 export interface LaunchOptions {
@@ -107,8 +107,7 @@ export class Worq {
     const spawnable = [...this.kinds.values()].filter((k) => !k.userOnly).map((k) => k.name);
     if (!kind) throw new Block("kind", `Unknown kind ${request.kind}; installed: ${spawnable.join(" | ") || "none"}`);
     if (kind.userOnly && caller !== "user") throw new Block("invocation", `${kind.name} is user-only (disable-model-invocation); launch it with /worq`);
-    if (request.verify === false) throw new Block("verify", `verify:false is no longer supported: review follows the package's review frontmatter${kind.review ? ` (${kind.name} is reviewed)` : ""}. Omit verify, or install an unreviewed package for unreviewed runs.`);
-    if (request.verify === true && !kind.review) throw new Block("invalid-payload", `verify does not apply to ${kind.name} (no review)`);
+    if (request.verify === false) throw new Block("verify", "verify:false is no longer supported: every agent gets exactly one independent review. Omit verify.");
     const direction = (request.task ?? "").trim();
     if (direction.length > MAX_TASK) throw new Block("invalid-payload", `Task exceeds ${MAX_TASK} characters`);
     const task = direction || `Run the ${kind.name} workflow on this repository and submit its result.`;
@@ -166,14 +165,14 @@ export class Worq {
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
       const verdicts = a.review ? ` · review ${a.review.verdict}` : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
-      return `${a.headline} · ${a.state} · round ${a.round}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
+      return `${a.headline} · ${a.state}${a.final && !a.ended ? " · final revision" : ""}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
     })).join("\n");
   }
   private detail(a: Agent): string {
     return [
-      `${a.headline} · ${a.state} · round ${a.round}`,
+      `${a.headline} · ${a.state}`,
       `Task: ${a.task}`,
-      `Review: ${a.reviewed ? "one independent review per submission" : "none"}`,
+      `Phase: ${a.state === "done" ? "final revision submitted (not re-reviewed)" : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,
@@ -185,7 +184,7 @@ export class Worq {
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.state}: ${d.question}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
-      a.reviewed && (a.plan || a.candidate) && [`Review (round ${a.round}): ${reviewStatus(a.review)}`, ...reviewLines(a.review)].join("\n"),
+      (a.plan || a.candidate) && [`Review: ${reviewStatus(a.review)}`, ...reviewLines(a.review)].join("\n"),
       ["Recent activity:", ...a.tail(20).map((h) => `  ${h.line}`)].join("\n"),
     ].filter(Boolean).join("\n");
   }

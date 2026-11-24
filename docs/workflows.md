@@ -35,9 +35,8 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `description` | yes | Shown in the `/worq` menu and the `worq_spawn` kind list. |
 | `disable-model-invocation` | no | `true`: user-only (`/worq`); refused from `worq_spawn`, socket and CLI. `false`/absent: also launchable by Main and the CLI. |
 | `access` | no | `read`: no worktree or write/process tools, result saved as a plan file. Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
-| `review` | no | `true`: one independent review per submission. Absent/`false`: none. |
 
-Unknown keys are ignored. The body has no required sections; the agent also receives the Worq protocol and `submit` tool.
+Unknown keys are ignored, including a legacy `review`: every agent gets exactly one review. The body has no required sections; the agent also receives the Worq protocol and `submit` tool.
 
 ## Supporting files
 
@@ -51,15 +50,16 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 | `worq_spawn` / socket / `worq spawn` | Main, CLI | model-invocable | request fields, else Main's |
 
 - Same payload everywhere: `kind`, optional `task` (omitted: "Run the `<name>` workflow…"), `title` (omitted: first task words, else `<name> run`), `attach`, `sdk`, `model`, `thinking`.
-- `/worq`: menu `name · access[ · reviewed][ · user-only] · description` → optional instructions → runtime. Esc at any step changes nothing. Success activates all four Main tools before the agent starts.
-- `verify:false` is refused; `verify:true` only on reviewed packages.
+- `/worq`: menu `name · access[ · user-only] · description` → optional instructions → runtime. Esc at any step changes nothing. Success activates all four Main tools before the agent starts.
+- `verify:false` is refused.
 
 ## Lifecycle
 
-- **Review only with `review: true`.** Otherwise the prompt says the result must be self-contained and the digest says `unreviewed`.
-- Submission parks the agent (session and worktree kept, slot released); Main resumes it with `worq_send` or closes it with `worq_cancel`.
+- **One review.** The first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
+- Main accepts with `worq_cancel`, or sends filtered feedback once with `worq_send`. The agent revises, submits its final result without another review, and ends as `done` (worktree removed, branch/plan kept).
+- Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
-- Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. Worq never merges; verify before merging by hand.
+- Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.
 
 ## Problems
 

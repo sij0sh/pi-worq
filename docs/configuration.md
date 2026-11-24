@@ -66,11 +66,11 @@ Subagents are read-only sessions answering one probing question. The delegating 
 
 The name labels the child; it runs on its agent's runtime. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
 
-Each submission of a `review: true` package gets one review subagent (`prompts/review.md`), on the agent's runtime. Shipped `plan` and `execute` set `review: true`. `verify:false` is refused; install an unreviewed package instead. `worq list <ref>` prints each session's resolved runtime.
+Every agent gets exactly one review subagent (`prompts/review.md`), on its first submission and on the agent's runtime. Main's feedback then opens one final, unreviewed revision; the agent ends as `done`. `verify:false` is refused. `worq list <ref>` prints each session's resolved runtime.
 
 ## Workflows
 
-The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `plan` and `execute` are seeded on first use. `disable-model-invocation: true` keeps one user-only (`/worq`). Reviewed only with `review: true`. See `docs/workflows.md`.
+The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `plan` and `execute` are seeded on first use. `disable-model-invocation: true` keeps one user-only (`/worq`). See `docs/workflows.md`.
 
 ## Adapters
 
@@ -96,13 +96,13 @@ Every value is optional; absent keys use these defaults.
 | `idleMinutes` | 60 | How long a parked agent keeps its session and worktree before closing |
 | `services` | 2 | Services a write-kind review may start (`service-limit`) |
 
-Budgets are per invocation and hard. Exhausting one parks the agent unreviewed with its last response and a pinned partial commit; `worq send <ref> <text>` resumes it with a fresh budget. Per-session warnings are visible but do not wake Main.
+Budgets are per invocation and hard. Exhausting one parks the agent unreviewed with its last response and a pinned partial commit; `worq send <ref> <text>` resumes it with a fresh budget (same phase, no extra review). Per-session warnings are visible but do not wake Main.
 
 ## Verifying a configuration
 
 - `worq list <ref>` shows review policy and each session's resolved runtime (`name` `main` or `launch`, `sdk`, `model`, `thinking`).
 - The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <source>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
-- An unreviewed package reads `Review: none`.
+- `Phase:` shows initial work, reviewed (awaiting acceptance or feedback), final revision, or done.
 
 ## Failures and fixes
 
@@ -113,7 +113,7 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 | `… is not a Pi model ref` | Ref shape | Use `<provider>/<model>` |
 | `Unknown sdk` | No installed adapter with that id | `pi`, or install `<agentDir>/worq/adapters/<id>/` |
 | `sdk "<id>" could not load` | Adapter import/factory failed | Fix the adapter; other SDKs keep working |
-| `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; use an unreviewed package |
+| `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; every agent is reviewed once |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
 | `… is ignored` / `… is no longer read` | Removed key or resource layout | Remove it (move instructions into `worq/AGENTS.md`) |

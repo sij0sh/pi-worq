@@ -40,16 +40,16 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
 - **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/plan-<ref>.md`. `parked` means the submission and its one review are done, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
-- **Main owns iteration:** a parked agent keeps its session (and worktree). Main accepts and closes it, resumes it with targeted corrections (`worq_send`; new round, fresh budget, fresh review), spawns a fresh agent for a different approach, or asks the user. To execute an existing plan, attach it explicitly. Only Main may merge, with explicit authority and exact-SHA verification.
+- **One review, one feedback pass:** every agent's first submission gets exactly one independent review, then it parks (session and worktree kept). Main accepts and closes it (`worq_cancel`), or sends filtered feedback once (`worq_send`): the agent makes one final revision, submits without another review and ends as `done` (branch/plan kept, worktree removed). Main may instead spawn a fresh agent for a different approach, or ask the user. To execute an existing plan, attach it explicitly. Only Main may merge, with explicit authority and exact-SHA verification.
 
 ## Agent packages
 
-Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/SKILL.md` (frontmatter `name`, `description`, optional `disable-model-invocation`, `access`, `review`) plus any supporting folders (`references/`, `scripts/`, …). Read once when Pi loads Worq; restart to pick up changes. No Worq code registers a name.
+Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/SKILL.md` (frontmatter `name`, `description`, optional `disable-model-invocation`, `access`) plus any supporting folders (`references/`, `scripts/`, …). Read once when Pi loads Worq; restart to pick up changes. No Worq code registers a name.
 
 - `disable-model-invocation: true` → user-only: launched by `/worq` alone, refused from `worq_spawn` and the CLI.
 - absent/`false` → also a `worq_spawn` kind (and control socket/CLI).
 - `access: read` → no worktree, no write/process tools; result saved to `.agents/plans/plan-<ref>.md`. Absent → write: own clean-baseline worktree, pins `worq/<ref>`, never merges.
-- `review: true` → one independent review per submission. Absent → none. Review follows the package only (`verify` is refused).
+- Every agent gets exactly one independent review of its first submission; no opt-out (`review` keys and `verify:false` are ignored/refused).
 - Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
 
 See `docs/workflows.md`.
@@ -60,11 +60,11 @@ See `docs/workflows.md`.
 |---|---|
 | Main | your Pi session |
 | Agent | SDK session launched by Main, the CLI or you (`/worq`); has a kind |
-| Kind | installed package `<agentDir>/workflows/<name>/SKILL.md`; frontmatter `access`, `review`, `disable-model-invocation`; the body is the workflow. `plan` and `execute` ship as packages |
+| Kind | installed package `<agentDir>/workflows/<name>/SKILL.md`; frontmatter `access`, `disable-model-invocation`; the body is the workflow. `plan` and `execute` ship as packages |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
-| Review | one subagent per submission (`prompts/review.md`); read tools, plus process tools on a clone of the exact commit for write kinds |
-| Round | run → submit → review → parked → Main's decision |
+| Review | one subagent per agent, on its first submission (`prompts/review.md`); read tools, plus process tools on a clone of the exact commit for write kinds |
+| Lifecycle | run → submit → review → parked → Main accepts (close) or sends feedback once → final revision → `done` |
 
 ## Tools
 
@@ -72,12 +72,12 @@ See `docs/workflows.md`.
 |---|---|---|
 | `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan names or repo-relative plan paths; runtime defaults to Main's (`sdk` pi) |
 | `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
-| `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked → resume (new round) |
+| `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked after review → feedback for the one final revision (no further review; ends as `done`) · parked out of budget → resume with a fresh budget |
 | `worq_cancel` | `ref` or `all` | parked → close · live → cancel; kills subagents, review, processes; removes worktree; keeps branch |
 
-States: `starting · running · waiting · reviewing · parked · closed · cancelled · failed`.
+States: `starting · running · waiting · reviewing · parked · done · closed · cancelled · failed`. `done` = final revision submitted after review, not re-reviewed: verify the exact candidate before reporting success or merging.
 
-Parked agents hold no slot; resuming needs one. Idle parked agents close after `limits.idleMinutes`. Budget exhaustion parks the agent unreviewed with its last response and a pinned partial commit; Main may resume it with a fresh budget.
+Parked agents hold no slot; resuming needs one. Idle parked agents close after `limits.idleMinutes`. Budget exhaustion parks the agent unreviewed with its last response and a pinned partial commit; Main may resume it with a fresh budget (same phase, never an extra review).
 Verdicts: `pass · findings · inconclusive` (crash/timeout/invalid → inconclusive, never pass).
 
 ## Profiles

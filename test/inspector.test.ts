@@ -51,7 +51,7 @@ test('PQ gets a width-safe question preview and complete detail', () => {
   assert.doesNotMatch(panel.render(120).join('\n'), /private-owner|private-child/);
 });
 
-test('plan revisions bind exact reviewed bytes per round; keep private text out of the projection', async t => {
+test('the one review binds the exact reviewed bytes; feedback revision is not re-reviewed; private text stays out of the projection', async t => {
   const { root, state, dir } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const data = new Telemetry();
@@ -70,17 +70,15 @@ test('plan revisions bind exact reviewed bytes per round; keep private text out 
   const agent = await worq.spawn('plan', task, { title: 'Inspect plans' });
   await next('parked', agent.ref);
   const first = await readFile(join(root, agent.plan!.path), 'utf8');
-  worq.send(agent.ref, 'Try a second round');
-  await next('parked', agent.ref, 2);
+  worq.send(agent.ref, 'Try a final revision');
+  await next('done', agent.ref);
   const second = await readFile(join(root, agent.plan!.path), 'utf8');
   assert.notEqual(first, second);
-  assert.equal(data.settled.length, 2);
-  for (const [i, bytes] of [first, second].entries()) {
-    assert.equal(captured[i], bytes);
-    assert.deepEqual(data.settled[i].identity, { digest: createHash('sha256').update(bytes).digest('hex') });
-    assert.equal(data.settled[i].round, i + 1);
-  }
-  const safe = JSON.stringify({ revisions: data.settled, activity: data.activity, rows: [...data.rows] });
+  assert.deepEqual(captured, [first], 'one review, of the first submission');
+  const revision = data.live.get(agent.id)!;
+  assert.deepEqual(revision.identity, { digest: createHash('sha256').update(first).digest('hex') });
+  assert.equal(revision.status, 'pass');
+  const safe = JSON.stringify({ revisions: [...data.live.values()], activity: data.activity, rows: [...data.rows] });
   assert.doesNotMatch(safe, /Printable Private Task Mango|printable-private-task-mango|Reviewer Secret|Report Secret|\.agents\/plans\//);
   assert.match(worq.list(agent.ref), /Printable Private Task Mango/);
 });
@@ -90,7 +88,7 @@ test('bounded layouts and independent evidence retention through out-of-order to
   for (let i = 0; i < 22; i++) {
     const key = `run${i}`;
     data.add(key, i.toString(16).padStart(4, '0'), 'plan');
-    data.revision({ run: key, round: 1, identity: { digest: 'f'.repeat(64) }, status: 'pass' }, true);
+    data.revision({ run: key, identity: { digest: 'f'.repeat(64) }, status: 'pass' });
     if (i > 0) data.live.delete(key);
   }
   data.state('run0', 'waiting', 'ask');
@@ -106,10 +104,8 @@ test('bounded layouts and independent evidence retention through out-of-order to
   sink({ end: 'a', outcome: { kind: 'exit', code: 7, stdout: true, stderr: false } });
   assert.equal(data.activity.length, 240);
   assert.ok(data.activityGap > 0);
-  assert.equal(data.evidenceGap, 2);
-  assert.equal(data.settled.length, 20);
-  assert.equal(data.live.get('run0')?.round, 1);
-  assert.equal(new Telemetry().settled.length, 0);
+  assert.equal(data.live.get('run0')?.status, 'pass');
+  assert.equal(data.live.size, 1);
   let closed = false;
   const panel = new Inspector(data, undefined, theme, () => 30, () => {}, () => { closed = true; });
   for (const width of [1, 4, 22, 79, 80, 140]) {
@@ -119,7 +115,7 @@ test('bounded layouts and independent evidence retention through out-of-order to
   }
   assert.match(panel.render(140).join('\n'), /exit 7/);
   panel.handleInput('\t');
-  assert.match(panel.render(30).join('\n'), /Evidence gap/);
+  assert.match(panel.render(30).join('\n'), /Review pass/);
   panel.handleInput('\x1b');
   assert.equal(closed, false);
   panel.handleInput('\x1b');
@@ -222,19 +218,14 @@ test('inspector groups interleaved children under owners and preserves selection
   panel.handleInput('\x1b[B');
   panel.handleInput('\x1b[B');
   data.add('a2', 'aaaa', 'PQ d2', 'a');
-  data.add('r1', 'aaaa', 'review', 'a', { round: 1 });
-  data.add('r2', 'aaaa', 'review', 'a', { round: 2 });
+  data.add('r1', 'aaaa', 'review', 'a', true);
   for (const width of [20, 40, 80, 81, 120]) {
     const lines = panel.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `bounded at ${width}`);
     const roster = lines.slice(2).map(line => line.split(' │ ')[0]!.trimEnd());
     assert.deepEqual(roster.filter(line => line.includes('↳')).map(line => line.trim()), [
       '↳ PQ d1 queued', '↳ PQ d2 queued',
-      ...['R1', 'R2'].map(id => {
-        const label = roster.find(line => line.includes(`↳ ${id} `))?.trim();
-        assert.match(label ?? '', /^↳ R\d+ (?:review )?queued$/);
-        return label;
-      }),
+      '↳ review queued',
       '↳ PQ d1 queued',
     ], `child labels and order at ${width}`);
     assert.match(roster.filter(line => line.startsWith('›')).join('\n'), /^› bbbb\b/);

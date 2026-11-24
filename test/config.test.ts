@@ -85,11 +85,11 @@ test("config: an ignored launch block alone does not block launches", async (t) 
   await agent.cancel();
 });
 
-test("verify:false is refused before admission; review follows the package", async (t) => {
+test("verify:false is refused before admission; every agent is reviewed once", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const worq = new Worq({ driver: fakeHarness(FULL_CAPS, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
-  await assert.rejects(worq.spawn("execute", "x", { title: "No review", verify: false }), (error) => error instanceof Block && error.code === "verify" && /review follows the package/.test(error.message));
+  await assert.rejects(worq.spawn("execute", "x", { title: "No review", verify: false }), (error) => error instanceof Block && error.code === "verify" && /exactly one independent review/.test(error.message));
   assert.equal(worq.size, 0);
 });
 

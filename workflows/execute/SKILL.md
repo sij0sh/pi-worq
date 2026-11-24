@@ -2,7 +2,6 @@
 name: execute
 description: edits its own git worktree on branch worq/<name>; one independent review checks the exact commit
 access: write
-review: true
 disable-model-invocation: false
 ---
 
