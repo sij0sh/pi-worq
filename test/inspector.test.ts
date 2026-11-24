@@ -21,6 +21,28 @@ test('PQ gets a width-safe question preview and complete detail', () => {
     assert.ok(lines.some(line => /^\s*↳ Which/.test(line)));
   }
   assert.match(dock.render(84).join('\n'), /● Check greeting/);
+  const title = 'Check why the greeting appears twice';
+  data.rows.get('private-owner')!.title = title;
+  const [,, narrowOwner, narrowChild] = dock.render(18);
+  assert.match(narrowOwner!, /^Check why/);
+  assert.match(narrowChild!, /^↳ Which source/);
+  data.sink('private-owner')({ start: 'task', name: 'read_file' });
+  data.sink('private-child')({ start: 'task', name: 'search' });
+  for (const [width, activity, age] of [[64, 30, 46], [140, 84, 104]] as const) {
+    const [, labels, owner, child] = dock.render(width);
+    assert.equal(labels!.indexOf('ACTIVITY'), activity);
+    assert.equal(labels!.indexOf('AGE', activity), age);
+    for (const [line, tool] of [[owner!, 'read_file'], [child!, 'search']] as const) {
+      const start = line.indexOf(tool);
+      assert.ok(start >= 0);
+      assert.equal(visibleWidth(line.slice(0, start)), activity);
+    }
+    if (width === 140) {
+      assert.ok(owner!.includes(title));
+      assert.ok(child!.includes(question));
+    }
+  }
+  data.rows.get('private-owner')!.title = 'Check greeting';
   const owner = new Inspector(data, 'check-greeting', theme, () => 24, () => {}, () => {}, 'private-owner');
   assert.match(owner.render(120).join('\n'), /Check greeting \(check-greeting\)/);
   const panel = new Inspector(data, 'check-greeting', theme, () => 24, () => {}, () => {}, 'private-child');

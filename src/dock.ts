@@ -28,7 +28,11 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     const live = `${rows.filter(working).length} live${more}`;
     const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${live} · WORQ`) : band(control(`${folded()?'[+]':'[−]'} [Inspect]`) + `  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
     if (folded()) return [header];
-    const sizes = w >= 74 ? [22,w-58,7,9,7,7,6] : w >= 45 ? [17,w-35,8,10] : [Math.floor(w*.5),w-Math.floor(w*.5)];
+    // Keep Activity readable, but give extra space to titles and PQ questions.
+    const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);
+    const sizes = w >= 74 ? [w-36-activityWidth,activityWidth,7,9,7,7,6]
+      : w >= 45 ? [w-18-activityWidth,activityWidth,8,10]
+      : [Math.floor(w*.5),w-Math.floor(w*.5)];
     const table = (values:string[]) => sizes.map((n,i)=>cell(values[i]??'',n)).join('');
     const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT','ACTIVITY','AGE','CACHE','TOK/S','TURNS','SKILLS']);
     return [header,theme.fg('muted',labels),...visible.map(r=>{
