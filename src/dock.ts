@@ -39,8 +39,10 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
       if(w < 35 && r.question && r.parent) return cell(`↳ ${r.question}`,w);
-      if(w < 35) return cell(`${r.title ?? r.ref} ${r.actor ? `${r.state} Main` : `${r.role} ${r.state}`}`,w);
-      const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : r.title ?? `${r.role} ${r.ref}`)}`;
+      const showKind = !r.parent && r.title != null && (r.role === 'plan' || r.role === 'execute');
+      const title = showKind ? `${r.role}: ${r.title}` : r.title;
+      if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : showKind ? r.state : `${r.role} ${r.state}`}`,w);
+      const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;
       const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
       const rest = table(['',activity,age,cache,speed,turns,String(r.setup?.skills.length??'—')]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;

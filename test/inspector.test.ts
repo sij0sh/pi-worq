@@ -20,11 +20,11 @@ test('PQ gets a width-safe question preview and complete detail', () => {
     assert.ok(lines.every(line => visibleWidth(line) <= width));
     assert.ok(lines.some(line => /^\s*↳ Which/.test(line)));
   }
-  assert.match(dock.render(84).join('\n'), /● Check greeting/);
+  assert.match(dock.render(84).join('\n'), /● plan: Check greeting/);
   const title = 'Check why the greeting appears twice';
   data.rows.get('private-owner')!.title = title;
   const [,, narrowOwner, narrowChild] = dock.render(18);
-  assert.match(narrowOwner!, /^Check why/);
+  assert.match(narrowOwner!, /^plan: Check why/);
   assert.match(narrowChild!, /^↳ Which source/);
   data.sink('private-owner')({ start: 'task', name: 'read_file' });
   data.sink('private-child')({ start: 'task', name: 'search' });
@@ -121,6 +121,14 @@ test('bounded layouts and independent evidence retention through out-of-order to
   assert.equal(closed, true);
 });
 
+
+test('dock prefixes an execute title without repeating the kind in compact view', () => {
+  const data = new Telemetry();
+  data.add('owner', 'abcd', 'execute', undefined, undefined, undefined, 'Fix it');
+  const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
+  assert.equal(dock.render(34)[2]!.trim(), 'execute: Fix it starting');
+  assert.match(dock.render(84)[2]!, /^ ● execute: Fix it\s+starting/);
+});
 
 test('20-column dock retains actor and status without counting failures as live', () => {
   const data = new Telemetry();
