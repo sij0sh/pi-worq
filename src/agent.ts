@@ -8,15 +8,15 @@ import type { Limits } from "./config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, slug, workText, type ReviewRecord } from "./render.ts";
-import { Conversation, tool, type Driver, type Tool } from "./session.ts";
+import { Conversation, WorkerHandoff, tool, type Driver, type Tool } from "./session.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
 
 import { label, type Revision, type Telemetry } from './telemetry.ts';
 
-export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed";
-export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
-export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed"; ref: string; text: string }
+export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed" | "handed-off";
+export const ENDED: AgentState[] = ["closed", "cancelled", "failed", "handed-off"];
+export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed" | "handed-off"; ref: string; text: string }
 export interface Attachment { ref: string; path?: string; text: string }
 export interface Delegation { role?: string; id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
@@ -80,6 +80,8 @@ export class Agent {
   finished?: number;
   error?: string;
   candidate?: string;
+  handoff?: { path?: string; partial?: string; error?: string; inline?: string };
+  private unresolved?: string;
   diffstat?: string;
   plan?: { path: string; text: string };
   work?: string;
@@ -96,6 +98,7 @@ export class Agent {
   private next?: { resolve(text: string): void; reject(error: unknown): void };
   private revision?: Revision;
   private planRound?: number;
+  private priorReviewRound?: number;
   private closing = false;
   private asks = 0;
   private spent = 0;
@@ -135,6 +138,13 @@ export class Agent {
       if (headroom > 0) this.budgetNotice("checkpoint", `${left} further run turns authorized; ${headroom} available for explicit approval via /continue N.`);
       else this.warning(`${left} further run turns authorized; no additional turns can be granted.`);
     }
+  };
+  private admitCloseout = () => {
+    // Reviewers start after submission and settle before another worker round.
+    if (this.signal.aborted || this.state !== "running" || this.openPqs ||
+        this.deps.limits.runTurns + this.grant - this.spent < 2) return false;
+    this.spent++;
+    return true;
   };
   private readonly controller = new AbortController();
   private readonly deps: AgentDeps;
@@ -179,7 +189,7 @@ export class Agent {
       budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
       worktree: this.work, branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       attachments: this.attachments.map((a) => a.ref), delegations: this.delegations.map(({ id, question, state, error }) => ({ id, question, state, error })),
-      reviews: this.reviews, started: this.started, finished: this.finished,
+      handoff: this.handoff, reviews: this.reviews, started: this.started, finished: this.finished,
     };
   }
 
@@ -228,6 +238,7 @@ export class Agent {
   private async run() {
     const { prompts, limits, root, driver } = this.deps;
     const signal = this.signal;
+    let handoff: WorkerHandoff | undefined;
     let box: ReturnType<typeof processTools> | undefined;
     try {
       signal.throwIfAborted();
@@ -245,7 +256,7 @@ export class Agent {
       }
       const write = this.kind.access === "write";
       this.conversation = new Conversation({
-        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
+        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, admitCloseout: this.admitCloseout, pending: () => this.openPqs,
         spec: { observe: this.deps.telemetry?.sink(this.id), profile: "agent", name: `agent.${this.kind.name}`, cwd, tools, system: `${prompts.protocol}\n\n${this.kind.prompt}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
@@ -259,9 +270,11 @@ export class Agent {
         this.deps.telemetry?.live.delete(this.id);
         this.revision = undefined;
         this.round++;
+        this.unresolved = undefined;
         this.set("running");
         const report = await this.conversation.run(message);
         await this.review(report);
+        this.priorReviewRound = this.round;
         message = await new Promise<string>((resolve, reject) => {
           this.next = { resolve, reject };
           if (signal.aborted) reject(signal.reason);
@@ -270,17 +283,49 @@ export class Agent {
       }
     } catch (error) {
       if (signal.aborted && signal.reason?.code !== "run-limit") this.state = this.closing ? "closed" : "cancelled";
-      else {
+      else if (!signal.aborted && error instanceof WorkerHandoff) {
+        handoff = error;
+        this.state = "handed-off";
+      } else {
         this.error = errorText(signal.reason ?? error);
         this.state = "failed";
       }
     } finally {
       this.controller.abort(new Block("ended", "Agent ended"));
+      const open = this.delegations.filter(d => d.state === "running").map(d => ({ id: d.id, question: d.question }));
       for (const d of this.delegations) if (d.state === "running") d.state = "cancelled";
       this.ask?.resolve(UNANSWERED);
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
-      if (this.work && this.project) {
+      if (handoff) {
+        this.handoff = handoff.quiescent ? {} : { error: "SDK quiescence could not be confirmed" };
+        if (this.work) {
+          try {
+            if (this.error || this.handoff.error) throw new Error([this.handoff.error, this.error].filter(Boolean).join("; "));
+            this.handoff.partial = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: unreviewed handoff`);
+          } catch (error) { this.handoff.error = errorText(error); }
+        }
+        const evidence = JSON.stringify({
+          status: "handed-off", round: this.round, objective: this.task, trigger: handoff.trigger,
+          workerTurns: handoff.turns, sharedTurns: { spent: this.spent, allowance: limits.runTurns + this.grant },
+          unreviewed: { ordinary: handoff.ordinary || "No completed ordinary assistant text observed.", closeout: handoff.closeout || undefined, unresolvedQuestion: this.unresolved, openPqs: open, partialCommit: this.handoff.partial },
+          priorReview: { round: this.priorReviewRound, candidate: this.candidate, plan: this.plan?.path, planRound: this.planRound, reviews: this.reviews },
+          recovery: { worktree: this.work, branch: this.branch, error: this.handoff.error, cleanup: this.work ? "Main owns later cleanup; ignored files remain in the worktree." : undefined },
+        }, null, 2);
+        const file = join(this.dir!, `handoff-${this.round}.json`);
+        try {
+          writeFileSync(`${file}.tmp`, evidence + "\n", { mode: 0o600 });
+          renameSync(`${file}.tmp`, file);
+          this.handoff.path = file;
+        } catch (error) {
+          this.handoff.error = [this.handoff.error, `Handoff write failed: ${errorText(error)}`].filter(Boolean).join("; ");
+          this.handoff.inline = JSON.stringify({
+            objective: this.task.slice(0, 1000), trigger: handoff.trigger,
+            ordinary: handoff.ordinary.slice(-4000) || "No completed ordinary assistant text observed.",
+            closeout: handoff.closeout.slice(-2000) || undefined, unresolvedQuestion: this.unresolved,
+          }, null, 2);
+        }
+      } else if (this.work && this.project) {
         // Never remove the only copy of interrupted work.
         try {
           const reviewed = this.candidate;
@@ -300,6 +345,11 @@ export class Agent {
       this.finished = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
+      if (this.handoff) this.deps.notify({ type: "handed-off", ref: this.ref, text: [
+        `[worq ${this.ref}] handed-off (round ${this.round}); partial work is unreviewed.`,
+        this.handoff.path, this.candidate && `Prior candidate: ${this.candidate}`, this.plan && `Prior plan: ${this.plan.path}`, this.work && `Retained worktree: ${this.work} (Main owns cleanup).`,
+        this.handoff.partial && `Unreviewed recovery commit: ${this.handoff.partial}`, this.handoff.error, this.handoff.inline,
+      ].filter(Boolean).join("\n") });
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
       if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
@@ -360,7 +410,7 @@ export class Agent {
         try {
           return await new Promise<string>((resolve, reject) => {
             this.ask = { question, resolve };
-            timer = setTimeout(() => resolve(UNANSWERED), this.deps.limits.askMinutes * 60_000);
+            timer = setTimeout(() => { this.unresolved = question; resolve(UNANSWERED); }, this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
             this.deps.notify({ type: "ask", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });

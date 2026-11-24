@@ -4,7 +4,7 @@ import type { Theme } from '@earendil-works/pi-coding-agent';
 import type { Outcome, Row, Telemetry } from './telemetry.ts';
 
 const age = (time: number) => elapsed(Date.now()-time);
-const active = (r: Row) => !['closed', 'failed', 'cancelled', 'done', 'answered'].includes(r.state);
+const active = (r: Row) => !['closed', 'handed-off', 'failed', 'cancelled', 'done', 'answered'].includes(r.state);
 const headline = (r: Row) => `@${r.ref} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
 const fit = (s: string, w: number) => w > 0 ? truncateToWidth(s, w, w >= 3 ? '…' : '') : '';
 const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' : active(r) ? 'accent' : 'muted';

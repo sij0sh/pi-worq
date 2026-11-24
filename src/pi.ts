@@ -133,11 +133,15 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         failed = event.message.stopReason === "error";
         const said = (event.message.content as { type: string; text?: string }[]).flatMap((c) => c.type === "text" && c.text?.trim() ? [c.text] : []).join(" ");
-        if (said) spec.log(said);
+        if (said) {
+          spec.log(said);
+          if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") spec.completedText?.(said);
+        }
       }
     });
     return {
-      async prompt(text) {
+      async prompt(text, options) {
+        if (options?.toolFree) session.setActiveToolsByName([]);
         failed = false;
         let started = false;
         try { await session.prompt(text, { preflightResult: (state) => { started = state === "started"; } }); }

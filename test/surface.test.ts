@@ -115,6 +115,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
         await turn.tool("submit", { ...planSubmission, summary: "Use one direct report, no background process." });
         return;
       }
+      if (!turn.text.startsWith("{") || JSON.parse(turn.text).task === "Hand it off") return;
       if (JSON.parse(turn.text).task === "Fail it") throw new Error("Fixture failure");
       if (JSON.parse(turn.text).task === "Plan it") {
         assert.match(await turn.tool("ask_main", { question: "Which greeting?" }), /Use HELLO/);
@@ -231,6 +232,12 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
   assert.match(widget?.render(20).join("\n") ?? "", new RegExp(`@${failedRun.details.ref} failed Main`));
   assert.match(widget?.render(20)[0] ?? "", /0 live/);
+  const handed = await spawn.execute("id", { kind: "plan", task: "Hand it off" }, undefined, undefined, ctx);
+  const handoffNotices = () => notices.filter(n => n.message.details.type === "handed-off" && n.message.details.ref === handed.details.ref);
+  for (let i = 0; i < 100 && !handoffNotices().length; i++) await new Promise(r => setTimeout(r, 15));
+  assert.equal(handoffNotices().length, 1);
+  assert.deepEqual(handoffNotices()[0].options, { triggerTurn: false });
+  assert.match((await run(process.execPath, [cli, "list", handed.details.ref], { env })).stdout, /handed-off[\s\S]*Unreviewed handoff:/);
   await handlers.session_shutdown({}, ctx);
   assert.equal(widget, undefined);
   delete process.env.WORQ_STATE_DIR;

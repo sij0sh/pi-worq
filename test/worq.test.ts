@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { loadPrompts } from "../src/prompts.ts";
@@ -178,7 +178,7 @@ test("ask_main parks the agent until Main answers; steering reaches a running ag
       await turn.tool("submit", planSubmission);
     },
     reviewer: (turn) => turn.tool("report", pass).then(() => {}),
-  });
+  }, { agentTurns: 1 });
   const agent = await worq.spawn("plan", "Change the greeting case");
   const ask = await next("ask", agent.ref);
   assert.match(ask.text, /Title case or upper case\?/);
@@ -298,4 +298,247 @@ test("cancel retains uncommitted work when git cannot pin", async t => {
   await next("ask", agent.ref); await worq.cancel(agent.ref);
   assert.equal(await readFile(join(agent.work!, "unfinished"), "utf8"), "recover me");
   assert.match(worq.list(agent.ref), /Worktree retained/);
+});
+
+
+for (const runTurns of [1, 2]) test(`worker preserves planner text with ${runTurns - 1} shared turns remaining`, async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let requests = 0;
+  const { worq, events } = setup(root, state, {
+    "agent.plan": (turn) => {
+      requests++;
+      turn.spec.completedText?.("Observed greeting in app.py");
+      turn.spec.completedText?.(" ");
+    },
+  }, { agentTurns: 1, runTurns });
+  const agent = await worq.spawn("plan", "Inspect greeting");
+  await agent.done;
+  assert.equal(agent.state, "handed-off");
+  assert.equal(requests, 1);
+  assert.equal(agent.view().budget.spent, 1);
+  assert.equal(agent.plan, undefined);
+  assert.equal(events.filter(e => e.type === "handed-off").length, 1);
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.unreviewed.ordinary, "Observed greeting in app.py");
+  assert.match(worq.list(agent.ref), /Unreviewed handoff:/);
+});
+
+test("eligible closeout debits one turn, fences tools, and retains ignored execute output", async (t) => {
+  const { dir, root, state, git } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let requests = 0;
+  const { worq } = setup(root, state, {
+    "agent.execute": async (turn) => {
+      if (++requests === 1) {
+        await writeFile(join(turn.spec.cwd, "app.py"), "updated");
+        await writeFile(join(turn.spec.cwd, "new.txt"), "new");
+        await mkdir(join(turn.spec.cwd, ".agents"), { recursive: true });
+        await writeFile(join(turn.spec.cwd, ".agents", "ignored.txt"), "ignored");
+        turn.spec.completedText?.("Ordinary evidence");
+      } else {
+        assert.match(turn.text, /Do not use tools/);
+        assert.match(await turn.tool("read_file", { path: "app.py" }), /Tool dispatch is closed/);
+        turn.spec.completedText?.("Closeout evidence");
+      }
+    },
+  }, { agentTurns: 1, runTurns: 3 });
+  const agent = await worq.spawn("execute", "Edit greeting");
+  await agent.done;
+  assert.equal(agent.state, "handed-off");
+  assert.equal(requests, 2);
+  assert.equal(agent.view().budget.spent, 2);
+  assert.equal(agent.candidate, undefined);
+  assert.equal(await readFile(join(agent.work!, ".agents", "ignored.txt"), "utf8"), "ignored");
+  assert.equal(git("show", `${agent.handoff!.partial}:app.py`).toString(), "updated");
+  assert.equal(git("show", `${agent.handoff!.partial}:new.txt`).toString(), "new");
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.unreviewed.ordinary, "Ordinary evidence");
+  assert.equal(handoff.unreviewed.closeout, "Closeout evidence");
+});
+
+
+test("final ordinary ask uses its own deadline and records an unresolved question", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let asked!: () => void;
+  const parked = new Promise<void>(resolve => { asked = resolve; });
+  let requests = 0;
+  let answer = "";
+  const { worq } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      requests++;
+      const pending = turn.tool("ask_main", { question: "Which API is authorized?" });
+      asked();
+      answer = await pending;
+    },
+  }, { agentTurns: 1, runTurns: 2, askMinutes: 2 });
+  const agent = await worq.spawn("plan", "Check authorization");
+  await parked;
+  t.mock.timers.tick(119_999);
+  assert.equal(agent.state, "waiting");
+  assert.equal(requests, 1);
+  t.mock.timers.tick(1);
+  await agent.done;
+  assert.match(answer, /did not answer in time/);
+  assert.equal(agent.state, "handed-off");
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.unreviewed.unresolvedQuestion, "Which API is authorized?");
+});
+
+test("automatic over-cap turn fences tools and skips model closeout", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let requests = 0;
+  const { worq } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      requests++;
+      if (requests === 1) {
+        turn.spec.completedText?.("Kept ordinary text");
+        turn.steered.push("automatic continuation");
+      } else {
+        turn.spec.completedText?.("Discarded late text");
+        assert.match(await turn.tool("submit", planSubmission), /Tool dispatch is closed/);
+      }
+    },
+  }, { agentTurns: 1, runTurns: 5 });
+  const agent = await worq.spawn("plan", "Test automatic turn accounting");
+  await agent.done;
+  assert.equal(agent.state, "handed-off");
+  assert.equal(requests, 2);
+  assert.equal(agent.view().budget.spent, 1);
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.trigger, "automatic turn admission");
+  assert.equal(handoff.unreviewed.ordinary, "Kept ordinary text");
+});
+
+
+test("closeout timeout falls back to ordinary evidence and fences late callbacks", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let start!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>(resolve => { start = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let requests = 0;
+  const { worq, events } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      if (++requests === 1) turn.spec.completedText?.("Ordinary result");
+      else {
+        start();
+        await blocked;
+        turn.spec.completedText?.("Late closeout");
+      }
+    },
+  }, { agentTurns: 1, runTurns: 3 });
+  const agent = await worq.spawn("plan", "Inspect greeting");
+  await started;
+  t.mock.timers.tick(15_000);
+  await agent.done;
+  release();
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.unreviewed.ordinary, "Ordinary result");
+  assert.equal(handoff.unreviewed.closeout, undefined);
+  assert.equal(events.filter(e => e.type === "handed-off").length, 1);
+});
+
+test("handoff artifact write failure publishes inline evidence once", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { worq, events } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      const agent = worq.all()[0];
+      await mkdir(join(state, agent.id, "handoff-1.json.tmp"));
+      turn.spec.completedText?.("Recoverable text");
+    },
+  }, { agentTurns: 1, runTurns: 2 });
+  const agent = await worq.spawn("plan", "Inspect greeting");
+  await agent.done;
+  assert.equal(agent.state, "handed-off");
+  assert.ok(agent.finished);
+  assert.equal(agent.handoff?.path, undefined);
+  const notices = events.filter(e => e.type === "handed-off");
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].text, /Handoff write failed:[\s\S]*Recoverable text/);
+});
+
+
+test("an open PQ blocks optional closeout with exactly two shared turns left", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let entered!: () => void;
+  let unblock!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { unblock = resolve; });
+  let workerRequests = 0;
+  const { worq } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      workerRequests++;
+      await turn.tool("delegate", { question: "What does app.py print?", why: "Check evidence" });
+      await started;
+    },
+    subagent: async () => { entered(); await blocked; },
+  }, { agentTurns: 1, runTurns: 4 });
+  const agent = await worq.spawn("plan", "Inspect greeting");
+  await agent.done;
+  unblock();
+  assert.equal(agent.state, "handed-off");
+  assert.equal(workerRequests, 1);
+  assert.equal(agent.view().budget.spent, 2);
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.unreviewed.openPqs[0].id, "d1");
+});
+
+
+test("a later handoff keeps the prior reviewed SHA separate from partial work", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { worq, next } = setup(root, state, {
+    "agent.execute": async (turn) => {
+      if (turn.text.startsWith("{")) {
+        await writeFile(join(turn.spec.cwd, "app.py"), "reviewed");
+        await turn.tool("submit", { summary: "First candidate" });
+      } else if (turn.text.startsWith("Main reviewed")) {
+        await writeFile(join(turn.spec.cwd, "app.py"), "partial");
+      }
+    },
+    reviewer: async (turn) => { await turn.tool("report", pass); },
+  }, { agentTurns: 2 });
+  const agent = await worq.spawn("execute", "Change greeting");
+  await next("review-ready", agent.ref);
+  const prior = agent.candidate;
+  assert.ok(prior);
+  worq.send(agent.ref, "Refine the greeting");
+  await agent.done;
+  assert.equal(agent.state, "handed-off");
+  assert.equal(agent.candidate, prior);
+  assert.notEqual(agent.handoff?.partial, prior);
+  const handoff = JSON.parse(await readFile(agent.handoff!.path!, "utf8"));
+  assert.equal(handoff.priorReview.candidate, prior);
+  assert.equal(handoff.unreviewed.partialCommit, agent.handoff?.partial);
+  assert.ok(handoff.priorReview.reviews.length);
+});
+
+
+test("caller cancellation during closeout remains cancellation", async (t) => {
+  const { dir, root, state } = await repo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let enter!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>(resolve => { enter = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const { worq, events } = setup(root, state, {
+    "agent.plan": async (turn) => {
+      if (!turn.text.startsWith("{")) { enter(); await blocked; }
+    },
+  }, { agentTurns: 1, runTurns: 3 });
+  const agent = await worq.spawn("plan", "Test cancellation");
+  await started;
+  await worq.cancel(agent.ref);
+  release();
+  assert.equal(agent.state, "cancelled");
+  assert.equal(agent.handoff, undefined);
+  assert.ok(!events.some(e => e.type === "handed-off"));
 });
