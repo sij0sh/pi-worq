@@ -158,7 +158,7 @@ async function spawnFailure(fail: unknown, role: string, selected = true): Promi
   const config = await configOf(fail);
   const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), config, state: join(dir, "state"), cwd: dir, notify() {} });
   // `dir` is not a git repository: reaching repository() would raise something else.
-  await assert.rejects(worq.spawn("plan", "plan it"),
+  await assert.rejects(worq.spawn("plan", "plan it", { title: "Plan work" }),
     (error: unknown) => selected ? error instanceof Block && error.code === "capability" && error.message.includes(role) : error instanceof Error && !(error instanceof Block && error.code === "capability"),
     `spawn fails on ${role} before any work`);
 }

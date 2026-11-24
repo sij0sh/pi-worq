@@ -10,7 +10,7 @@ const usage = `Usage: worq [--pid N] <command>
   sessions                    Pi sessions with Worq loaded
   list [ref]                  agents, or one agent in full
   log <ref> [-f]              agent activity (-f follows)
-  spawn <kind> [--mode fast|thorough] <task>         start an agent
+  spawn <kind> --title "Short title" [--attach <plan>]... [--mode fast|thorough] <task>         start an agent
   send <ref> <text>           steer, answer, or start the next round
   cancel <ref|all>            close or cancel; branch kept`;
 const ctl = join(statePath(), "ctl");
@@ -63,8 +63,20 @@ async function main(argv) {
   switch (command) {
     case "list": return print("list", first ? { ref: first } : {});
     case "spawn": {
-      const mode = rest[0] === "--mode" ? rest.splice(0, 2)[1] : undefined;
-      return print("spawn", { kind: first, mode, task: rest.join(" ") });
+      let title, mode;
+      const attach = [];
+      while (rest[0]?.startsWith("--")) {
+        const flag = rest.shift();
+        if (flag === "--") break;
+        if (!["--title", "--mode", "--attach"].includes(flag)) throw new Error(`Unknown spawn option ${flag}`);
+        const value = rest.shift();
+        if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+        if (flag === "--title") title = value;
+        if (flag === "--mode") mode = value;
+        if (flag === "--attach") attach.push(value);
+      }
+      if (!title) throw new Error("spawn requires --title");
+      return print("spawn", { kind: first, title, attach, mode, task: rest.join(" ") });
     }
     case "send": return print("send", { ref: first, text: rest.join(" ") });
     case "cancel": return print("cancel", { ref: first });

@@ -169,8 +169,9 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(TOOLS.every((name) => active.includes(name)), "resume restores /worq");
 
   const spawn = tools.find((x) => x.name === "worq_spawn")!;
-  const result = await spawn.execute("id", { kind: "plan", task: "Plan it" }, undefined, undefined, ctx);
-  const ref = /agent ([0-9a-f]{4})/.exec(result.content[0].text)![1];
+  const result = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Plan it" }, undefined, undefined, ctx);
+  const ref = result.details.ref;
+  assert.equal(ref, "surface-test");
   assert.deepEqual(result.details, { ref });
   // The CLI reaches the same operations through the control socket.
   const run = promisify(execFile);
@@ -191,7 +192,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.match(renderNotice!(durable, { expanded: true }, theme).render(120).join(" "), /Printable legacy-only detail/);
   await command!("off", ctx);
   assert.ok(active.includes("worq_send") && !active.includes("worq_spawn"));
-  await assert.rejects(spawn.execute("id", { kind: "plan", task: "blocked" }, undefined, undefined, ctx), /off/);
+  await assert.rejects(spawn.execute("id", { kind: "plan", title: "Surface test", task: "blocked" }, undefined, undefined, ctx), /off/);
   await command!(`send ${ref} Use HELLO`, ctx);
   const ready = await waitFor("review-ready");
   await inspect!(ref, inspectorCtx);
@@ -212,8 +213,9 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(!active.some(name => name.startsWith("worq_")));
   await command!("", ctx);
   assert.ok(active.includes("worq_spawn"));
-  const fast = await spawn.execute("id", { kind: "plan", mode: "fast", task: "Simplify the report" }, undefined, undefined, ctx);
-  const fastRef = fast.details.ref;
+  const fastRef = "surface-test-2";
+  const launched = await run(process.execPath, [cli, "spawn", "plan", "--title", "Surface test", "--attach", ref, "--mode", "fast", "--attach", `.agents/plans/plan-${ref}.md`, "Simplify the report"], { env });
+  assert.match(launched.stdout, /Surface test \(surface-test-2\).*plan-surface-test\.md/);
   const waitForRound = async (round: number) => {
     const ready = () => notices.some(({ message }) => message.details.ref === fastRef && message.details.type === "review-ready" && message.content.includes(`round ${round} review-ready`));
     for (let i = 0; i < 100 && !ready(); i++) await new Promise(r => setTimeout(r, 25));
@@ -226,10 +228,10 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.deepEqual(fastReviews, ["reviewer.subtraction", "reviewer.subtraction"]);
   assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, / · execute · /);
   await command!(`cancel ${fastRef}`, ctx);
-  const failedRun = await spawn.execute("id", { kind: "plan", task: "Fail it" }, undefined, undefined, ctx);
+  const failedRun = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Fail it" }, undefined, undefined, ctx);
   for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
-  assert.match(widget?.render(20).join("\n") ?? "", new RegExp(`@${failedRun.details.ref} failed Main`));
+  assert.match(widget?.render(34).join("\n") ?? "", new RegExp(`${failedRun.details.ref} failed Main`));
   assert.match(widget?.render(20)[0] ?? "", /0 live/);
   await handlers.session_shutdown({}, ctx);
   assert.equal(widget, undefined);
@@ -241,10 +243,10 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq } = setup(root, state, {});
   const table = ops(["plan", "execute"]);
-  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["kind", "mode", "reason", "task", "verify"]);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", task: "x" }), /kind/);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: "no" }), /verify/);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", task: "x", verify: false }), /verify:false applies to execute only/);
+  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "kind", "mode", "reason", "task", "title", "verify"]);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", title: "Surface test", task: "x" }), /kind/);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: "no" }), /verify/);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: false }), /verify:false applies to execute only/);
   assert.equal(worq.size, 0, "a refused spawn leaves no agent");
   await assert.rejects(dispatch(worq, table, "send", { ref: "zz", text: "x" }), /ref/);
   await assert.rejects(dispatch(worq, table, "nope", {}), /Unknown operation/);

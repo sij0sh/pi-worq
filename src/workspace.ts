@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Block } from "./contracts.ts";
@@ -35,7 +36,7 @@ export async function scoped(base: string, path: string, options: { missing?: bo
   }
   return cursor;
 }
-export async function writeScoped(base: string, path: string, content: string | Buffer) {
+export async function writeScoped(base: string, path: string, content: string | Buffer, options: { create?: boolean } = {}) {
   const target = await scoped(base, path, { missing: true });
   await mkdir(dirname(target), { recursive: true });
   const info = await lstat(target).catch((error) => { if (error.code !== "ENOENT") throw error; return undefined; });
@@ -44,7 +45,8 @@ export async function writeScoped(base: string, path: string, content: string | 
   const tmp = await mkdtemp(join(dirname(target), ".worq-"));
   try {
     await writeFile(join(tmp, "content"), content, { mode: info?.mode ?? 0o644 });
-    await rename(join(tmp, "content"), target);
+    if (options.create) await link(join(tmp, "content"), target);
+    else await rename(join(tmp, "content"), target);
   } finally { await rm(tmp, { recursive: true, force: true }); }
 }
 export async function readSmall(path: string, max: number) {
@@ -57,15 +59,74 @@ export async function repository(cwd: string, signal: AbortSignal) {
   return realpath(await git(cwd, signal, "rev-parse", "--show-toplevel"));
 }
 /** Private agent directory. Windows inherits ACLs from the user state directory. */
-export async function agentDirectory(base: string, id: string) {
+async function privateState(base: string) {
   await mkdir(base, { recursive: true, mode: 0o700 });
   const root = await realpath(base);
   const info = await stat(root);
   if (!windows && (info.uid !== process.getuid?.() || (info.mode & 0o077))) throw new Block("state-dir", `${root} must be private and owned by you (mode 0700)`);
-  const dir = join(root, id);
+  return root;
+}
+export async function agentDirectory(base: string, name: string) {
+  const dir = join(await privateState(base), name);
   await mkdir(dir, { mode: 0o700 });
   if (!windows) await chmod(dir, 0o700);
   return dir;
+}
+
+/** Permanent ledger shared by controllers and linked worktrees. */
+export async function reserveName(root: string, state: string, base: string) {
+  const signal = AbortSignal.timeout(10_000);
+  const common = resolve(root, await git(root, signal, "rev-parse", "--git-common-dir"));
+  const stateRoot = await privateState(state);
+  const ledger = join(common, "worq-names");
+  await mkdir(ledger, { recursive: true, mode: 0o700 });
+  const branches = (await git(root, signal, "for-each-ref", "--format=%(refname)", "refs/heads/worq")).toLowerCase().split("\n");
+  for (let suffix = 1; ; suffix++) {
+    const ref = suffix === 1 ? base : `${base}-${suffix}`;
+    const branch = `refs/heads/worq/${ref}`;
+    if (branches.some((b) => b === branch || b.startsWith(`${branch}/`) || b === "refs/heads/worq")) {
+      if (branches.includes("refs/heads/worq")) throw new Block("branch", "Branch worq blocks the worq/ namespace");
+      continue;
+    }
+    const path = await scoped(root, `.agents/plans/plan-${ref}.md`, { missing: true });
+    const existing = await lstat(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
+    if (existing) continue;
+    const claim = join(ledger, ref);
+    try { await mkdir(claim, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") continue; throw error; }
+    const dir = join(stateRoot, ref);
+    try { await mkdir(dir, { mode: 0o700 }); return { ref, dir }; }
+    catch (error) {
+      // Existing state or a failed allocation of uncertain outcome must not be reused.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") continue;
+      if (code && ["EACCES", "EPERM", "ENOENT", "ENOTDIR", "EROFS", "ENOSPC", "EDQUOT"].includes(code)) await rmdir(claim);
+      throw error;
+    }
+  }
+}
+
+export async function readPlan(root: string, path: string) {
+  if (!/^\.agents\/plans\/[a-zA-Z0-9][a-zA-Z0-9_-]*\.md$/.test(path)) throw new Block("plan", "Expected a repo-relative .agents/plans/*.md path");
+  try {
+    const target = await scoped(root, path);
+    // Open without following a swapped leaf; verify what was opened against a
+    // fresh scoped lookup before reading, also catching a swapped parent.
+    const file = await open(target, constants.O_RDONLY | (windows ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK));
+    try {
+      const info = await file.stat();
+      const current = await lstat(await scoped(root, path));
+      const resolved = await realpath(target);
+      if (!inside(root, resolved) || info.dev !== current.dev || info.ino !== current.ino || !info.isFile() || info.size > 1024 * 1024) {
+        throw new Block("plan", `Expected a regular local plan of at most 1 MiB: ${path}`);
+      }
+      return await file.readFile("utf8");
+    } finally { await file.close(); }
+  }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Block("plan", `No plan at ${path}`);
+    throw error;
+  }
 }
 
 export interface Project { root: string; baseline: string }
@@ -78,9 +139,6 @@ export async function baselineProject(root: string, signal: AbortSignal): Promis
   }
   if (await git(root, signal, "ls-files", "--", ".gitmodules")) throw new Block("submodules", "Worq does not stage projects with submodules");
   return { root, baseline: await git(root, signal, "rev-parse", "--verify", "HEAD^{commit}") };
-}
-export async function branchExists(root: string, branch: string, signal: AbortSignal) {
-  return git(root, signal, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).then(() => true, () => false);
 }
 export async function worktree(project: Project, dir: string, branch: string, signal: AbortSignal) {
   const work = join(dir, "work");

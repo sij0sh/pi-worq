@@ -9,6 +9,22 @@ import { Telemetry } from '../src/telemetry.ts';
 import { pass, planSubmission, repo, setup } from './fake.ts';
 
 const theme = { fg: (_: string, value: string) => value } as never;
+test('PQ gets a width-safe question preview and complete detail', () => {
+  const data = new Telemetry();
+  const question = 'Which source 株 explains why the greeting appears twice in the output?';
+  data.add('private-owner', 'check-greeting', 'plan');
+  data.add('private-child', 'check-greeting', 'PQ', 'private-owner', undefined, question);
+  const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
+  for (const width of [18, 36, 84]) {
+    const lines = dock.render(width);
+    assert.ok(lines.every(line => visibleWidth(line) <= width));
+    assert.match(lines.join('\n'), /Which/);
+  }
+  const panel = new Inspector(data, 'check-greeting', theme, () => 24, () => {}, () => {}, 'private-child');
+  assert.match(panel.render(120).map(line => line.split(' │ ')[1] ?? '').join('').replace(/ +/g, ' '), /Which source 株 explains why the greeting appears twice in the output\?/);
+  assert.doesNotMatch(panel.render(120).join('\n'), /private-owner|private-child/);
+});
+
 test('plan revisions bind exact reviewed bytes; keep legacy text out of the projection', async t => {
   const { root, state, dir } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -25,7 +41,7 @@ test('plan revisions bind exact reviewed bytes; keep legacy text out of the proj
     },
   }, {}, data);
   t.after(() => worq.shutdown());
-  const agent = await worq.spawn('plan', task);
+  const agent = await worq.spawn('plan', task, { title: 'Inspect plans' });
   await next('review-ready', agent.ref);
   worq.send(agent.ref, 'Try a second round');
   await next('review-ready', agent.ref, 2);
@@ -86,7 +102,7 @@ test('20-column dock retains actor and status without counting failures as live'
   data.add('failed', '0000', 'plan');
   data.state('failed', 'failed', 'failure');
   const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
-  assert.match(dock.render(20).join(' '), /0 live.*@0000 failed Main/);
+  assert.match(dock.render(20).join(' '), /0 live.*0000 failed Main/);
   assert.equal(hasGlance(data), true);
   for (let i = 1; i < 99; i++) data.add(String(i), i.toString(16).padStart(4, '0'), 'execute');
   data.state('1', 'waiting', 'ask');
@@ -98,7 +114,7 @@ test('20-column dock retains actor and status without counting failures as live'
   assert.match(dock.render(20)[0], /97 live/);
   const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
   panel.handleInput('\x1b');
-  assert.match(panel.render(20).join(' '), /@0002 rev-rdy Main/);
+  assert.match(panel.render(20).join(' '), /0002 rev-rdy Main/);
   assert.equal(hasGlance(new Telemetry()), false);
 });
 
@@ -132,10 +148,10 @@ test('inspector groups interleaved children under owners and preserves selection
       }),
       '↳ PQ d1 queued',
     ], `child labels and order at ${width}`);
-    assert.match(roster.filter(line => line.startsWith('›')).join('\n'), /^› @bbbb\b/);
+    assert.match(roster.filter(line => line.startsWith('›')).join('\n'), /^› bbbb\b/);
   }
   const roster = panel.render(65).slice(2).join('\n');
-  assert.match(roster, /@aaaa.*plan[\s\S]*↳ PQ d1[\s\S]*↳ PQ d2[\s\S]*› @bbbb.*execute[\s\S]*↳ PQ d1/);
+  assert.match(roster, /aaaa.*plan[\s\S]*↳ PQ d1[\s\S]*↳ PQ d2[\s\S]*› bbbb.*execute[\s\S]*↳ PQ d1/);
   data.sink('b')({ cache: { read: 0 } });
   panel.handleInput('\r');
   const details = panel.render(65).join('\n');
@@ -154,22 +170,22 @@ test('Activity follows across roles, pauses on scroll, and jumps live without mo
   const screen = () => panel.render(40).join('\n');
   for (let i = 0; i < 4; i++) data.sink('a')({ start: String(i), name: `older-${i}` });
   data.sink('b1')({ start: '1', name: 'newest' });
-  assert.match(screen(), /Activity.*\n[^\n]*\nLive.*\n@bbbb PQ d1 · start newest\b[^\n]*\n@aaaa · start older-3/);
+  assert.match(screen(), /Activity.*\n[^\n]*\nLive.*\nbbbb PQ d1 · start newest\b[^\n]*\naaaa · start older-3/);
   panel.handleInput('\x1b[B');
   const paused = screen();
-  assert.match(paused, /Paused · J Jump to live.*\n@aaaa · start older-3/);
+  assert.match(paused, /Paused · J Jump to live.*\naaaa · start older-3/);
   for (let i = 0; i < 240; i++) data.sink('b')({ start: String(i), name: `fresh-${i}` });
   assert.equal(screen(), paused);
   panel.handleInput('\x1b[Z');
-  assert.match(screen(), /Agents.*\n[^\n]*\n@aaaa .*plan/);
+  assert.match(screen(), /Agents.*\n[^\n]*\naaaa .*plan/);
   panel.handleInput('\t');
   assert.equal(screen(), paused);
   panel.handleInput('j');
-  assert.match(screen(), /Live.*\n@bbbb · start fresh-239/);
+  assert.match(screen(), /Live.*\nbbbb · start fresh-239/);
   data.sink('b')({ start: 'final', name: 'following' });
-  assert.match(screen(), /Live.*\n@bbbb · start following/);
+  assert.match(screen(), /Live.*\nbbbb · start following/);
   panel.handleInput('\x1b');
-  assert.match(screen(), /› @aaaa .*plan/);
+  assert.match(screen(), /› aaaa .*plan/);
 });
 
 test('filtered Activity includes only its family and handles empty history', () => {
@@ -178,8 +194,8 @@ test('filtered Activity includes only its family and handles empty history', () 
   data.add('a1', 'aaaa', 'PQ d1', 'a');
   data.add('b', 'bbbb', 'execute');
   const render = (ref: string) => new Inspector(data, ref, theme, () => 24, () => {}, () => {}).render(40).join('\n');
-  assert.match(render('aaaa'), /@aaaa PQ d1 · queued.*\n@aaaa · starting/);
-  assert.doesNotMatch(render('aaaa'), /@bbbb/);
+  assert.match(render('aaaa'), /aaaa PQ d1 · queued.*\naaaa · starting/);
+  assert.doesNotMatch(render('aaaa'), /bbbb/);
   assert.match(render('cccc'), /No activity observed/);
 });
 
@@ -200,5 +216,5 @@ test('paused Activity at 20 columns shows Jump to live without hiding navigation
   panel.handleInput('J');
   const live = panel.render(20);
   assert.equal(live[2], 'Live');
-  assert.match(live[3], /^@aaaa · start new/);
+  assert.match(live[3], /^aaaa · start new/);
 });

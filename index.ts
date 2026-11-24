@@ -22,9 +22,9 @@ const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || t
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background Pi SDK agent of a kind. Returns a ref at once; independent reviewers run automatically on submit (verify:false skips execute review only).",
+    description: "Start a background Pi SDK agent of a kind. Requires a 2–4 word title and returns an exact readable name; independent reviewers run automatically on submit (verify:false skips execute review only).",
     guidelines: [
-      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with the original request and independent review. Use fast for bounded, reversible plans; keep the full roster when distinct lenses could change a consequential decision. Do not infer write permission from a bare request.",
+      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title, the original request and independent review. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Use fast for bounded, reversible plans; keep the full roster when distinct lenses could change a consequential decision. Do not infer write permission from a bare request.",
     ],
   },
   worq_list: {
@@ -190,7 +190,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     pi.registerCommand('worq-dock', { description: 'Collapse or expand the agent dock', handler: async () => toggle() });
     async function inspect(args: string, ctx: ExtensionContext, key?: string) {
         if (closing || closeInspector) return;
-        const ref = args.trim().replace(/^@/, '').toLowerCase();
+        const ref = args.trim();
         if (args.trim() && !isRef(ref)) { say(ctx, 'Usage: /worq-inspect [ref]', 'error'); return; }
         if (ctx.mode !== 'tui') { say(ctx, 'Inspector requires a TUI. Use /worq list [ref].'); return; }
         if (ref && ![...telemetry.rows.values()].some(row => row.ref === ref)) { say(ctx, 'No such Worq ref in this session.', 'warning'); return; }

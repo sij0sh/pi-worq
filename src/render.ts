@@ -2,14 +2,13 @@ import type { PlanReport, PqAnswer, ReviewReport, Verdict, WorkReport } from "./
 
 export const one = (text: string, max = 240) => { const flat = text.replace(/\s+/g, " ").trim(); return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat; };
 export const clean = (text: string) => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]/g, "");
-export const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").split("-").slice(0, 6).join("-").slice(0, 48) || "plan";
 const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join("\n") : "- None";
 
-export function planMarkdown(input: { ref: string; kind: string; round: number; task: string; report: PlanReport }) {
+export function planMarkdown(input: { ref: string; title?: string; kind: string; round: number; task: string; report: PlanReport }) {
   const { ref, kind, round, task, report } = input;
   const decisions = report.decisions?.map((d) => `### ${d.id}\n\n- **Choice:** ${d.choice}\n- **Basis:** ${d.basis}\n- **Alternative:** ${d.alternative}\n- **Tradeoff:** ${d.tradeoff}\n- **Revisit:** ${d.revisit}`).join("\n\n");
   return [
-    `# Plan ${ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
+    `# Plan: ${input.title ?? ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
     "## Request", "", task, "", "## Summary", "", report.summary,
     ...(report.criteria?.length ? ["", "## Criteria", "", bullets(report.criteria)] : []),
     ...(decisions ? ["", "## Decisions", "", decisions] : []),
@@ -23,9 +22,9 @@ export function workText(report: WorkReport) {
   return [report.summary, report.changes?.length && `Changes:\n${bullets(report.changes)}`, report.checksRun?.length && `Checks run:\n${bullets(report.checksRun)}`,
     report.assumptions?.length && `Assumptions:\n${bullets(report.assumptions)}`, report.concerns?.length && `Concerns:\n${bullets(report.concerns)}`].filter(Boolean).join("\n\n");
 }
-export function pqMessage(id: string, question: string, answer?: PqAnswer, error?: string) {
-  if (!answer) return `[PQ ${id} failed] ${question}\n${error ?? "no answer"}\nInvestigate it yourself or proceed without it.`;
-  return [`[PQ ${id}] ${question}`, `Answer (${answer.basis}): ${answer.answer}`,
+export function pqMessage(question: string, answer?: PqAnswer, error?: string) {
+  if (!answer) return `[PQ failed] ${question}\n${error ?? "no answer"}\nInvestigate it yourself or proceed without it.`;
+  return [`[PQ] ${question}`, `Answer (${answer.basis}): ${answer.answer}`,
     answer.unresolved?.length && `Unresolved:\n${bullets(answer.unresolved)}`, answer.newQuestions?.length && `New questions:\n${bullets(answer.newQuestions)}`,
     "Integrate: what did this resolve, contradict, or newly make material?"].filter(Boolean).join("\n");
 }

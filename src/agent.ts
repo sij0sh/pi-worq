@@ -7,7 +7,7 @@ import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkRe
 import type { Limits } from "./config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
-import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, slug, workText, type ReviewRecord } from "./render.ts";
+import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
 import { Conversation, tool, type Driver, type Tool } from "./session.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
@@ -17,8 +17,8 @@ import { label, type Revision, type Telemetry } from './telemetry.ts';
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed";
 export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
 export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed"; ref: string; text: string }
-export interface Attachment { ref: string; path?: string; text: string }
-export interface Delegation { role?: string; id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
+export interface Attachment { path: string; text: string }
+export interface Delegation { role?: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
 
 /** Bounded concurrency shared by subagents and reviewers. */
@@ -64,6 +64,7 @@ export class Agent {
   readonly kind: Kind;
   readonly task: string;
   readonly attachments: Attachment[];
+  readonly title: string;
   readonly verify: boolean;
   readonly reason?: string;
   readonly mode?: "fast" | "thorough";
@@ -140,9 +141,11 @@ export class Agent {
   private readonly deps: AgentDeps;
   private start!: () => void;
 
-  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
     this.deps = deps;
     this.ref = input.ref;
+    this.title = input.title ?? input.ref;
+    this.dir = input.dir;
     this.kind = input.kind;
     this.task = input.task;
     this.attachments = input.attachments;
@@ -155,7 +158,7 @@ export class Agent {
   }
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
-  get openPqs() { return this.delegations.filter((d) => d.state === "running").length; }
+  get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
   launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!); this.start(); return this; }
 
   log(line: string) {
@@ -175,10 +178,10 @@ export class Agent {
   }
   view() {
     return {
-      ref: this.ref, id: this.id, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
+      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
       budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
       worktree: this.work, branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
-      attachments: this.attachments.map((a) => a.ref), delegations: this.delegations.map(({ id, question, state, error }) => ({ id, question, state, error })),
+      attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
       reviews: this.reviews, started: this.started, finished: this.finished,
     };
   }
@@ -231,7 +234,7 @@ export class Agent {
     let box: ReturnType<typeof processTools> | undefined;
     try {
       signal.throwIfAborted();
-      this.dir = await agentDirectory(this.deps.state, this.id);
+      this.dir ??= await agentDirectory(this.deps.state, this.ref);
       if (this.kind.access === "write") {
         this.project = await baselineProject(root, signal);
         this.work = await worktree(this.project, this.dir, this.branch!, signal);
@@ -250,7 +253,7 @@ export class Agent {
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
           description: write ? "Submit your work for independent review." : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
-          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "running").map((d) => d.id).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
+          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
       let message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
@@ -276,7 +279,7 @@ export class Agent {
       }
     } finally {
       this.controller.abort(new Block("ended", "Agent ended"));
-      for (const d of this.delegations) if (d.state === "running") d.state = "cancelled";
+      for (const d of this.delegations) if ((d.state === "queued" || d.state === "running")) d.state = "cancelled";
       this.ask?.resolve(UNANSWERED);
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
@@ -307,19 +310,20 @@ export class Agent {
 
   private delegateTool(cwd: string): Tool {
     return tool("delegate",
-      "Delegate one probing question (PQ) to a fresh read-only subagent. Fire and forget: returns an id now; the answer arrives later as a [PQ dN] message. Use only for independent, bounded questions answerable by reading.",
+      "Delegate one probing question (PQ) to a fresh read-only subagent. Fire and forget: returns the question now; the answer arrives later as a [PQ] message headed by that question. Use only for independent, bounded questions answerable by reading.",
       obj({ question: text(800), why: text(400), name: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" })) }), ({ question, why, name }) => {
         if (this.delegations.length >= this.deps.limits.subagents) throw new Block("pq-limit", `PQ limit (${this.deps.limits.subagents}) reached; investigate directly`);
-        const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "running" };
+        const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "queued" };
         this.delegations.push(d);
-        this.log(`→ PQ ${d.id}: ${question}`);
+        this.log(`→ PQ: ${question}`);
         void this.pq(d, cwd, name ? `subagent.${name}` : "subagent");
-        return `Delegated ${d.id}. Keep working, or end your turn to wait; the answer arrives as a [PQ ${d.id}] message.`;
+        return `Delegated PQ: ${question}\nKeep working, or end your turn to wait for the [PQ] answer.`;
       });
   }
   private async pq(d: Delegation, cwd: string, role: string) {
     const key = this.id + ':' + d.id;
-    this.deps.telemetry?.add(key, this.ref, 'PQ ' + d.id, this.id, undefined, d.question);
+    this.deps.telemetry?.add(key, this.ref, 'PQ', this.id, undefined, clean(d.question).replace(/\s+/g, " ").trim());
+    this.deps.telemetry?.state(key, 'queued');
     const signal = this.signal;
     const { driver, prompts, limits, semaphore } = this.deps;
     let conversation: Conversation<typeof PqAnswer> | undefined;
@@ -327,10 +331,11 @@ export class Agent {
     try {
       this.deps.check(role);
       release = await semaphore.acquire(signal);
+      d.state = 'running';
       this.deps.telemetry?.state(key, 'running');
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`  ${d.id} ${line}`) },
+        spec: { observe: this.deps.telemetry?.sink(key), profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
         finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
       });
       d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
@@ -344,8 +349,8 @@ export class Agent {
       release?.();
       conversation?.dispose();
     }
-    this.log(`← PQ ${d.id} ${d.state}`);
-    this.conversation?.deliver(pqMessage(d.id, d.question, d.answer, d.error));
+    this.log(`← PQ ${d.state}: ${d.question}`);
+    this.conversation?.deliver(pqMessage(d.question, d.answer, d.error));
   }
   private askTool(): Tool {
     return tool("ask_main",
@@ -381,9 +386,9 @@ export class Agent {
     let identity: Revision['identity'];
     if (this.kind.access === "read") {
       const plan = report as PlanReport;
-      const path = `.agents/plans/${this.ref}-${slug(this.task)}.md`;
-      const markdown = planMarkdown({ ref: this.ref, kind: this.kind.name, round: this.round, task: this.task, report: plan });
-      await writeScoped(root, path, markdown);
+      const path = `.agents/plans/plan-${this.ref}.md`;
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report: plan });
+      await writeScoped(root, path, markdown, { create: !this.plan });
       if (this.planRound !== undefined && this.plan?.path === path) this.deps.telemetry?.source(this.id, this.planRound, true);
       this.planRound = this.round;
       identity = { digest: createHash('sha256').update(markdown, 'utf8').digest('hex') };

@@ -143,7 +143,7 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 | `Changed resource` | File edited after pinning | Recompute the SHA-256 |
 | `Unknown named child` | `name` delegated without a `models` entry | Declare `subagent.<name>` |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
-| `round-limit` | `limits.rounds` reached | Adjudicate the evidence and close, or spawn a fresh agent with `@<ref>` |
+| `round-limit` | `limits.rounds` reached | Adjudicate the evidence and close, or spawn a fresh agent with the plan in `attach` |
 | `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` and grant headroom |
 
 ## Recipes
