@@ -48,6 +48,8 @@ What unresolved architectural concern could materially affect future changes?
 Submit prioritized findings, supporting evidence and recommended corrections.
 ```
 
+A full working example is `docs/examples/foundation-workflow.md`: an unattended, read-only audit of runtime pinning, setup, tests, CI, dependencies, docs, secrets and infrastructure that never asks Main and opts into the `plan` reviewer roster. Copy it to `<agentDir>/workflows/foundation.md` to install it.
+
 ### Frontmatter
 
 | Key | Required | Meaning |
