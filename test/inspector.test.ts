@@ -152,7 +152,7 @@ test('Activity follows across roles, pauses on scroll, and jumps live without mo
   const screen = () => panel.render(40).join('\n');
   for (let i = 0; i < 4; i++) data.sink('a')({ start: String(i), name: `older-${i}` });
   data.sink('b1')({ start: '1', name: 'newest' });
-  assert.match(screen(), /Activity.*\nLive.*\n@bbbb PQ d1 · start newest\b[^\n]*\n@aaaa · start older-3/);
+  assert.match(screen(), /Activity.*\n[^\n]*\nLive.*\n@bbbb PQ d1 · start newest\b[^\n]*\n@aaaa · start older-3/);
   panel.handleInput('\x1b[B');
   const paused = screen();
   assert.match(paused, /Paused · J Jump to live.*\n@aaaa · start older-3/);
@@ -179,4 +179,24 @@ test('filtered Activity includes only its family and handles empty history', () 
   assert.match(render('aaaa'), /@aaaa PQ d1 · queued.*\n@aaaa · starting/);
   assert.doesNotMatch(render('aaaa'), /@bbbb/);
   assert.match(render('cccc'), /No activity observed/);
+});
+
+
+test('paused Activity at 20 columns shows Jump to live without hiding navigation', () => {
+  const data = new Telemetry();
+  data.add('a', 'aaaa', 'plan');
+  const panel = new Inspector(data, undefined, theme, () => 7, () => {}, () => {});
+  for (let i = 0; i < 4; i++) data.sink('a')({ start: String(i), name: `old${i}` });
+  panel.render(20);
+  panel.handleInput('\x1b[B');
+  const paused = panel.render(20);
+  assert.ok(paused.every(line => visibleWidth(line) <= 20));
+  assert.equal(paused[1], '↑↓ scroll ↵ Tab Esc');
+  assert.equal(paused[2], 'J · Jump to live');
+  data.sink('a')({ start: 'new', name: 'new' });
+  assert.deepEqual(panel.render(20), paused);
+  panel.handleInput('J');
+  const live = panel.render(20);
+  assert.equal(live[2], 'Live');
+  assert.match(live[3], /^@aaaa · start new/);
 });

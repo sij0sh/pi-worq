@@ -167,8 +167,12 @@ export class Inspector {
     const wide = width >= 80;
     const title = this.theme.fg('accent', fit(`Worq · ${tabs[this.tab]} · ${rows.length} roles`, width));
     const activity = this.tab === ACTIVITY;
-    const follow = activity ? (this.pausedActivity ? 'Paused · J Jump to live · ' : 'Live · ') : '';
-    const hint = fit(follow + (width < 56 ? `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · ↵ · Tab · Esc` : `↑↓ ${this.focusDetail ? 'scroll' : 'select'} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`), width);
+    const follow = this.pausedActivity
+      ? (width >= 23 ? 'Paused · J Jump to live' : 'J · Jump to live')
+      : 'Live';
+    const arrows = `↑↓ ${this.focusDetail ? 'scroll' : 'select'}`;
+    const hint = fit(width < 24 ? `${arrows} ↵ Tab Esc` : width < 56 ? `${arrows} · ↵ · Tab · Esc`
+      : `${arrows} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`, width);
     const start = Math.max(0, index - height + 1);
     const left = Math.min(40, Math.floor(width * .4));
     const rosterWidth = wide ? left : width;
@@ -209,6 +213,7 @@ export class Inspector {
         return this.theme.fg(item ? tone(item.r) : 'muted', text + ' '.repeat(Math.max(0, left - visibleWidth(text)))) + ' │ ' + fit(page[i] ?? '', width - left - 3);
       });
     } else lines = (this.focusDetail || !rows.length ? page : roster.map(x => x.text)).map(s => fit(s, width));
-    return [title, this.theme.fg('muted', hint), ...lines];
+    return [title, this.theme.fg('muted', hint),
+      ...(activity ? [this.theme.fg('muted', fit(follow, width))] : []), ...lines];
   }
 }
