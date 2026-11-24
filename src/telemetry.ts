@@ -5,7 +5,8 @@ export type Outcome = { kind: "exit"; code: number; stdout: boolean; stderr: boo
   | { kind: "search"; count: number; capped: boolean }
   | { kind: "ok" | "sdk-error" | "launch" | "timeout" | "output-limit" | "process-exit" | "cleanup-unconfirmed" | "cancelled" | "missing"; cancelled?: boolean };
 export interface Setup { model?: string; thinking?: string; skills: string[] }
-export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Setup } | { context: number | undefined }
+interface ContextEstimate { percent?: number; contextWindow: number }
+export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Setup } | { context: ContextEstimate | undefined }
   | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
 export const observe = <T>(sink: ((value: T) => void) | undefined, value: T) => { try { sink?.(value); } catch { /* display only */ } };
 export const label = (s: string | undefined) => s?.replace(/[^a-zA-Z0-9._+:/ -]/g, "?").slice(0, 96);
@@ -20,7 +21,7 @@ export interface ReviewIdentity { round: number; slot: number }
 export interface Row {
   key: string; ref: string; title?: string; role: string; parent?: string; review?: ReviewIdentity; born: number; since: number;
   state: AgentState | "queued" | "answered" | "done"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
-  phase?: "request" | "idle" | "closed"; setup?: Setup; context?: { percent?: number; at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
+  phase?: "request" | "idle" | "closed"; setup?: Setup; context?: ContextEstimate & { at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
   question?: string; turns?: number; rate?: number; speed?: number;
   current: Map<string, Call>; last?: Call;
 }
@@ -66,7 +67,7 @@ export class Telemetry {
           r.current.clear();
         }
       } else if ("setup" in value) r.setup = value.setup;
-      else if ("context" in value) r.context = { percent: value.context, at: Date.now() };
+      else if ("context" in value) r.context = value.context && { ...value.context, at: Date.now() };
       else if ('turn' in value) r.turns = (r.turns ?? 0) + 1;
       else if ("cache" in value) {
         const { input, read, write, speed } = value.cache;

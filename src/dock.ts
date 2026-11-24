@@ -10,6 +10,12 @@ export function elapsed(ms: number) {
 }
 const cell = (s: string, n: number) => { const t = truncateToWidth(s,n,'…'); return t + ' '.repeat(Math.max(0,n-visibleWidth(t))); };
 export const metrics = (r: Row) => [r.rate == null ? '—' : `${r.rate.toFixed(1)}%`, r.speed == null ? '—' : `${Math.round(r.speed)}`, String(r.turns ?? '—')];
+const contextUsage = ({ context }: Row) => {
+  if (context?.percent == null) return '—';
+  const n = context.contextWindow;
+  const total = n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${+(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k` : String(n);
+  return `${context.percent.toFixed(1)}%/${total}`;
+};
 export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, toggle: () => void, inspect: (ref?: string, key?: string) => void, height: () => number) {
   let visible: Row[] = [];
   return new MouseRegion({ invalidate() {}, render(w) {
@@ -30,11 +36,11 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     if (folded()) return [header];
     // Keep Activity readable, but give extra space to titles and PQ questions.
     const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);
-    const sizes = w >= 74 ? [w-36-activityWidth,activityWidth,7,9,7,7,6]
+    const sizes = w >= 74 ? [w-40-activityWidth,activityWidth,7,7,7,7,12]
       : w >= 45 ? [w-18-activityWidth,activityWidth,8,10]
       : [Math.floor(w*.5),w-Math.floor(w*.5)];
     const table = (values:string[]) => sizes.map((n,i)=>cell(values[i]??'',n)).join('');
-    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT','ACTIVITY','AGE','CACHE','TOK/S','TURNS','SKILLS']);
+    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT','ACTIVITY','AGE','CACHE','TOK/S','TURNS','CTX']);
     return [header,theme.fg('muted',labels),...visible.map(r=>{
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
@@ -44,7 +50,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : showKind ? r.state : `${r.role} ${r.state}`}`,w);
       const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;
       const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
-      const rest = table(['',activity,age,cache,speed,turns,String(r.setup?.skills.length??'—')]).slice(sizes[0]);
+      const rest = table(['',activity,age,cache,speed,turns,contextUsage(r)]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;
     })];
   } }, e=>{

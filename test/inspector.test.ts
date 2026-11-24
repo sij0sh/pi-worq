@@ -28,7 +28,7 @@ test('PQ gets a width-safe question preview and complete detail', () => {
   assert.match(narrowChild!, /^↳ Which source/);
   data.sink('private-owner')({ start: 'task', name: 'read_file' });
   data.sink('private-child')({ start: 'task', name: 'search' });
-  for (const [width, activity, age] of [[64, 30, 46], [140, 84, 104]] as const) {
+  for (const [width, activity, age] of [[64, 30, 46], [140, 80, 100]] as const) {
     const [, labels, owner, child] = dock.render(width);
     assert.equal(labels!.indexOf('ACTIVITY'), activity);
     assert.equal(labels!.indexOf('AGE', activity), age);
@@ -128,6 +128,26 @@ test('dock prefixes an execute title without repeating the kind in compact view'
   const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
   assert.equal(dock.render(34)[2]!.trim(), 'execute: Fix it starting');
   assert.match(dock.render(84)[2]!, /^ ● execute: Fix it\s+starting/);
+});
+
+test('dock shows each agent’s context usage and model window instead of skills', () => {
+  const data = new Telemetry();
+  data.add('owner', 'aaaa', 'plan');
+  data.add('child', 'aaaa', 'PQ d1', 'owner');
+  data.sink('owner')({ context: { percent: 5.64, contextWindow: 300_000 } });
+  const child = data.sink('child');
+  child({ context: { percent: 100, contextWindow: 999_000 } });
+  const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
+  for (const width of [74, 80, 140]) {
+    const [, labels, owner, pq] = dock.render(width);
+    assert.match(labels!.trimEnd(), /TURNS\s+CTX$/);
+    assert.match(owner!.trimEnd(), /5\.6%\/300k$/);
+    assert.match(pq!.trimEnd(), /100\.0%\/999k$/);
+    assert.equal(visibleWidth(pq!), width);
+  }
+  child({ context: undefined });
+  assert.match(dock.render(80)[3]!.trimEnd(), /—$/);
+  assert.doesNotMatch(dock.render(73)[1]!, /CTX/);
 });
 
 test('20-column dock retains actor and status without counting failures as live', () => {

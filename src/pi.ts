@@ -94,8 +94,11 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
     const context = () => {
       if (!spec.observe) return;
       try {
-        const percent = session.getContextUsage()?.percent;
-        report({ context: typeof percent === 'number' && Number.isFinite(percent) ? percent : undefined });
+        const usage = session.getContextUsage();
+        report({ context: usage && {
+          percent: typeof usage.percent === 'number' && Number.isFinite(usage.percent) ? usage.percent : undefined,
+          contextWindow: usage.contextWindow,
+        } });
       } catch { report({ context: undefined }); }
     };
     const seen = new WeakSet<object>();
