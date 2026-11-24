@@ -1,6 +1,6 @@
 # Worq inspector
 
-The agent dock sits below the editor. Expand or collapse it with `[−]` / `[+]` or `/worq-dock`. It groups active children under their owner and caps the visible rows. In fullscreen mode click Inspect for the live timeline, or a row for that role’s details. Live blockers come first; failed owners needing Main remain visible even with no live owners. `/worq-inspect [ref]` opens the read-only inspector even when Worq tools are off. `/worq list [ref]` remains the legacy detailed surface, including outside TUI mode.
+The agent dock sits below the editor. Expand or collapse it with `[−]` / `[+]` or `/worq-dock`. It groups active children under their owner, caps the visible rows and reports hidden rows as `+N` in its header. In fullscreen mode click Inspect for the live timeline, or a row for that role’s details. Live blockers come first; failed owners needing Main remain visible even with no live owners. `/worq-inspect [ref]` opens the read-only inspector even when Worq tools are off. `/worq list [ref]` remains the legacy detailed surface, including outside TUI mode.
 
 The inspector opens on live Activity, newest event first, labeled with its owner ref and child role when applicable. Passing a ref limits the timeline and roster to that family. Scroll down to older activity to pause; press **J** (Jump to live) to resume. New events never move the selected role used by Agents and Evidence.
 

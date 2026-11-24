@@ -1,4 +1,4 @@
-import { mixColors, MouseRegion, TruncatedText, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { mixColors, MouseRegion, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import type { Row, Telemetry } from './telemetry.ts';
 
@@ -24,7 +24,9 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     visible = folded() ? [] : rows.slice(0, Math.max(1, Math.min(6, height()-12)));
     const band = (s: string) => shade(theme,cell(s,w));
     const control = (s: string) => theme.bold?.(s) ?? s;
-    const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${rows.filter(working).length} live · WORQ`) : band(control(`${folded()?'[+]':'[−]'} [Inspect]`) + `  ◈ WORQ   ${rows.filter(working).length} live · ${owners.filter(r=>r.actor).length} need Main`);
+    const more = folded() || rows.length <= visible.length ? '' : ` · +${rows.length-visible.length}`;
+    const live = `${rows.filter(working).length} live${more}`;
+    const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${live} · WORQ`) : band(control(`${folded()?'[+]':'[−]'} [Inspect]`) + `  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
     if (folded()) return [header];
     const sizes = w >= 74 ? [22,w-58,7,9,7,7,6] : w >= 45 ? [17,w-35,8,10] : [Math.floor(w*.5),w-Math.floor(w*.5)];
     const table = (values:string[]) => sizes.map((n,i)=>cell(values[i]??'',n)).join('');
@@ -37,7 +39,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
       const rest = table(['',activity,age,cache,speed,turns,String(r.setup?.skills.length??'—')]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;
-    }),new TruncatedText(theme.fg('muted',` ${rows.length-visible.length ? `+${rows.length-visible.length} more · `:''}/worq-inspect · — unavailable`),0,0).render(w)[0] ?? ''];
+    })];
   } }, e=>{
     if(e.type!=='click'||e.button!=='left') return;
     if(e.y===0 && e.x<3) toggle(); else if(e.y===0 && e.width>=35 && e.x<13) inspect(); else if(e.y>=2 && visible[e.y-2]) inspect(visible[e.y-2].ref,visible[e.y-2].key); else return;
