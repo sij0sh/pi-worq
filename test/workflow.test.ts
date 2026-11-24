@@ -249,7 +249,7 @@ test("read workflow without a roster: Workflow result artifact, no reviewers, no
   assert.match(system, /No independent reviewers run for this workflow; submit a self-contained result\./);
   assert.match(finish, /^Submit your result\. Worq saves it to \.agents\/plans\/\./);
   assert.doesNotMatch(finish, /for independent review/);
-  assert.ok(!seen.some((spec) => spec.profile === "reviewer"));
+  assert.ok(!seen.some((spec) => spec.name.startsWith("reviewer.")));
   assert.deepEqual(agent.reviews, []);
   assert.equal(agent.reviewPolicyLabel, "no configured reviewers");
   assert.match(ready.text, /No reviewers ran: this result is unverified\./);
@@ -303,7 +303,7 @@ test("write workflow pins worq/<ref>, never merges, and runs no reviewers by def
   const ready = await next("review-ready", agent.ref);
   assert.match(system, /No independent reviewers run for this workflow/);
   assert.match(finish, /^Submit your work\. Ends your turn\.$/);
-  assert.ok(!seen.some((spec) => spec.profile === "reviewer"));
+  assert.ok(!seen.some((spec) => spec.name.startsWith("reviewer.")));
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
   assert.ok(existsSync(agent.work!));

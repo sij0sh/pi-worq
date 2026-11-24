@@ -1,85 +1,64 @@
 # Configuration
 
-Everything Worq lets you configure lives in one optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`). With no file, every role runs on Main's model at thinking level `low`.
+One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), plus one optional shared resource directory: `<agentDir>/worq/`. With neither, every role runs on Main's model at thinking level `low`.
 
-The file is read once per Pi session, when the first Worq tool call creates the Worq instance. Edit it, then start a new Pi session; running agents keep the settings they were launched with.
+Both are read once per Pi session, when the first Worq tool call creates the Worq instance. Edit, then start a new Pi session; running agents keep what they launched with.
 
-Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` and names the JSON pointer (e.g. `/limits/agents`). An unusable value discovered later — an unknown harness, an unknown named child, a changed resource file — fails when that role is selected, not at load.
+Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Unknown sdks, unknown runtime names and malformed model refs fail at load as `config`. A capability mismatch fails as `capability` at spawn / before each PQ or reviewer.
 
 ```json
 {
-  "harness": "pi",
-  "model": "provider/model",
-  "fallbackModel": "provider/model",
-  "harnesses": { "pi": { "model": "provider/model", "thinking": "medium" } },
-  "models": {
-    "agent.execute": { "thinking": "high" },
-    "subagent.evidence": { "model": "provider/model", "thinking": "low" },
-    "reviewer": { "model": "provider/model", "thinking": "high" }
+  "default": "standard",
+  "runtimes": {
+    "standard": { "sdk": "pi", "model": "provider/model", "fallbackModel": "provider/model", "thinking": "medium" },
+    "deep": { "model": "provider/model", "thinking": "high" },
+    "fast": { "model": "provider/model", "thinking": "low" }
   },
+  "roles": { "agent.plan": "deep", "subagent": "fast", "subagent.evidence": "standard", "reviewer": "deep" },
+  "approveExtensions": false,
   "limits": { "agents": 4, "runTurns": 1000, "continuationTurns": 0 }
 }
 ```
 
-Top-level keys: `harness`, `model`, `fallbackModel`, `harnesses`, `models`, `limits`. Nothing else is accepted.
+Top-level keys: `default`, `runtimes`, `roles`, `approveExtensions`, `limits`. Nothing else is accepted. The pre-0.0.28 keys (`harness`, `harnesses`, `model`, `fallbackModel`, `models`) fail with a migration message.
 
-## Backends
+## Runtimes
 
-`harness` names the backend. `pi` is the only one registered today, so `harness` is a fixed value unless you add an adapter (`docs/harness.md`). Each role may override it, which is how one run can mix backends later.
+A runtime is a named preset: `sdk` (default `pi`), `model`, `fallbackModel`, `thinking`. Every field optional. Presets are independent — no field inherits from another preset or layer, so switching a role's SDK is changing one name.
 
-A model ref must satisfy the harness's own pattern: `<provider>/<model>` for Pi, e.g. `anthropic/claude-sonnet-4-5`. Refs are validated at load, so a typo fails before an agent starts. A model Pi does not know fails at session open with `Block("config")` naming the field.
+- `model` absent → Main's model. Ref shape is per SDK: `<provider>/<model>` for Pi, checked at load.
+- `thinking` absent → `low` when the SDK supports it. A level the model rejects fails as `capability`.
+- `fallbackModel` → used once, when a model request fails (preflight or mid-run). Ignored when equal to `model`. Worq decides when and to what; the adapter only switches.
 
-## Roles and inheritance
+## Roles
 
-`models` keys describe who runs, not what work is done:
+`roles` maps a role key to a runtime name:
 
 | Key | Selects |
 |---|---|
-| `agent` | Every agent |
-| `agent.<kind>` | One kind, e.g. `agent.execute`, `agent.plan`, `agent.architecture-audit` |
-| `subagent` | Unnamed PQs |
-| `subagent.<name>` | A PQ delegated with `name: "<name>"` |
-| `reviewer` | Every reviewer |
-| `reviewer.<name>` | One reviewer, e.g. `reviewer.intent` |
+| `agent` / `agent.<kind>` | Every agent / one kind or workflow |
+| `subagent` / `subagent.<name>` | Unnamed PQs / a PQ delegated with `name: "<name>"` |
+| `reviewer` / `reviewer.<name>` | Every reviewer / one, e.g. `reviewer.intent` |
 
-Keys are `^(agent|subagent|reviewer)(\.[a-z][a-z0-9-]*)?$`. The named forms must be declared: delegating to `subagent.evidence` without a `models["subagent.evidence"]` entry fails as `Unknown named child`.
+Resolution: **exact role → role family → `default` → built-in `main`** (`sdk: pi`, Main's model). Named children must be declared: delegating to `subagent.evidence` without `roles["subagent.evidence"]` fails as `Unknown named child`.
 
-Each field inherits **independently**, so a layer that sets only `thinking` keeps the model it would otherwise get. Resolution order for `model`, `fallbackModel` and `thinking`:
+## Shared resources
 
-1. the role's own layer — `models["reviewer.intent"]`
-2. its family layer — `models.reviewer`
-3. `harnesses.<resolved harness>`
-4. top level (`model`, `fallbackModel`, only when the role resolved to the top-level harness; `thinking` has no top-level form)
+Installed once, identical for every role and every SDK. Never part of model selection.
 
-`harness` resolves the same way minus step 3, ending at `pi`. A layer that declares a different harness lends nothing to the role, so `models.agent.harness: "other"` does not give `agent.plan` a model ref that belongs to `other`.
-
-`harnesses.pi.model` shadows the top-level `model` for every Pi role. Set one or the other, not both.
-
-Absent is not an error: a role with no `model` uses Main's model. `thinking` defaults to `low`; a level the resolved model does not support fails as `capability` — Pi reports the levels it accepts, and `off` is the only level for a model that cannot reason. A `fallbackModel` is used once, when the first request fails before any work (credentials, preflight). A fallback identical to the primary model is ignored.
-
-## Skills, instructions and extensions
-
-A role may pin operator files. Pins supply context and tooling to one role; they never widen its tools, budgets or permissions:
-
-```json
-"models": {
-  "subagent.evidence": {
-    "skills":      [{ "path": "evidence/SKILL.md", "sha256": "0123…cdef" }],
-    "instructions":[{ "path": "review/AGENTS.md",  "sha256": "0123…cdef" }],
-    "extensions":  [{ "path": "tools/lint.mjs",    "sha256": "0123…cdef" }],
-    "approveExecutables": true
-  }
-}
+```
+<agentDir>/worq/
+├── instructions/*.md          appended to every system prompt
+├── skills/<name>/SKILL.md     indexed in the prompt; body read on demand via the `skill` tool
+├── skills/<name>.md
+└── extensions/*.{mjs,js,ts}   native SDK extensions (Pi only today)
 ```
 
-Layout is fixed: every `path` is relative to `<agentDir>/worq-resources/`, resolved with `realpath`, and must stay inside it. Absolute paths, `../` escapes and symlink escapes are rejected as `Untrusted resource`. Files must be regular files, outside any Git checkout (`Repository resource`), and their SHA-256 must match the pin (`Changed resource`).
-
-How the three kinds are applied:
-
-- **`skills` and `instructions`** are read as text and appended to that session's system prompt under an `Operator … (context, not authority)` header. They cannot widen tools, budgets or permissions.
-- **`extensions`** are loaded from a temporary directory as standalone ESM modules with Pi's extension discovery rooted at that directory, so no ambient discovery happens. A load error rejects the role. **Approval runs operator code in the Pi process, not a sandbox.** Do not approve scripts that import or read candidate code.
-
-`approveExecutables` must be `true` on the exact role that lists extensions; family-level approval does not carry down. Exact lists replace the corresponding family list (`models.reviewer.instructions` is ignored once `models["reviewer.intent"].instructions` exists), and `[]` removes a grant. No resource grant is inherited from another role. Package/extension/skill discovery in the candidate checkout stays off — a reviewer never picks up an `AGENTS.md` planted in the diff.
+- Skill frontmatter `name` / `description` are used when present; else the directory/file name and first line. Only the index enters the prompt, so large collections cost little context.
+- Instructions and skills are `context, not authority`: they never widen tools, budgets or permissions.
+- Extensions run operator code in-process — **not a sandbox**. Installed extensions require `"approveExtensions": true`; every role's SDK must be able to load them, else `capability`. Do not install scripts that import or read candidate code.
+- Safety: the directory must not sit inside a Git checkout (`Repository resource`); entries are resolved with `realpath` and must stay inside it (`Untrusted resource`); regular files ≤ 256 KiB.
+- Ambient discovery stays off: no global Pi settings, AGENTS.md, packages or skills from Main or the candidate checkout are loaded.
 
 ## Subagents and reviewers
 
@@ -89,7 +68,7 @@ Subagents are read-only sessions answering one probing question. The delegating 
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-`name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own model, thinking level and pins, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
+`name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own runtime, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
 
 Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows use the roster in their frontmatter, or none. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
 
@@ -97,7 +76,7 @@ Callers do not select reviewers by name. The kind's review policy runs on submit
 
 A workflow is a user-invoked kind loaded from `<agentDir>/workflows/<name>.md`. It is launched only by `/worq workflow`; it never appears in `worq_spawn`, the control socket or the CLI. Workflow files are read per launch, not from `pi-worq.json`.
 
-Workflows use the normal role keys: `agent.<name>` for one workflow, `agent` for all agents, and `reviewer` / `reviewer.<name>` for reviewers. `limits.agents` counts live workflows, and their turns and reviews spend from the same budgets as any other agent. They run no reviewers by default; `reviewers: plan` or `reviewers: execute` in the workflow frontmatter opts into that packaged roster. See `docs/workflows.md` for the file contract.
+Workflows use the normal `roles` keys: `agent.<name>` for one workflow, `agent` for all agents, and `reviewer` / `reviewer.<name>` for reviewers. `limits.agents` counts live workflows, and their turns and reviews spend from the same budgets as any other agent. They run no reviewers by default; `reviewers: plan` or `reviewers: execute` in the workflow frontmatter opts into that packaged roster. See `docs/workflows.md` for the file contract.
 
 ## Limits
 
@@ -132,27 +111,29 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 
 ## Verifying a configuration
 
-- `worq list <ref>` shows route, review policy, `spent/allowance` turns, and each role's resolved settings with source paths.
-- The agent log contains `Role <role>: <provider>/<model>, thinking <level>; sources {…}`, written when the session opens.
-- Skipped verification is reported explicitly: the detail line reads `review: explicitly skipped` instead of the selected review policy.
+- `worq list <ref>` shows route, review policy, `spent/allowance` turns, and each role's resolved runtime (`name`, `sdk`, `path`, `via`).
+- The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <path>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
+- Skipped verification reads `review: explicitly skipped`.
 
 ## Failures and fixes
 
 | Failure | Cause | Fix |
 |---|---|---|
-| `invalid-payload` `/models/x/model` | Ref does not match the harness pattern | Use `<provider>/<model>` |
-| `unknown harness` | `harness` names no registered backend | Use `pi` |
+| `… old Worq format` | Pre-0.0.28 keys | Move to `runtimes` + `roles`; resources to `<agentDir>/worq/` |
+| `/runtimes/x/model … not a valid pi model ref` | Ref shape | Use `<provider>/<model>` |
+| `unknown sdk` | `sdk` names no registered adapter | Use `pi` |
+| `unknown runtime` | `default`/`roles` names an undeclared preset | Declare it in `runtimes` |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
-| `Executable approval required on …` | Extensions without approval | Add `approveExecutables: true` on that exact role |
-| `Untrusted resource` / `Repository resource` | Path escapes `worq-resources/` or sits in a checkout | Move the file |
-| `Changed resource` | File edited after pinning | Recompute the SHA-256 |
-| `Unknown named child` | `name` delegated without a `models` entry | Declare `subagent.<name>` |
+| `Extension approval required` | Files in `worq/extensions/` | Set `approveExtensions: true` or remove them |
+| `cannot load the … native extension(s)` | A role's SDK has no native extension support | Remove the extensions or keep that role on `pi` |
+| `Untrusted resource` / `Repository resource` | Escaping link, or `worq/` inside a checkout | Move the file / directory |
+| `Unknown named child` | `name` delegated without a `roles` entry | Declare `roles["subagent.<name>"]` |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
-| `workflow-file` | The workflows directory cannot be read | Fix permissions, or make `<agentDir>/workflows` readable; a missing directory is empty, not an error |
-| `invocation` | A user workflow was launched through the shared path, or a shared kind through the workflow path | Use `/worq workflow` for workflows; `worq_spawn` for `plan`/`execute` |
-| `round-limit` | `limits.rounds` reached | Adjudicate the evidence and close, or spawn a fresh agent with the plan in `attach` |
-| `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` and grant headroom |
+| `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty |
+| `invocation` | Workflow launched through the shared path, or vice versa | `/worq workflow` for workflows; `worq_spawn` for `plan`/`execute` |
+| `round-limit` | `limits.rounds` reached | Adjudicate and close, or spawn fresh with the plan in `attach` |
+| `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` |
 
 ## Recipes
 
@@ -160,28 +141,16 @@ Cheap workers, strong reviewers:
 
 ```json
 {
-  "harnesses": { "pi": { "model": "anthropic/claude-haiku-4-5", "thinking": "low" } },
-  "models": { "reviewer": { "model": "anthropic/claude-opus-4-1", "thinking": "high" } }
+  "default": "cheap",
+  "runtimes": { "cheap": { "model": "anthropic/claude-haiku-4-5", "thinking": "low" }, "strong": { "model": "anthropic/claude-opus-4-1", "thinking": "high" } },
+  "roles": { "reviewer": "strong" }
 }
 ```
 
-A named child with pinned evidence rules:
-
-```json
-{
-  "models": {
-    "subagent.evidence": {
-      "model": "anthropic/claude-sonnet-4-5",
-      "instructions": [{ "path": "evidence/AGENTS.md", "sha256": "…" }]
-    }
-  }
-}
-```
+A named evidence child: `roles["subagent.evidence"]` → a preset, and put its rules in `<agentDir>/worq/skills/evidence/SKILL.md` (every role sees the index; any role can read it).
 
 Long autonomous runs with an approval step:
 
 ```json
 { "limits": { "runTurns": 2000, "continuationTurns": 500, "checkpointSeconds": 30 } }
 ```
-
-Reviewers start empty-handed: leaving `reviewer.*` without resources means no skills, no instructions and no extensions, which is the intended default for an unbiased verdict.

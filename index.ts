@@ -6,13 +6,14 @@ import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type { AgentEvent } from "./src/agent.ts";
-import { loadConfig } from "./src/config.ts";
+import { loadConfig } from "./src/runtime/config.ts";
+import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
-import { createDriver } from "./src/harness.ts";
+import { createDriver } from "./src/sdk/registry.ts";
 import { loadPrompts, loadWorkflows } from "./src/prompts.ts";
 import { clean } from "./src/render.ts";
-import type { Driver } from "./src/session.ts";
+import type { Driver } from "./src/sdk/contract.ts";
 import { statePath } from "./src/workspace.ts";
 import { isRef, Worq } from "./src/worq.ts";
 
@@ -60,6 +61,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     const table = ops([...prompts.kinds.keys()]);
     const kinds = [...prompts.kinds.values()].map((kind) => `${kind.name}: ${kind.description}`).join("; ");
     let instance: Worq | undefined;
+    let starting: Promise<Worq> | undefined;
     let socket: Awaited<ReturnType<typeof serve>> | undefined;
     let off = false;
     let closing = false;
@@ -107,13 +109,19 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       status();
     };
     const agentDir = () => options.agentDir?.() ?? getAgentDir();
-    const ensure = (ctx: ExtensionContext) => {
+    /** One Worq per Pi session: config, shared resource snapshot and SDK router are built once. */
+    const ensure = async (ctx: ExtensionContext): Promise<Worq> => {
       ui = ctx;
       if (instance) return instance;
-      const config = loadConfig(agentDir());
-      const driver = options.driver?.(ctx) ?? createDriver({ host: ctx }, config);
-      instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
-      return instance;
+      starting ??= (async () => {
+        const dir = agentDir();
+        const config = loadConfig(dir);
+        const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
+        const host = { get model() { return ctx.model; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
+        const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, config, resources);
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });
+      })().finally(() => { starting = undefined; });
+      return starting;
     };
     /** Make list/send/cancel available for a launched workflow without enabling Main's spawn. */
     const service = () => {
@@ -123,7 +131,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     };
     const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
       if (off && op === "spawn") throw new Error("Worq is off; re-enable with /worq.");
-      const result = await dispatch(ensure(ctx), table, op, args);
+      const result = await dispatch(await ensure(ctx), table, op, args);
       status();
       return result;
     };
@@ -171,7 +179,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       if (!kind) return;
       const extra = await ctx.ui.input(`Additional instructions for ${kind.name} (optional)`, "Leave empty to run the workflow as written");
       if (extra === undefined) return;
-      const agent = await ensure(ctx).runWorkflow(kind, extra);
+      const agent = await (await ensure(ctx)).runWorkflow(kind, extra);
       service();
       status();
       say(ctx, `Launched workflow ${kind.name} as ${agent.ref}. /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers or starts another round; /worq cancel ${agent.ref} stops it.`);
@@ -213,7 +221,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           enable(true);
           pi.appendEntry(ENABLED, { on: true });
           if (!value) {
-            ensure(ctx);
+            await ensure(ctx);
             say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}. Workflows: /worq workflow.`);
             return;
           }

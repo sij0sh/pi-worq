@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 import { Type } from "typebox";
 import { createWorq, TOOLS } from "../index.ts";
-import { DEFAULT_LIMITS, loadConfig } from "../src/config.ts";
+import { DEFAULT_LIMITS, loadConfig } from "../src/runtime/config.ts";
 import { dispatch, ops, serve } from "../src/control.ts";
 import { obj, text } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
@@ -18,7 +18,7 @@ const never = new AbortController().signal;
 const finish = { name: "done", description: "Finish.", schema: obj({ value: text(20) }) };
 const conversation = (script: Parameters<typeof fakeDriver>[0][string], pending?: () => number) => new Conversation({
   driver: fakeDriver({ x: script }), signal: never, turns: 10, minutes: 1, finish, pending,
-  spec: { profile: "subagent", name: "x", cwd: "/", system: "", tools: [], log() {} },
+  spec: { name: "x", cwd: "/", system: "", tools: [], log() {} },
 });
 
 test("conversation: one settlement nudge, rejected finish is explained, then fails", async () => {
@@ -47,7 +47,7 @@ test("conversation: waits for pending work and takes delivered messages in order
 
 test("conversation: turn limit aborts", async () => {
   const c = new Conversation({ driver: fakeDriver({ x: () => {} }), signal: never, turns: 1, minutes: 1, finish,
-    spec: { profile: "subagent", name: "x", cwd: "/", system: "", tools: [], log() {} } });
+    spec: { name: "x", cwd: "/", system: "", tools: [], log() {} } });
   await assert.rejects(c.run("go"), /turn limit/);
 });
 
@@ -55,17 +55,17 @@ test("config: defaults, model lookup by specificity, invalid keys name the file"
   const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   assert.deepEqual(loadConfig(dir).limits, DEFAULT_LIMITS);
-  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ model: "a/m", models: { reviewer: { model: "b/r" }, "reviewer.intent": { model: "c/i" } }, limits: { rounds: 5 } }));
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ default: "a", runtimes: { a: { model: "a/m" }, b: { model: "b/r" }, c: { model: "c/i" } }, roles: { reviewer: "b", "reviewer.intent": "c" }, limits: { rounds: 5 } }));
   const config = loadConfig(dir);
   assert.equal(config.limits.rounds, 5);
   assert.equal(config.limits.agents, DEFAULT_LIMITS.agents);
-  assert.equal(config.model("agent.plan").model, "a/m");
-  assert.equal(config.model("reviewer.pair").model, "b/r");
-  assert.equal(config.model("reviewer.intent").model, "c/i");
+  assert.equal(config.runtime("agent.plan").model, "a/m");
+  assert.equal(config.runtime("reviewer.pair").model, "b/r");
+  assert.equal(config.runtime("reviewer.intent").model, "c/i");
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: 0 } }));
   assert.throws(() => loadConfig(dir), /pi-worq\.json: \/limits\/rounds/);
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ agents: { plan: {} }, scq: {} }));
-  assert.throws(() => loadConfig(dir), /agents and scq are from the old Worq format/);
+  assert.throws(() => loadConfig(dir), /agents, scq are from the old Worq format/);
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ land: "auto" }));
   assert.throws(() => loadConfig(dir), /pi-worq\.json/);
 });

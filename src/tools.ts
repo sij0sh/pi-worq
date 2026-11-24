@@ -7,7 +7,7 @@ import { CleanupError, launch, runProcess } from "./process.ts";
 import { windows } from "./platform.mjs";
 import { observePty } from "./pty.ts";
 import { one } from "./render.ts";
-import { tool, type Tool } from "./session.ts";
+import { tool, type Tool } from "./sdk/contract.ts";
 import { readSmall, runtimeEnv, scoped, writeScoped, type Runtime } from "./workspace.ts";
 
 const path = text(1024);

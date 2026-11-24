@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
-import { DEFAULT_LIMITS, type Config } from "../src/config.ts";
+import { DEFAULT_LIMITS, MAIN, type Config } from "../src/runtime/config.ts";
 import { Block, obj, text } from "../src/contracts.ts";
-import { createDriver, HARNESSES } from "../src/harness.ts";
-import { piDriver, thinkingLevels } from "../src/pi.ts";
-import { assertChoice, Conversation, NUDGE, type Capabilities, type Driver, type Spec, type Tool } from "../src/session.ts";
+import { EMPTY, type Resources } from "../src/runtime/resources.ts";
+import { assertRuntime, type Capabilities, type Driver, type Handle, type Runtime, type SDKAdapter, type SessionSpec, type Spec, type Tool } from "../src/sdk/contract.ts";
+import { createDriver, type SDKRecord } from "../src/sdk/registry.ts";
+import { piAdapter, thinkingLevels } from "../src/sdk/pi.ts";
+import { Conversation, NUDGE } from "../src/session.ts";
 import { fakeHarness, FULL_CAPS, MINIMAL_CAPS, type FakeOptions, type Script } from "./fake.ts";
 
 const finish = { name: "submit", description: "Submit.", schema: obj({ value: text(4000) }) };
@@ -24,7 +26,7 @@ function open(driver: Driver, extra: { minutes?: number; turns?: number; signal?
     turns: extra.turns ?? 10,
     minutes: extra.minutes ?? 1,
     finish,
-    spec: { profile: "subagent", name: "x", cwd: process.cwd(), system: extra.system ?? "SYSTEM", tools: tools(), log: (line) => { extra.logs?.push(line); } },
+    spec: { name: "x", cwd: process.cwd(), system: extra.system ?? "SYSTEM", tools: tools(), log: (line) => { extra.logs?.push(line); } },
   });
 }
 /** The budget timer is unref'd (right for production); keep the loop alive while a case waits on it. */
@@ -64,7 +66,7 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     const c = open(make(caps));
     assert.deepEqual(await c.run("tools"), { value: "tools" });
     assert.equal(images.length, before + 1, `${name}: an image tool output reaches the model`);
-    assert.ok(errors.some((e) => e.name === "strict"), `${name}: invalid parameters are reported through spec.toolError`);
+    assert.ok(errors.some((e) => e.name === "strict"), `${name}: invalid parameters are reported as tool-error events`);
   }
 
   // finish: a rejected submission is explained, then the second failure is fatal
@@ -145,8 +147,8 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
 
   // abort duty: abort() settles the in-flight prompt and clears streaming
   {
-    const spec: Spec = { id: "duty", profile: "subagent", name: "x", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} };
-    const handle = await make(caps)(spec);
+    const spec: Spec = { id: "duty", name: "x", cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal };
+    const handle = await make(caps).open(spec);
     const running = handle.prompt("hang");
     await until(() => handle.streaming);
     await handle.abort();
@@ -190,7 +192,7 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     const c = open(make(caps));
     const before = prompts.length;
     const outcome = await c.run("fail").then((value) => value, (error: unknown) => error);
-    if (caps.fallback) {
+    if (caps.switchModel) {
       assert.ok(!(outcome instanceof Block), `${name}: with a fallback the request continues`);
       assert.match(prompts[before + 1] ?? "", /previous model request failed/, `${name}: the fallback re-prompts with CONTINUE`);
     } else {
@@ -201,25 +203,28 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
   // thinking: the list is data on the adapter, empty only without level control
   {
     const levels = make(caps).capabilities("x").thinking;
-    assert.equal(levels.length === 0, !caps.fallback && caps.thinking.length === 0, `${name}: thinking levels are exposed as data`);
+    assert.equal(levels.length === 0, !caps.switchModel && caps.thinking.length === 0, `${name}: thinking levels are exposed as data`);
   }
 
   // denial paths: a capability-minimal adapter must refuse what it cannot do, naming the config path
   {
-    if (caps.fallback) {
-      assert.doesNotThrow(() => assertChoice({ harness: name, fallbackModel: "p/m", from: { fallbackModel: "/fallbackModel" } }, caps), `${name}: a supported fallback is accepted`);
+    const preset = (extra: Partial<Runtime>): Runtime => ({ name: "p", sdk: name, path: "/runtimes/p", via: "/roles/agent", ...extra });
+    const iso = { ...caps, context: FULL_CAPS.context };
+    if (caps.switchModel) {
+      assert.doesNotThrow(() => assertRuntime(preset({ fallbackModel: "p/m" }), iso), `${name}: a supported fallback is accepted`);
     } else {
-      assert.throws(() => assertChoice({ harness: name, fallbackModel: "p/m", from: { fallbackModel: "/fallbackModel" } }, caps),
-        (error: unknown) => error instanceof Block && error.code === "capability" && /\/fallbackModel/.test(error.message),
-        `${name}: a configured fallback on a harness without one is denied naming from.fallbackModel`);
+      assert.throws(() => assertRuntime(preset({ fallbackModel: "p/m" }), iso),
+        (error: unknown) => error instanceof Block && error.code === "capability" && /\/runtimes\/p\/fallbackModel/.test(error.message),
+        `${name}: a configured fallback on an sdk without model switching is denied naming the preset path`);
     }
     if (caps.thinking.length === 0) {
-      assert.throws(() => assertChoice({ harness: name, thinking: "high", from: { thinking: "/models/agent.plan/thinking" } }, caps),
-        (error: unknown) => error instanceof Block && error.code === "capability" && /\/models\/agent\.plan\/thinking/.test(error.message),
-        `${name}: a configured level without level control is denied naming from.thinking`);
+      assert.throws(() => assertRuntime(preset({ thinking: "high" }), iso),
+        (error: unknown) => error instanceof Block && error.code === "capability" && /\/runtimes\/p\/thinking/.test(error.message),
+        `${name}: a configured level without level control is denied naming the preset path`);
     } else {
-      assert.doesNotThrow(() => assertChoice({ harness: name, thinking: "high", from: { thinking: "/models/agent.plan/thinking" } }, caps), `${name}: a supported level is accepted`);
+      assert.doesNotThrow(() => assertRuntime(preset({ thinking: "high" }), iso), `${name}: a supported level is accepted`);
     }
+    if (!caps.extensions) assert.throws(() => assertRuntime(preset({}), iso, 1), /cannot load/, `${name}: installed extensions need an sdk that loads them`);
   }
 
   // context
@@ -269,7 +274,7 @@ export const script: Script = async (turn) => {
 
 const record: FakeOptions = { images: [], toolErrors: [], prompts: [], aborts: { n: 0 }, calls: { n: 0 } };
 const make = (caps: Capabilities) => {
-  record.fallbacks = caps.fallback ? 1 : 0;
+  record.fallbacks = caps.switchModel ? 1 : 0;
   return fakeHarness(caps, { x: script }, record);
 };
 
@@ -293,49 +298,107 @@ test("conformance: the abort-duty case fails a dangling abort", async () => {
   await assert.rejects(adapterConformance("DANGLING", (caps) => fakeHarness(caps, { x: script }, options), options), /abort\(\) settles/);
 });
 
-test("harness: createDriver routes by the role's harness and passes capabilities through", async () => {
-  const model = { provider: "p", id: "m", reasoning: true };
-  const ctx = { model, modelRegistry: { find: () => undefined } };
-  const piOnly: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", from: {} }) };
-  assert.deepEqual(createDriver({ host: ctx }, piOnly).capabilities("agent.plan"), piDriver(ctx as never, piOnly).capabilities("agent.plan"));
-  // Pi cannot resolve a ref here, so both report Main's model and its derived level list.
-  assert.deepEqual(createDriver({ host: ctx }, piOnly).capabilities("reviewer.pair").thinking, ["off", "minimal", "low", "medium", "high"]);
-
-  const created: string[] = [];
-  HARNESSES["test"] = { modelRef: /.*/, create: () => { created.push("test"); return fakeHarness(FULL_CAPS, {}, {}); } };
-  try {
-    const mixed: Config = { path: "test", limits: DEFAULT_LIMITS, model: (name) => ({ harness: name === "subagent" ? "test" : "pi", from: {} }) };
-    const driver = createDriver({ host: ctx }, mixed);
-    assert.deepEqual(driver.capabilities("subagent"), FULL_CAPS, "the role's harness answers capabilities");
-    assert.deepEqual(driver.capabilities("agent.plan").thinking, ["off", "minimal", "low", "medium", "high"], "another role routes to pi");
-    const spec: Spec = { id: "s", profile: "subagent", name: "subagent", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} };
-    const handle = await driver(spec);
-    assert.deepEqual(created, ["test"], "opening a session routes to the record the role resolves to");
-    assert.equal(typeof handle.abort, "function");
-    handle.dispose();
-  } finally { delete HARNESSES["test"]; }
-
-  const unregistered: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "claude", from: {} }) };
-  assert.throws(() => createDriver({ host: ctx }, unregistered).capabilities("agent.plan"),
-    (error: unknown) => error instanceof Block && error.code === "config" && /unknown harness "claude"/.test(error.message));
-  await assert.rejects(createDriver({ host: ctx }, unregistered)({ id: "s", profile: "agent", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], log() {}, turn() {}, toolError() {} }),
-    (error: unknown) => error instanceof Block && error.code === "config");
+test("conformance: a harness without steer queues delivered messages", async () => {
+  const driver = fakeHarness(FULL_CAPS, { x: script }, { steer: "none" });
+  const logs: string[] = [];
+  const c = open(driver, { logs });
+  const running = c.run("wait");
+  await until(() => c.streaming);
+  c.deliver("main");
+  assert.deepEqual(await running, { value: "ok" });
+  assert.equal(logs.filter((line) => line.includes("message queued")).length, 1);
 });
 
-test("pi: capability snapshot derives thinking from the model", () => {
+test("conformance: a session that finishes opening after dispose is disposed, not leaked", async () => {
+  let release!: () => void;
+  let disposed = 0;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const inner = fakeHarness(FULL_CAPS, { x: script });
+  const driver: Driver = {
+    capabilities: inner.capabilities,
+    async open(spec) { await gate; const handle = await inner.open(spec); return { ...handle, prompt: handle.prompt, abort: handle.abort, get streaming() { return handle.streaming; }, dispose() { disposed++; } }; },
+  };
+  const controller = new AbortController();
+  const c = open(driver, { signal: controller.signal });
+  const running = c.run("submit");
+  await sleep(5);
+  controller.abort(new Block("cancelled", "early"));
+  await assert.rejects(running, /early/);
+  c.dispose();
+  release();
+  await until(() => disposed === 1);
+});
+
+/** A recording SDK adapter: proves the router hands adapters a resolved, prepared spec. */
+function recordingSdk(caps: Capabilities, seen: SessionSpec[], switched: string[]): SDKRecord {
+  return {
+    modelRef: /.*/,
+    load: async (): Promise<SDKAdapter> => ({
+      capabilities: () => caps,
+      async open(spec) {
+        seen.push(spec);
+        const handle: Handle = {
+          prompt: async () => "completed", get streaming() { return false; }, abort: async () => {}, dispose() {},
+          switchModel: async (ref) => { switched.push(ref); },
+        };
+        return handle;
+      },
+    }),
+  };
+}
+const configFor = (runtime: (role: string) => Runtime, sdks: string[] = ["pi"]): Config =>
+  ({ path: "test", limits: DEFAULT_LIMITS, approveExtensions: false, sdks, runtime });
+const roleSpec = (name: string): Spec => ({ id: "s", name, cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
+
+test("registry: createDriver routes by runtime, prepares the shared environment, owns fallback", async () => {
+  const seen: SessionSpec[] = [];
+  const switched: string[] = [];
+  const sdks = { pi: recordingSdk(FULL_CAPS, seen, switched), test: recordingSdk(FULL_CAPS, seen, switched) };
+  const fast: Runtime = { name: "fast", sdk: "test", model: "m/a", fallbackModel: "m/b", path: "/runtimes/fast", via: "/roles/subagent" };
+  const config = configFor((role) => role === "subagent" ? fast : { ...MAIN }, ["test"]);
+  const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint" }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
+  const driver = await createDriver({}, config, resources, sdks);
+  for (const role of ["agent.plan", "subagent", "reviewer.intent"]) {
+    const handle = await driver.open(roleSpec(role));
+    const spec = seen.at(-1)!;
+    assert.equal(spec.runtime.sdk, role === "subagent" ? "test" : "pi", `${role} routes to its runtime's sdk`);
+    assert.match(spec.system, /^S\n\nOperator instructions a\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
+    assert.ok(!spec.system.includes("Run lint"), `${role}: skill bodies load on demand`);
+    assert.equal(await spec.tools.find((t) => t.name === "skill")!.run({ name: "lint" }, new AbortController().signal), "Run lint");
+    assert.equal(spec.extensions.length, 1, `${role}: same extensions`);
+    assert.equal(spec.thinking, role === "subagent" ? "low" : "low", "core default thinking level");
+    assert.equal(await handle.fallback(), role === "subagent", "fallback only when the runtime names one");
+    assert.equal(await handle.fallback(), false, "fallback is used once");
+  }
+  assert.deepEqual(switched, ["m/b"]);
+
+  const minimal = await createDriver({}, configFor(() => ({ ...MAIN })), resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, [], []) });
+  await assert.rejects(minimal.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "capability" && /extension/.test(error.message));
+  const unknown = await createDriver({}, configFor(() => ({ ...MAIN, sdk: "claude" })), EMPTY, sdks);
+  assert.throws(() => unknown.capabilities("agent.plan"), (error: unknown) => error instanceof Block && error.code === "config" && /unknown sdk "claude"/.test(error.message));
+});
+
+test("pi: capability snapshot derives thinking from the runtime's model", () => {
   const model = { provider: "p", id: "m", reasoning: true, thinkingLevelMap: { xhigh: "x" } };
   const registry = { find: (provider: string, id: string) => provider === "p" && id === "m" ? model : undefined };
-  const config: Config = { path: "test", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", model: "p/m", from: {} }) };
-  const driver = piDriver({ model, modelRegistry: registry } as never, config);
-  const caps = driver.capabilities("agent.plan");
-  assert.equal(caps.fallback, true);
+  const adapter = piAdapter({ model: undefined, modelRegistry: registry } as never);
+  const caps = adapter.capabilities({ ...MAIN, model: "p/m", path: "/runtimes/x" });
+  assert.equal(caps.switchModel, true);
+  assert.equal(caps.turnUnit, "request");
   assert.deepEqual(caps.thinking, ["off", "minimal", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(caps.context, { system: "replace", ambientInstructions: false });
+  assert.deepEqual(piAdapter({ model, modelRegistry: registry } as never).capabilities(MAIN).thinking, caps.thinking, "no runtime model: Main's model");
+  assert.throws(() => adapter.capabilities({ ...MAIN, model: "q/z", path: "/runtimes/x" }), /\/runtimes\/x\/model: Pi does not know model q\/z/);
   assert.deepEqual(thinkingLevels({ reasoning: false }), ["off"]);
   assert.deepEqual(thinkingLevels(undefined), []);
 });
 
-test("live: Pi adapter", { skip: process.env.WORQ_CONFORMANCE_PI === "1" ? false : "set WORQ_CONFORMANCE_PI=1 (and WORQ_CONFORMANCE_MODEL=<provider>/<model>) to exercise the real Pi adapter" }, async () => {
+test("pi: nothing to resolve is Block(model)", async () => {
+  const driver = await createDriver({ pi: { model: undefined, modelRegistry: { find: () => undefined } } as never }, configFor(() => ({ ...MAIN })));
+  await assert.rejects(driver.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "model");
+});
+
+test("live: Pi adapter opens a real session and submits", { skip: process.env.WORQ_CONFORMANCE_PI === "1" ? false : "set WORQ_CONFORMANCE_PI=1 (and WORQ_CONFORMANCE_MODEL=<provider>/<model>) to exercise the real Pi adapter" }, async () => {
   const { createModels } = await import("@earendil-works/pi-ai/models");
   const ref = process.env.WORQ_CONFORMANCE_MODEL;
   assert.ok(ref, "WORQ_CONFORMANCE_MODEL=<provider>/<model> is required for the live run");
@@ -344,9 +407,18 @@ test("live: Pi adapter", { skip: process.env.WORQ_CONFORMANCE_PI === "1" ? false
   const model = models.getModel(ref.slice(0, at), ref.slice(at + 1));
   assert.ok(model, `unknown model ${ref}`);
   const registry = { find: (provider: string, id: string) => models.getModel(provider, id) };
-  const config: Config = { path: "live", limits: DEFAULT_LIMITS, model: () => ({ harness: "pi", model: ref, from: {} }) };
-  const driver = piDriver({ model, modelRegistry: registry } as never, config);
-  const caps = driver.capabilities("agent.plan");
-  assert.equal(typeof caps.fallback, "boolean");
+  const runtime: Runtime = { name: "live", sdk: "pi", model: ref, path: "/runtimes/live", via: "/default" };
+  const driver = await createDriver({ pi: { model, modelRegistry: registry } as never }, configFor(() => runtime));
+  const caps = driver.capabilities("subagent");
   assert.ok(caps.thinking.length > 0, "the live model must expose a thinking level");
+  const logs: string[] = [];
+  const c = new Conversation({
+    driver, signal: new AbortController().signal, turns: 6, minutes: 3, finish,
+    spec: { name: "subagent", cwd: process.cwd(), system: "You are a conformance probe. Call submit with value set to the word ready.", tools: tools(), log: (line) => { logs.push(line); } },
+  });
+  try {
+    const result = await c.run("Call the echo tool with value hi, then call submit with value ready.");
+    assert.equal(result.value.trim().toLowerCase(), "ready");
+    assert.ok(logs.some((line) => line.startsWith("→ echo")), "the real SDK dispatched a Worq tool");
+  } finally { c.dispose(); }
 });

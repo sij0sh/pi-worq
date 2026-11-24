@@ -43,6 +43,8 @@ export interface Config {
   path: string;
   limits: Limits;
   approveExtensions: boolean;
+  /** SDKs named by declared presets (the router preloads them). */
+  sdks: string[];
   /** Resolve a role: exact role → role family → default → built-in "main". */
   runtime(role: string): Runtime;
 }
@@ -87,6 +89,7 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
     path,
     limits: { ...DEFAULT_LIMITS, ...config.limits },
     approveExtensions: config.approveExtensions ?? false,
+    sdks: [...new Set([...resolved.values()].map((r) => r.sdk))],
     runtime(role) {
       if (role.startsWith("subagent.") && !Object.hasOwn(roles, role)) throw new Block("config", `Unknown named child ${role}: declare roles["${role}"]`);
       const [family] = role.split(".");

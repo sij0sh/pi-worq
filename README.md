@@ -91,14 +91,13 @@ Adding a shared kind, workflow, or reviewer = adding one Markdown file.
 
 ```json
 {
-  "harness": "pi",
-  "fallbackModel": "provider/model",
-  "harnesses": { "pi": { "model": "provider/model", "thinking": "medium" } },
-  "models": {
-    "agent.execute": { "thinking": "high" },
-    "reviewer": { "model": "provider/model", "thinking": "high" },
-    "subagent": { "model": "provider/model", "thinking": "low" }
+  "default": "standard",
+  "runtimes": {
+    "standard": { "sdk": "pi", "model": "provider/model", "fallbackModel": "provider/model", "thinking": "medium" },
+    "deep": { "model": "provider/model", "thinking": "high" },
+    "fast": { "model": "provider/model", "thinking": "low" }
   },
+  "roles": { "agent.execute": "deep", "reviewer": "deep", "subagent": "fast" },
   "limits": {
     "agents": 4, "subagents": 6, "parallel": 4, "rounds": 3, "asks": 3,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
@@ -108,11 +107,9 @@ Adding a shared kind, workflow, or reviewer = adding one Markdown file.
 }
 ```
 
-Model keys: `agent`, `agent.<kind>`, `subagent`, `subagent.<name>`, `reviewer`, `reviewer.<name>`. `models.<key>.harness` picks the backend (absent inherits the top-level `harness`, absent there means `pi`); then `model`, `fallbackModel` and `thinking` each inherit **independently**: the role's own layer, its profile layer, `harnesses.<resolved harness>`, then the top level. `harnesses.<h>.model` therefore shadows the top-level `model` for every role resolved to that harness — do not set both.
+`runtimes` are named presets (`sdk` defaults to `pi`). `roles` maps `agent`, `agent.<kind>`, `subagent`, `subagent.<name>`, `reviewer`, `reviewer.<name>` to a preset. Resolution: exact role → role family → `default` → built-in `main` (Pi, Main's model). Presets never inherit from each other.
 
-One behaviour change versus 0.0.8: a more specific layer that sets only one field no longer discards an inherited field, so `models.reviewer.model` now reaches `reviewer.intent`. A missing model is not an error: the role uses Main's model.
-
-See `docs/configuration.md` for every key, inheritance, limits, pinned resources and failure codes, and `docs/harness.md` for the adapter contract, the capabilities and the per-harness config example.
+Skills, instructions and extensions are **not** per role: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
 
 ## CLI
 
@@ -126,7 +123,7 @@ On Linux, the CLI uses a Unix socket. State defaults to `$XDG_STATE_HOME/pi-worq
 
 Planning, execution, reviewer commands/services, artifacts, and the control CLI run on Linux and Windows. `observe_terminal` (automated PTY capture) remains Linux-only; use Linux or WSL if a review needs it. On Windows, command tools run `.exe` programs directly, not `.cmd` or `.bat` shims. For npm-based checks use `node` with a CLI JavaScript entry point (e.g. `node node_modules/typescript/bin/tsc`). Repo file tools use `/`-separated relative paths on both platforms.
 
-One backend ships today (Pi); a second is one adapter file plus one registry line, documented in `docs/harness.md`. Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Pi sessions are not a security sandbox. Reviewer and agent judgement quality is not proven by the test suite, which uses a scripted driver.
+One SDK ships today (Pi); a second is one adapter file under `src/sdk/` plus one registry record, documented in `docs/sdk.md`. Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Pi sessions are not a security sandbox. Reviewer and agent judgement quality is not proven by the test suite, which uses a scripted driver.
 
 ## Develop
 
@@ -136,12 +133,12 @@ npm run check && npm test
 
 For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.
 
-### Routes, checkpoints and trusted Pi resources
+### Routes, checkpoints and shared resources
 
 Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` for costly failures and independent, decision-changing questions (`worq spawn execute --title "Update report" --mode fast "task"`). For plans, `fast` uses the existing subtraction reviewer to check requirements and unnecessary scope, falling back to the full kind roster if that reviewer is absent. Default and `thorough` plans use the full roster. Neither mode changes execute review, models, thinking, tools or caps. The optional spawn field `reason` records why Main chose the route. Omit mode for the default. `worq list <ref>` shows route, review policy, cumulative turns and role settings with JSON sources.
 
 `limits.runTurns` (default 1000) covers the worker, retries, PQs and review roster across rounds. Per-session turn/time warnings and run warnings without grant headroom are display-only. If `limits.continuationTurns` (default 0) leaves room for a grant, near exhaustion an actionable checkpoint lets Main use `worq send REF '/continue N'`. Between requests a depleted run with headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. No grant raises a per-session turn/time limit, round cap, service quota or concurrency limit.
 
-In `pi-worq.json`, `models` entries may specify `skills`, `instructions` (e.g. AGENTS.md) and `extensions`. Each is an array of `{ "path": "relative/file", "sha256": "<64 lowercase hex digits>" }` under `<agentDir>/worq-resources/`, outside Git checkouts. Exact role lists replace corresponding family lists; `[]` removes the grant. No parent-role grants transfer. Configure `models["subagent.evidence"]` with its own model and skills, then delegate with `name: "evidence"`. Plain `delegate` selects `subagent`. `reviewer.intent` resolves independently. Skills and instructions contribute pinned text, not permissions. Executables require `approveExecutables: true` on the selected role and must be trusted standalone JavaScript modules: approval runs operator code in the Pi process, not a sandbox. Do not approve scripts that import candidate code. No candidate discovery is enabled.
+Shared resources live in `<agentDir>/worq/`: `instructions/*.md` (appended to every system prompt), `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool) and `extensions/*.{mjs,js,ts}` (native Pi extensions; require `"approveExtensions": true`). Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own; extensions run operator code in-process, not a sandbox. Named PQs: map `roles["subagent.evidence"]` to a preset, then delegate with `name: "evidence"`. No candidate discovery is enabled.
 
 Agent names are exact lowercase slugs of their titles, with a numeric suffix on collision. Use the returned name for list, send, cancel and inspect. Plans are saved as `.agents/plans/plan-<name>.md`; revisions retain the same path. Existing plan files may be attached by their repo-relative path. At-sign mentions in tasks are always literal.

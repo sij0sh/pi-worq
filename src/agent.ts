@@ -4,11 +4,12 @@ import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkReport, type Verdict } from "./contracts.ts";
-import type { Limits } from "./config.ts";
+import type { Limits } from "./runtime/config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
-import { Conversation, WorkerHandoff, tool, type Driver, type Tool } from "./session.ts";
+import { Conversation, WorkerHandoff } from "./session.ts";
+import { tool, type Driver, type Tool } from "./sdk/contract.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
 
@@ -49,7 +50,7 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
-  /** Judge one role's model choice before any work; built in Worq.spawn over the config and the driver. */
+  /** Judge one role's runtime before any work; built in Worq.spawn over the config and the driver. */
   check(role: string): void;
 }
 
@@ -266,7 +267,7 @@ export class Agent {
       const noReviewers = user && !this.kind.reviewers ? "\n\nNo independent reviewers run for this workflow; submit a self-contained result." : "";
       this.conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, admitCloseout: this.admitCloseout, pending: () => this.openPqs,
-        spec: { observe: this.deps.telemetry?.sink(this.id), profile: "agent", name: `agent.${this.kind.name}`, cwd, tools, system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
+        spec: { observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
           description: write ? `Submit your work${reviewed ? " for independent review" : ""}.` : user ? `Submit your result${reviewed ? " for independent review" : ""}. Worq saves it to .agents/plans/.` : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
@@ -391,7 +392,7 @@ export class Agent {
       this.deps.telemetry?.state(key, 'running');
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
+        spec: { observe: this.deps.telemetry?.sink(key), name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
         finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
       });
       d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
@@ -508,7 +509,7 @@ export class Agent {
       }
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), profile: "reviewer", name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
+        spec: { observe: this.deps.telemetry?.sink(key), name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
         finish: { name: "report", description: "Return your independent review.", schema: ReviewReport },
       });
       const payload = {

@@ -1,9 +1,9 @@
 import { Agent, ENDED, Semaphore, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
-import type { Config } from "./config.ts";
+import type { Config } from "./runtime/config.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
-import { assertChoice, type Driver } from "./session.ts";
+import { assertRuntime, type Driver } from "./sdk/contract.ts";
 import { reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {
@@ -11,6 +11,8 @@ export interface WorqDeps {
   driver: Driver;
   prompts: Prompts;
   config: Config;
+  /** Installed native extension count; every role's SDK must be able to load them. */
+  extensions?: number;
   state: string;
   cwd: string;
   notify(event: AgentEvent): void;
@@ -32,11 +34,9 @@ export class Worq {
     this.deps = deps;
     this.semaphore = new Semaphore(deps.config.limits.parallel);
   }
-  /** Judge one role's resolved choice against what its harness can do. Fails before any work. */
+  /** Judge one role's resolved runtime against what its SDK can do. Fails before any work. */
   private readonly check = (role: string): void => {
-    const caps = this.deps.driver.capabilities(role);
-    assertChoice(this.deps.config.model(role), caps);
-    if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${role}: isolated context required`);
+    assertRuntime(this.deps.config.runtime(role), this.deps.driver.capabilities(role), this.deps.extensions ?? 0);
   };
   get size() { return this.agents.size; }
   all() { return [...this.agents.values()]; }
@@ -111,7 +111,7 @@ export class Worq {
       `Route: ${a.mode ?? "default"}${a.reason ? ` (${a.reason})` : ""}; review: ${a.reviewPolicyLabel}`,
       `Run turns: ${a.view().budget.spent}/${a.view().budget.allowance}`,
       ...[...new Set([`agent.${a.kind.name}`, ...a.delegations.map(d => d.role ?? "subagent"), ...a.reviews.map(r => `reviewer.${r.name}`)])].map(role => {
-        try { return `${role}: ${JSON.stringify(this.deps.config.model(role))}`; } catch (e) { return `${role}: ${String(e)}`; }
+        try { return `${role}: ${JSON.stringify(this.deps.config.runtime(role))}`; } catch (e) { return `${role}: ${String(e)}`; }
       }),
       a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,

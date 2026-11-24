@@ -137,9 +137,8 @@ Workflows are kinds, so the normal role keys apply:
 
 ```json
 {
-  "models": {
-    "agent.architecture-audit": { "model": "provider/model", "thinking": "high" }
-  }
+  "runtimes": { "deep": { "model": "provider/model", "thinking": "high" } },
+  "roles": { "agent.architecture-audit": "deep" }
 }
 ```
 

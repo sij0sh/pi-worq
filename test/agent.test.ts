@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Agent, Semaphore } from "../src/agent.ts";
-import { DEFAULT_LIMITS } from "../src/config.ts";
+import { DEFAULT_LIMITS } from "../src/runtime/config.ts";
 import { loadPrompts } from "../src/prompts.ts";
 import { readTools } from "../src/tools.ts";
 import { scoped, worktree } from "../src/workspace.ts";

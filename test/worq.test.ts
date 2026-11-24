@@ -156,7 +156,7 @@ test("plan agent: PQ delegation, plan saved to .agents/plans, parallel plan revi
   assert.ok(!agentTexts[0].includes('"verify"'), "read kinds carry no verify key");
   assert.equal(agent.delegations[0].state, "answered");
   assert.ok(agentTexts.some((x) => x.includes("Answer (observed): app.py:1")));
-  assert.equal(seen.find((s) => s.name === "agent.plan")?.profile, "agent");
+  assert.equal(seen.find((s) => s.name === "agent.plan")?.name.split(".")[0], "agent");
 
   assert.match(worq.send(agent.ref, "Accept defeater-1: state the newline"), /Round 2 started/);
   assert.match((await next("review-ready", agent.ref, 2)).text, /unresolved review issues/, "a repair attempt does not clear a repeated finding");
@@ -257,7 +257,7 @@ test("execute with verify:false: no reviewer runs and the digest says the diff i
   const exec = await worq.spawn("execute", "Uppercase the greeting", { title: "Uppercase the greeting", verify: false, mode: "fast" });
   const ready = await next("review-ready", exec.ref);
   assert.match(texts[0], /"verify": false/);
-  assert.equal(seen.filter((s) => s.profile === "reviewer").length, 0, "no reviewer ran");
+  assert.equal(seen.filter((s) => s.name.startsWith("reviewer.")).length, 0, "no reviewer ran");
   assert.match(ready.text, /No reviewers ran: this result is unverified/);
   assert.match(ready.text, /review-ready · unverified/);
   assert.match(worq.list(exec.ref), /Reviews: unverified/);
@@ -342,7 +342,7 @@ test("fast plans use a focused reviewer and fall back to the configured roster",
   await next("review-ready", fallback.ref);
   assert.deepEqual(fallback.reviews.map(r => r.name), ["decision", "defeater", "pair"]);
   assert.match(worq.list(fallback.ref), /review: kind roster/);
-  assert.ok(seen.filter(s => s.profile === "reviewer").every(s => !s.system.includes("only reviewer on this fast plan")));
+  assert.ok(seen.filter(s => s.name.startsWith("reviewer.")).every(s => !s.system.includes("only reviewer on this fast plan")));
   await worq.cancel(fallback.ref);
 
   const failed = setup(root, state, {
@@ -406,8 +406,8 @@ for (const runTurns of [1, 2]) test(`worker preserves planner text with ${runTur
   const { worq, events } = setup(root, state, {
     "agent.plan": (turn) => {
       requests++;
-      turn.spec.completedText?.("Observed greeting in app.py");
-      turn.spec.completedText?.(" ");
+      turn.spec.emit({ type: "text", text: "Observed greeting in app.py", completed: true });
+      turn.spec.emit({ type: "text", text: " ", completed: true });
     },
   }, { agentTurns: 1, runTurns });
   const agent = await worq.spawn("plan", "Inspect greeting", { title: "Inspect greeting" });
@@ -433,11 +433,11 @@ test("eligible closeout debits one turn, fences tools, and retains ignored execu
         await writeFile(join(turn.spec.cwd, "new.txt"), "new");
         await mkdir(join(turn.spec.cwd, ".agents"), { recursive: true });
         await writeFile(join(turn.spec.cwd, ".agents", "ignored.txt"), "ignored");
-        turn.spec.completedText?.("Ordinary evidence");
+        turn.spec.emit({ type: "text", text: "Ordinary evidence", completed: true });
       } else {
         assert.match(turn.text, /Do not use tools/);
         assert.match(await turn.tool("read_file", { path: "app.py" }), /Tool dispatch is closed/);
-        turn.spec.completedText?.("Closeout evidence");
+        turn.spec.emit({ type: "text", text: "Closeout evidence", completed: true });
       }
     },
   }, { agentTurns: 1, runTurns: 3 });
@@ -493,10 +493,10 @@ test("automatic over-cap turn fences tools and skips model closeout", async (t) 
     "agent.plan": async (turn) => {
       requests++;
       if (requests === 1) {
-        turn.spec.completedText?.("Kept ordinary text");
+        turn.spec.emit({ type: "text", text: "Kept ordinary text", completed: true });
         turn.steered.push("automatic continuation");
       } else {
-        turn.spec.completedText?.("Discarded late text");
+        turn.spec.emit({ type: "text", text: "Discarded late text", completed: true });
         assert.match(await turn.tool("submit", planSubmission), /Tool dispatch is closed/);
       }
     },
@@ -523,11 +523,11 @@ test("closeout timeout falls back to ordinary evidence and fences late callbacks
   let requests = 0;
   const { worq, events } = setup(root, state, {
     "agent.plan": async (turn) => {
-      if (++requests === 1) turn.spec.completedText?.("Ordinary result");
+      if (++requests === 1) turn.spec.emit({ type: "text", text: "Ordinary result", completed: true });
       else {
         start();
         await blocked;
-        turn.spec.completedText?.("Late closeout");
+        turn.spec.emit({ type: "text", text: "Late closeout", completed: true });
       }
     },
   }, { agentTurns: 1, runTurns: 3 });
@@ -549,7 +549,7 @@ test("handoff artifact write failure publishes inline evidence once", async (t) 
     "agent.plan": async (turn) => {
       const agent = worq.all()[0];
       await mkdir(join(state, agent.ref, "handoff-1.json.tmp"));
-      turn.spec.completedText?.("Recoverable text");
+      turn.spec.emit({ type: "text", text: "Recoverable text", completed: true });
     },
   }, { agentTurns: 1, runTurns: 2 });
   const agent = await worq.spawn("plan", "Inspect greeting", { title: "Inspect greeting" });
