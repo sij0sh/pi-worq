@@ -99,6 +99,7 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
       } catch { report({ context: undefined }); }
     };
     const seen = new WeakSet<object>();
+    let started: number | undefined;
     setup();
     let failed = false;
     const unsubscribe = session.subscribe((event) => {
@@ -114,14 +115,15 @@ export function piDriver(ctx: Pick<ExtensionContext, "model" | "modelRegistry">,
         calls.delete(event.toolCallId);
         outcomes.delete(event.toolCallId);
       }
+      if (event.type === 'message_start' && event.message.role === 'assistant') started = performance.now();
       if (event.type === 'message_end' && event.message.role === 'assistant' && !seen.has(event.message)) {
         seen.add(event.message);
         const { usage, stopReason } = event.message;
-        if (stopReason !== 'error' && stopReason !== 'aborted') report({ cache: { read: usage?.cacheRead, write: usage?.cacheWrite } });
+        if (stopReason !== 'error' && stopReason !== 'aborted') report({ cache: { read: usage?.cacheRead, write: usage?.cacheWrite, input: usage?.input, speed: started !== undefined && usage?.output > 0 ? usage.output * 1000 / Math.max(1, performance.now() - started) : undefined } });
       }
       if (event.type === 'agent_end') { outcomes.clear(); calls.clear(); }
       if (event.type === 'agent_end' || event.type === 'compaction_end') { report({ phase: 'idle' }); context(); }
-      if (event.type === "turn_start") spec.turn();
+      if (event.type === "turn_start") { report({ turn: true }); spec.turn(); }
       else if (event.type === "tool_execution_start") spec.log(`→ ${event.toolName} ${JSON.stringify(event.args ?? {}).slice(0, 200)}`);
       else if (event.type === "tool_execution_end" && event.isError) {
         const content = event.result?.content as { type: string; text?: string }[] | undefined;

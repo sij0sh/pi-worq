@@ -1,5 +1,6 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { glance, hasGlance, Inspector } from './src/inspector.ts';
+import { agentDock } from './src/dock.ts';
+import { hasGlance, Inspector } from './src/inspector.ts';
 import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
@@ -52,7 +53,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
 };
 
 /** Test seam: replace the Pi SDK driver. */
-export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string } = {}) {
+export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string; telemetry?: Telemetry } = {}) {
   return function worq(pi: ExtensionAPI) {
     const prompts = loadPrompts();
     const table = ops([...prompts.kinds.keys()]);
@@ -63,7 +64,9 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     let closing = false;
     let ui: ExtensionContext | undefined;
 
-    const telemetry = new Telemetry();
+    const telemetry = options.telemetry ?? new Telemetry();
+    let folded = false;
+    const toggle = () => { folded = !folded; redrawWidget?.(); };
     let closeInspector: (() => void) | undefined;
     let redrawWidget: (() => void) | undefined;
     let redrawInspector: (() => void) | undefined;
@@ -85,17 +88,11 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       widget = live;
       redrawWidget = undefined;
       ui.ui.setWidget?.('worq', live ? (tui, theme) => {
-        let cached: { width: number; second: number; lines: string[] } | undefined;
-        redrawWidget = () => { cached = undefined; tui.requestRender(); };
-        return {
-          render(width) {
-            const second = Math.floor(Date.now() / 1000);
-            if (!cached || cached.width !== width || cached.second !== second) cached = { width, second, lines: glance(telemetry, width, theme) };
-            return cached.lines;
-          },
-          invalidate() { cached = undefined; },
-        };
-      } : undefined);
+        redrawWidget = () => tui.requestRender();
+        const clock = setInterval(redrawWidget, 1000).unref();
+        const dock = agentDock(telemetry, theme, () => folded, toggle, (ref, key) => { if (ui) void inspect(ref ?? '', ui, key); }, () => tui.terminal?.rows ?? 24);
+        return Object.assign(dock, { dispose() { clearInterval(clock); } });
+      } : undefined, { placement: 'belowEditor' });
     };
     const status = () => {
       if (off) enable(false);
@@ -190,9 +187,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       },
     });
 
-    pi.registerCommand('worq-inspect', {
-      description: 'Read-only session inspector: /worq-inspect [ref]',
-      async handler(args, ctx) {
+    pi.registerCommand('worq-dock', { description: 'Collapse or expand the agent dock', handler: async () => toggle() });
+    async function inspect(args: string, ctx: ExtensionContext, key?: string) {
         if (closing || closeInspector) return;
         const ref = args.trim().replace(/^@/, '').toLowerCase();
         if (args.trim() && !isRef(ref)) { say(ctx, 'Usage: /worq-inspect [ref]', 'error'); return; }
@@ -202,11 +198,11 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           await ctx.ui.custom<void>((tui, theme, _keys, done) => {
             redrawInspector = () => tui.requestRender();
             closeInspector = () => { closeInspector = undefined; redrawInspector = undefined; done(undefined); };
-            return new Inspector(telemetry, ref || undefined, theme, () => tui.terminal.rows, redrawInspector, closeInspector);
-          });
+            return new Inspector(telemetry, ref || undefined, theme, () => tui.terminal.rows, redrawInspector, closeInspector, key);
+          }, { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', anchor: 'center' } });
         } finally { closeInspector = undefined; redrawInspector = undefined; }
-      },
-    });
+    }
+    pi.registerCommand('worq-inspect', { description: 'Agent dashboard: /worq-inspect [ref]', handler: inspect });
 
     pi.registerMessageRenderer("worq", (message, options, theme) => {
       const body = clean(typeof message.content === "string" ? message.content : message.content.map((c) => c.type === "text" ? c.text : "").join(""));

@@ -6,7 +6,7 @@ export type Outcome = { kind: "exit"; code: number; stdout: boolean; stderr: boo
   | { kind: "ok" | "sdk-error" | "launch" | "timeout" | "output-limit" | "process-exit" | "cleanup-unconfirmed" | "cancelled" | "missing"; cancelled?: boolean };
 export interface Setup { model?: string; thinking?: string; skills: string[] }
 export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Setup } | { context: number | undefined }
-  | { cache: { read?: number; write?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
+  | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
 export const observe = <T>(sink: ((value: T) => void) | undefined, value: T) => { try { sink?.(value); } catch { /* display only */ } };
 export const label = (s: string | undefined) => s?.replace(/[^a-zA-Z0-9._+:/ -]/g, "?").slice(0, 96);
 export interface Revision {
@@ -21,6 +21,7 @@ export interface Row {
   key: string; ref: string; role: string; parent?: string; review?: ReviewIdentity; born: number; since: number;
   state: AgentState | "queued" | "answered" | "done"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
   phase?: "request" | "idle" | "closed"; setup?: Setup; context?: { percent?: number; at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
+  question?: string; turns?: number; rate?: number; speed?: number;
   current: Map<string, Call>; last?: Call;
 }
 export class Telemetry {
@@ -37,9 +38,9 @@ export class Telemetry {
     this.activity.push({ key, at: Date.now(), text, outcome });
     if (this.activity.length > 240) { this.activity.shift(); this.activityGap++; }
   }
-  add(key: string, ref: string, role: string, parent?: string, review?: ReviewIdentity) {
+  add(key: string, ref: string, role: string, parent?: string, review?: ReviewIdentity, question?: string) {
     const now = Date.now();
-    this.rows.set(key, { key, ref, role, parent, review, born: now, since: now, state: parent ? "queued" : "starting", current: new Map(), cache: { responses: 0, read: 0, write: 0, reads: 0, writes: 0 } });
+    this.rows.set(key, { key, ref, role, parent, review, question: question?.replace(/[\p{C}\s]+/gu, ' ').slice(0, 800), born: now, since: now, state: parent ? "queued" : "starting", current: new Map(), cache: { responses: 0, read: 0, write: 0, reads: 0, writes: 0 } });
     this.event(key, parent ? "queued" : "starting"); this.changed();
   }
   state(key: string, state: Row["state"], blocker?: Row["blocker"]) {
@@ -66,7 +67,12 @@ export class Telemetry {
         }
       } else if ("setup" in value) r.setup = value.setup;
       else if ("context" in value) r.context = { percent: value.context, at: Date.now() };
+      else if ('turn' in value) r.turns = (r.turns ?? 0) + 1;
       else if ("cache" in value) {
+        const { input, read, write, speed } = value.cache;
+        const total = (input ?? NaN) + (read ?? NaN) + (write ?? NaN);
+        r.rate = total > 0 ? 100 * read! / total : undefined;
+        r.speed = speed;
         r.cache.responses++;
         for (const field of ["read", "write"] as const) {
           const n = value.cache[field];

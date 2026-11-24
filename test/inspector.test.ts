@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { test } from 'node:test';
 import { visibleWidth } from '@earendil-works/pi-tui';
-import { glance, hasGlance, Inspector } from '../src/inspector.ts';
+import { agentDock } from '../src/dock.ts';
+import { hasGlance, Inspector } from '../src/inspector.ts';
 import { Telemetry } from '../src/telemetry.ts';
 import { pass, planSubmission, repo, setup } from './fake.ts';
 
@@ -66,8 +67,8 @@ test('bounded layouts and independent evidence retention through out-of-order to
   let closed = false;
   const panel = new Inspector(data, undefined, theme, () => 30, () => {}, () => { closed = true; });
   for (const width of [1, 4, 22, 79, 80, 140]) {
-    const rows = glance(data, width, theme);
-    assert.ok(rows.length <= 4);
+    const rows = agentDock(data, theme, () => false, () => {}, () => {}, () => 24).render(width);
+    assert.ok(rows.length <= 9);
     assert.ok([...rows, ...panel.render(width)].every(line => visibleWidth(line) <= width));
   }
   assert.match(panel.render(140).join('\n'), /exit 7/);
@@ -80,20 +81,21 @@ test('bounded layouts and independent evidence retention through out-of-order to
 });
 
 
-test('20-column glance retains actor, status and overflow without counting failures as live', () => {
+test('20-column dock retains actor and status without counting failures as live', () => {
   const data = new Telemetry();
   data.add('failed', '0000', 'plan');
   data.state('failed', 'failed', 'failure');
-  assert.match(glance(data, 20, theme).join(' '), /0 live 1 fail.*@0000 failed Main/);
+  const dock = agentDock(data, theme, () => false, () => {}, () => {}, () => 24);
+  assert.match(dock.render(20).join(' '), /0 live.*@0000 failed Main/);
   assert.equal(hasGlance(data), true);
   for (let i = 1; i < 99; i++) data.add(String(i), i.toString(16).padStart(4, '0'), 'execute');
   data.state('1', 'waiting', 'ask');
   data.state('2', 'review-ready', 'adjudicate');
-  const narrow = glance(data, 20, theme);
-  assert.deepEqual(narrow, ['98 live 1 fail +97', '@0001 waiting Main', '@0002 rev-rdy Main', '/worq-inspect']);
+  const narrow = dock.render(20);
+  assert.match(narrow.join(' '), /98 live/);
   assert.ok(narrow.every(line => visibleWidth(line) <= 20));
   data.state('1', 'closed');
-  assert.equal(glance(data, 20, theme)[2], '@0000 failed Main');
+  assert.match(dock.render(20)[0], /97 live/);
   const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
   panel.handleInput('\x1b');
   assert.match(panel.render(20).join(' '), /@0002 rev-rdy Main/);

@@ -319,7 +319,7 @@ export class Agent {
   }
   private async pq(d: Delegation, cwd: string, role: string) {
     const key = this.id + ':' + d.id;
-    this.deps.telemetry?.add(key, this.ref, 'PQ ' + d.id, this.id);
+    this.deps.telemetry?.add(key, this.ref, 'PQ ' + d.id, this.id, undefined, d.question);
     const signal = this.signal;
     const { driver, prompts, limits, semaphore } = this.deps;
     let conversation: Conversation<typeof PqAnswer> | undefined;
