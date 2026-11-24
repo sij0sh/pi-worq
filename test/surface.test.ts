@@ -266,7 +266,7 @@ test("/worq launches any package: select → optional instructions → explicit 
   const alerts: { text: string; level: string }[] = [];
   const tasks: string[] = [];
   const selects: string[][] = [];
-  const inputs: { title: string; placeholder?: string }[] = [];
+  const inputs: string[] = [];
   const overlays: string[] = [];
   let choose: string | undefined = "docs";
   let answer: string | undefined = "";
@@ -292,10 +292,17 @@ test("/worq launches any package: select → optional instructions → explicit 
       setStatus() {},
       setWidget() {},
       select: async (_title: string, options: string[]) => { selects.push(options); return choose === undefined ? undefined : options.find((o) => o.startsWith(`${choose} ·`)); },
-      input: async (title: string, placeholder?: string) => { inputs.push({ title, placeholder }); return answer; },
       custom: (factory: Function) => new Promise((resolve) => {
         const component = factory({ requestRender() {}, terminal: { rows: 30 } }, { fg: (_: string, s: string) => s }, {}, resolve);
-        overlays.push(component.render(100).join("\n"));
+        const view = component.render(100).join("\n");
+        overlays.push(view);
+        // The instructions prompt: type the answer then Enter, or Esc when there is none.
+        if (/instructions \(optional\)/.test(view)) {
+          inputs.push(view);
+          if (answer === undefined) component.handleInput("\x1b");
+          else { component.handleInput(answer); component.handleInput("\r"); }
+          return;
+        }
         component.handleInput(keys.shift() ?? "\r");
       }),
     },
@@ -322,7 +329,7 @@ test("/worq launches any package: select → optional instructions → explicit 
   assert.deepEqual(entries.at(-1)?.data, { on: true });
   // Empty instructions run the package as written.
   assert.equal(tasks.at(-1), "Run the docs workflow on this repository and submit its result.");
-  assert.deepEqual(inputs.at(-1), { title: "Launch docs: instructions (optional)", placeholder: "Leave empty to run the package as written" });
+  assert.match(inputs.at(-1)!, /Launch docs: instructions \(optional\)[\s\S]*Leave empty to run the package as written[\s\S]*Ctrl\+V \/ right-click paste/);
 
   // The model sees model-invocable packages with their policies; kind is checked against the catalog, not an enum.
   const spawn = tools.find((tool) => tool.name === "worq_spawn")!;

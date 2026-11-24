@@ -6,7 +6,7 @@ import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type { AgentEvent } from "./src/agent.ts";
-import { confirmOverlay, launchPicker, runtimePicker } from './src/launch-picker.ts';
+import { confirmOverlay, launchPicker, runtimePicker, textPrompt } from './src/launch-picker.ts';
 import type { SessionAction } from './src/dock.ts';
 import { loadConfig } from "./src/runtime/config.ts";
 import { EMPTY, loadResources } from "./src/runtime/resources.ts";
@@ -199,7 +199,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       const choice = await ctx.ui.select("Launch SDK agent", [...labels.keys()]);
       const kind = choice === undefined ? undefined : labels.get(choice);
       if (!kind) return;
-      const extra = await ctx.ui.input(`Launch ${kind.name}: instructions (optional)`, "Leave empty to run the package as written");
+      const extra = await textPrompt(ctx.ui, `Launch ${kind.name}: instructions (optional)`, "Leave empty to run the package as written");
       if (extra === undefined) return;
       const initial = await worq.defaults();
       const runtime = await launchPicker(ctx.ui, { label: kind.name, initial, choices: await worq.launchChoices(initial) });

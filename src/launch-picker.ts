@@ -1,5 +1,6 @@
+import { execFile } from 'node:child_process';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { getNativeClipboard, Input, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
 import type { ModelChoice } from './runtime/launch.ts';
@@ -117,4 +118,66 @@ export function confirmOverlay(ui: ExtensionContext['ui'], title: string, messag
       if (matchesKey(data, 'left') || matchesKey(data, 'right') || matchesKey(data, 'tab')) { yes = !yes; tui.requestRender(); }
     },
   }), { overlay: true, overlayOptions: { width: '60%', anchor: 'center' } });
+}
+
+function run(command: string, args: string[]) {
+  return new Promise<string | undefined>(resolve => {
+    execFile(command, args, { timeout: 5000, maxBuffer: 1 << 20 }, (error, stdout) => resolve(error ? undefined : stdout));
+  });
+}
+/** System clipboard text: platform tools first, then Pi's native helper. Undefined when unavailable or empty. */
+async function readClipboardText(): Promise<string | undefined> {
+  const commands: [string, string[]][] = [];
+  if (process.platform === 'darwin') commands.push(['pbpaste', []]);
+  if (process.platform === 'linux') {
+    if (process.env.WAYLAND_DISPLAY) commands.push(['wl-paste', ['--no-newline', '--type', 'text']]);
+    if (process.env.DISPLAY) commands.push(['xclip', ['-selection', 'clipboard', '-out']], ['xsel', ['--clipboard', '--output']]);
+  }
+  for (const [command, args] of commands) {
+    const text = await run(command, args);
+    if (text !== undefined) return text || undefined;
+  }
+  try { return (await getNativeClipboard()?.getText()) || undefined; } catch { return undefined; }
+}
+
+/**
+ * Single-line text prompt as an overlay. Unlike ui.input it pastes the system clipboard on Ctrl+V and right-click
+ * (terminal paste, e.g. Ctrl+Shift+V, still works). Newlines in pasted text become spaces.
+ * Resolves the text (possibly empty) on Enter, undefined on Esc.
+ */
+export function textPrompt(ui: ExtensionContext['ui'], title: string, hint: string): Promise<string | undefined> {
+  return ui.custom<string | undefined>((tui, theme, _keys, done) => {
+    const input = new Input();
+    let closed = false;
+    const finish = (value: string | undefined) => { closed = true; done(value); };
+    const paste = async () => {
+      const text = await readClipboardText();
+      if (closed || !text) return;
+      input.handleInput(`\x1b[200~${text.replace(/\r\n|\r|\n/g, ' ')}\x1b[201~`);
+      tui.requestRender();
+    };
+    return {
+      get focused() { return input.focused; },
+      set focused(value: boolean) { input.focused = value; },
+      invalidate() { input.invalidate(); },
+      render: (width) => boxed(theme, width, [theme.fg('accent', clean(title)), ...input.render(Math.max(1, width - 4)),
+        theme.fg('muted', clean(hint)), theme.fg('muted', 'Enter submit · Esc cancel · Ctrl+V / right-click paste')]),
+      handleInput(data) {
+        if (matchesKey(data, 'enter')) return finish(input.getValue());
+        if (matchesKey(data, 'escape')) return finish(undefined);
+        if (matchesKey(data, 'ctrl+v')) { void paste(); return; }
+        input.handleInput(data);
+        tui.requestRender();
+      },
+      handleMouse(event) {
+        if (event.button === 'right') {
+          if (event.type === 'press') void paste();
+          return { handled: true, render: false };
+        }
+        // Box layout: border, title, input row (y=2); content starts after '│ '.
+        if (event.y === 2) return input.handleMouse({ ...event, x: event.x - 2, y: 0 });
+        return undefined;
+      },
+    };
+  }, { overlay: true, overlayOptions: { width: '85%', anchor: 'center' } });
 }
