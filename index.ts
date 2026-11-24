@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { agentDock } from './src/dock.ts';
 import { hasGlance, Inspector } from './src/inspector.ts';
@@ -9,7 +10,7 @@ import { loadConfig } from "./src/config.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
 import { createDriver } from "./src/harness.ts";
-import { loadPrompts } from "./src/prompts.ts";
+import { loadPrompts, loadWorkflows } from "./src/prompts.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/session.ts";
 import { statePath } from "./src/workspace.ts";
@@ -105,13 +106,20 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         : { triggerTurn: false });
       status();
     };
+    const agentDir = () => options.agentDir?.() ?? getAgentDir();
     const ensure = (ctx: ExtensionContext) => {
       ui = ctx;
       if (instance) return instance;
-      const config = loadConfig(options.agentDir?.() ?? getAgentDir());
+      const config = loadConfig(agentDir());
       const driver = options.driver?.(ctx) ?? createDriver({ host: ctx }, config);
       instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, config, state: statePath(), cwd: ctx.cwd, notify });
       return instance;
+    };
+    /** Make list/send/cancel available for a launched workflow without enabling Main's spawn. */
+    const service = () => {
+      const active = new Set(pi.getActiveTools());
+      for (const name of TOOLS) if (name !== "worq_spawn") active.add(name);
+      pi.setActiveTools([...active]);
     };
     const run = async (ctx: ExtensionContext, op: string, args: unknown) => {
       if (off && op === "spawn") throw new Error("Worq is off; re-enable with /worq.");
@@ -145,6 +153,29 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       if (ctx.mode === "tui") ctx.ui.notify(clean(text), level);
       else process.stderr.write(`${clean(text)}\n`);
     };
+    /** The one user entry point: choose an installed workflow, then optional extra instructions. */
+    const launchWorkflow = async (ctx: ExtensionContext) => {
+      if (ctx.mode !== "tui") { say(ctx, "Workflow launcher requires a TUI."); return; }
+      const dir = join(agentDir(), "workflows");
+      const { kinds, problems } = loadWorkflows(dir, prompts);
+      for (const problem of problems) say(ctx, `! ${problem.message}`, "warning");
+      if (!kinds.size) {
+        say(ctx, `No workflows installed. Add ${join(dir, "<name>.md")} with access, description, a "Workflow" section and a "Recursive question" section.`);
+        return;
+      }
+      const list = [...kinds.values()];
+      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access} · ${kind.description}`, kind]));
+      const choice = await ctx.ui.select("Launch workflow", [...labels.keys()]);
+      if (choice === undefined) return;
+      const kind = labels.get(choice);
+      if (!kind) return;
+      const extra = await ctx.ui.input(`Additional instructions for ${kind.name} (optional)`, "Leave empty to run the workflow as written");
+      if (extra === undefined) return;
+      const agent = await ensure(ctx).runWorkflow(kind, extra);
+      service();
+      status();
+      say(ctx, `Launched workflow ${kind.name} as ${agent.ref}. /worq list ${agent.ref} reads its result; /worq send ${agent.ref} <text> steers or starts another round; /worq cancel ${agent.ref} stops it.`);
+    };
 
     // Passive notices are visible and persisted, but never steer an unrelated Main turn.
     pi.on("context", (event) => {
@@ -157,7 +188,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
 
     pi.registerCommand("worq", {
-      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
+      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq workflow · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
       async handler(args, ctx) {
         if (closing) return;
         const value = args.trim();
@@ -169,6 +200,11 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
             say(ctx, "New launches disabled. Running agents continue; /worq cancel all stops them.");
             return;
           }
+          if (word === "workflow") {
+            if (value !== "workflow") { say(ctx, "Usage: /worq workflow", "error"); return; }
+            await launchWorkflow(ctx);
+            return;
+          }
           if (word === "list" || word === "send" || word === "cancel") {
             const params = word === "list" ? (ref ? { ref } : {}) : word === "send" ? { ref, text: rest.join(" ") } : { ref };
             say(ctx, (await run(ctx, word, params)).text);
@@ -178,7 +214,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           pi.appendEntry(ENABLED, { on: true });
           if (!value) {
             ensure(ctx);
-            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}.`);
+            say(ctx, `Worq tools enabled (${TOOLS.join(", ")}). Kinds: ${[...prompts.kinds.keys()].join(", ")}. Workflows: /worq workflow.`);
             return;
           }
           if (prompts.kinds.has(value)) { say(ctx, `Usage: /worq ${value} <request>`, "error"); return; }

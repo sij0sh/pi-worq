@@ -1,7 +1,7 @@
 import { Agent, ENDED, Semaphore, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
 import type { Config } from "./config.ts";
-import type { Prompts } from "./prompts.ts";
+import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
 import { assertChoice, type Driver } from "./session.ts";
 import { reserveName, readPlan, repository } from "./workspace.ts";
@@ -46,14 +46,26 @@ export class Worq {
     return agent;
   }
 
-  async spawn(kindName: string, task: string, { title, attach = [], verify = true, mode, reason }: { title: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
-    const { prompts, config } = this.deps;
+  async spawn(kindName: string, task: string, opts: { title: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
+    const { prompts } = this.deps;
     const kind = prompts.kinds.get(kindName);
-    if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}`);
-    if (kind.access !== "write" && verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
+    if (kind?.invocation === "user") throw new Block("invocation", `${kindName} is a user-invoked workflow; launch it with /worq workflow`);
+    if (!kind) throw new Block("kind", `Unknown kind ${kindName}; use ${[...prompts.kinds.keys()].join(" | ")}. Workflows are launched with /worq workflow`);
+    if (kind.access !== "write" && opts.verify === false) throw new Block("invalid-payload", "verify:false applies to execute only");
+    return this.admit(kind, task, { ...opts, base: nameFrom(opts.title) });
+  }
+  /** The user's one launch path for `invocation: "user"` kinds. Shared kinds stay on worq_spawn. */
+  async runWorkflow(kind: Kind, direction?: string): Promise<Agent> {
+    if (kind.invocation !== "user") throw new Block("invocation", `${kind.name} is a shared kind; launch it with worq_spawn`);
+    const prompt = (direction ?? "").trim();
+    if (prompt.length > 8000) throw new Block("invalid-payload", "Workflow direction exceeds 8000 characters");
+    const task = prompt || `Run the ${kind.name} workflow on this repository and submit its result.`;
+    return this.admit(kind, task, { title: kind.name.replace(/-/g, " "), base: `${kind.name}-workflow`, verify: true });
+  }
+  private async admit(kind: Kind, task: string, { title, base, attach = [], verify = true, mode, reason }: { title: string; base: string; attach?: string[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }): Promise<Agent> {
+    const { prompts, config } = this.deps;
     // Fail a misconfigured role before the repository, the ref or any worktree exists.
     this.check(`agent.${kind.name}`);
-    const base = nameFrom(title);
     const live = this.all().filter((a) => !a.ended).length + this.starting;
     if (live >= config.limits.agents) throw new Block("at-capacity", `${live} agents are live (limits.agents ${config.limits.agents}); close or cancel one first`);
     this.starting++;

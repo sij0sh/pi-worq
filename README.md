@@ -8,7 +8,7 @@ Background Pi SDK agents you or Main (your Pi session) can spawn. Agents can del
 pi install /path/to/pi-worq
 ```
 
-Tools stay hidden until you run `/worq` in a session (zero context cost otherwise). The choice survives resume.
+Tools stay hidden until you run `/worq` or `/worq workflow` in a session (zero context cost otherwise). The choice survives resume.
 
 ### Windows (native)
 
@@ -25,6 +25,7 @@ Start Pi, then run `node ./bin/worq.mjs sessions` in another terminal. To instal
 
 ```
 /worq                         enable the tools
+/worq workflow                choose an installed workflow; type optional instructions
 /worq plan <request>           ask Main for a reviewed plan
 /worq execute <request>        ask Main to execute
 /worq <request>                give Main the request
@@ -38,13 +39,22 @@ Main answers bounded factual lookups with primary-source citations unless delega
 - **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
 - **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, ask Main to execute with that plan in the explicit `attach` list. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
 
+## Workflows
+
+A workflow is a user-invoked agent kind. Add one Markdown file at `<agentDir>/workflows/<name>.md`; `/worq workflow` opens a native menu of installed workflows, then asks for optional instructions. Empty instructions run the workflow as written; escape at either step cancels. A newly added file appears in the next launcher without restarting Pi.
+
+Workflows are deliberately absent from `worq_spawn`, the control socket and the `worq` CLI: only you can launch one. A launch activates `worq_list`, `worq_send` and `worq_cancel`, never `worq_spawn`, and does not change the stored `/worq` on/off choice. `/worq off` still blocks Main's spawns while an explicit `/worq workflow` launch is honored.
+
+A workflow result is the usual actionable `review-ready` notice. It stays live until `/worq cancel <ref>` and keeps one `limits.agents` slot. Read workflows save `.agents/plans/plan-<ref>.md` with a `# Workflow result:` heading; write workflows pin `worq/<ref>` and never merge. Workflows run no reviewers by default; `reviewers: plan` or `reviewers: execute` opts into a packaged roster. The ref base is `<name>-workflow`; a collision adds a numeric suffix. See `docs/workflows.md` for the file contract and every launcher warning.
+
 ## Vocabulary
 
 | Term | Meaning |
 |---|---|
 | Main | your Pi session |
-| Agent | SDK session Main spawns; has a kind |
-| Kind | `prompts/kinds/<name>.md`: recursive question, access (`read`/`write`) |
+| Agent | SDK session launched by Main, or by you through a workflow; has a kind |
+| Workflow | user-invoked kind in `<agentDir>/workflows/<name>.md`; launched only by `/worq workflow` |
+| Kind | shared: `prompts/kinds/<name>.md` · user: `<agentDir>/workflows/<name>.md`; recursive question, access (`read`/`write`), `invocation` |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
 | Reviewer | sealed session fired on submit; roster `prompts/reviewers/<roster>/*.md`, run in parallel |
@@ -66,14 +76,14 @@ Verdicts: `pass · fail · inconclusive · plan-fault · not-applicable · unkno
 
 | | Agent | Subagent | Reviewer |
 |---|---|---|---|
-| Spawned by | Main | Agent (`delegate`) | Worq, on `submit` |
-| Writes | execute: own worktree · plan: none (Worq saves plan) | none | none (fresh clone of the pinned commit) |
+| Spawned by | Main (`worq_spawn`), or you (`/worq workflow` for workflows) | Agent (`delegate`) | Worq, on `submit` |
+| Writes | execute/workflow write: own worktree · plan/workflow read: none (Worq saves the result) | none | none (fresh clone of the pinned commit) |
 | Delegate / ask Main | yes / yes | no / no | no / no |
 | Finish tool | `submit` | `answer` | `report` |
 
 Read tools: `search` accepts a relative file or directory path; `read_file` accepts a 1-based `offset` and a `limit` of 1–160 lines. For factual lookups, a short `submit` summary with source citations is enough.
 
-Adding a kind or reviewer = adding one Markdown file.
+Adding a shared kind, workflow, or reviewer = adding one Markdown file.
 
 ## Config
 

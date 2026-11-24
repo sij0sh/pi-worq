@@ -36,7 +36,7 @@ A model ref must satisfy the harness's own pattern: `<provider>/<model>` for Pi,
 | Key | Selects |
 |---|---|
 | `agent` | Every agent |
-| `agent.<kind>` | One kind, e.g. `agent.execute`, `agent.plan` |
+| `agent.<kind>` | One kind, e.g. `agent.execute`, `agent.plan`, `agent.architecture-audit` |
 | `subagent` | Unnamed PQs |
 | `subagent.<name>` | A PQ delegated with `name: "<name>"` |
 | `reviewer` | Every reviewer |
@@ -91,7 +91,13 @@ Subagents are read-only sessions answering one probing question. The delegating 
 
 `name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own model, thinking level and pins, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
 
-Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows use the roster in their frontmatter, or none. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+
+## Workflows
+
+A workflow is a user-invoked kind loaded from `<agentDir>/workflows/<name>.md`. It is launched only by `/worq workflow`; it never appears in `worq_spawn`, the control socket or the CLI. Workflow files are read per launch, not from `pi-worq.json`.
+
+Workflows use the normal role keys: `agent.<name>` for one workflow, `agent` for all agents, and `reviewer` / `reviewer.<name>` for reviewers. `limits.agents` counts live workflows, and their turns and reviews spend from the same budgets as any other agent. They run no reviewers by default; `reviewers: plan` or `reviewers: execute` in the workflow frontmatter opts into that packaged roster. See `docs/workflows.md` for the file contract.
 
 ## Limits
 
@@ -122,7 +128,7 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 
 ## Routes
 
-`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
+`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. Workflows have no spawn options and use the default route. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
 
 ## Verifying a configuration
 
@@ -143,6 +149,8 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 | `Changed resource` | File edited after pinning | Recompute the SHA-256 |
 | `Unknown named child` | `name` delegated without a `models` entry | Declare `subagent.<name>` |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
+| `workflow-file` | The workflows directory cannot be read | Fix permissions, or make `<agentDir>/workflows` readable; a missing directory is empty, not an error |
+| `invocation` | A user workflow was launched through the shared path, or a shared kind through the workflow path | Use `/worq workflow` for workflows; `worq_spawn` for `plan`/`execute` |
 | `round-limit` | `limits.rounds` reached | Adjudicate the evidence and close, or spawn a fresh agent with the plan in `attach` |
 | `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` and grant headroom |
 

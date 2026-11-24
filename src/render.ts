@@ -4,11 +4,11 @@ export const one = (text: string, max = 240) => { const flat = text.replace(/\s+
 export const clean = (text: string) => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join("\n") : "- None";
 
-export function planMarkdown(input: { ref: string; title?: string; kind: string; round: number; task: string; report: PlanReport }) {
+export function planMarkdown(input: { ref: string; title?: string; kind: string; round: number; task: string; report: PlanReport; label?: string }) {
   const { ref, kind, round, task, report } = input;
   const decisions = report.decisions?.map((d) => `### ${d.id}\n\n- **Choice:** ${d.choice}\n- **Basis:** ${d.basis}\n- **Alternative:** ${d.alternative}\n- **Tradeoff:** ${d.tradeoff}\n- **Revisit:** ${d.revisit}`).join("\n\n");
   return [
-    `# Plan: ${input.title ?? ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
+    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · round ${round} · ${new Date().toISOString().slice(0, 10)}`, "",
     "## Request", "", task, "", "## Summary", "", report.summary,
     ...(report.criteria?.length ? ["", "## Criteria", "", bullets(report.criteria)] : []),
     ...(decisions ? ["", "## Decisions", "", decisions] : []),

@@ -75,6 +75,7 @@ test("prompts: kinds and reviewer rosters are data", () => {
   assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "plan"]);
   assert.equal(prompts.kinds.get("plan")!.access, "read");
   assert.equal(prompts.kinds.get("execute")!.access, "write");
+  assert.ok([...prompts.kinds.values()].every((kind) => kind.invocation === "shared"));
   assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
   assert.deepEqual(prompts.reviewers("execute").map((r) => r.name), ["intent"]);
 });
@@ -244,6 +245,135 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   await handlers.session_shutdown({}, ctx);
   assert.equal(widget, undefined);
   delete process.env.WORQ_STATE_DIR;
+});
+
+test("the /worq workflow launcher selects a workflow, takes optional instructions and never enables worq_spawn", async (t) => {
+  const { dir, root, state } = await repo();
+  const agentDir = join(dir, "agent");
+  await mkdir(agentDir);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  process.env.WORQ_STATE_DIR = state;
+  t.after(() => { delete process.env.WORQ_STATE_DIR; });
+
+  const tools: { name: string; description: string; parameters: { properties?: Record<string, unknown> }; execute: Function }[] = [];
+  let command: Function | undefined;
+  let active = ["read"];
+  const entries: { type: string; customType: string; data: unknown }[] = [];
+  const notices: { content: string; type?: string; ref: string }[] = [];
+  const alerts: { text: string; level: string }[] = [];
+  const tasks: string[] = [];
+  const selects: string[][] = [];
+  const inputs: { title: string; placeholder?: string }[] = [];
+  let choose: "first" | "cancel" = "first";
+  let answer: string | undefined = "";
+  const pi = {
+    sendUserMessage: () => {},
+    registerTool: (tool: never) => tools.push(tool),
+    registerCommand: (name: string, options: { handler: Function }) => { if (name === "worq") command = options.handler; },
+    registerMessageRenderer() {},
+    on() {},
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => { active = names; },
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+    sendMessage: (message: { content: string; details: { ref: string; type?: string } }) => notices.push({ content: message.content, type: message.details.type, ref: message.details.ref }),
+  };
+  createWorq({
+    agentDir: () => agentDir,
+    driver: () => fakeDriver({ "agent.docs": async (turn) => { tasks.push(JSON.parse(turn.text).task); await turn.tool("submit", planSubmission); } }),
+  })(pi as never);
+  const ctx = {
+    mode: "tui", cwd: root,
+    ui: {
+      notify: (text: string, level: string) => alerts.push({ text, level }),
+      setStatus() {},
+      setWidget() {},
+      select: async (_title: string, options: string[]) => { selects.push(options); return choose === "first" ? options[0] : undefined; },
+      input: async (title: string, placeholder?: string) => { inputs.push({ title, placeholder }); return answer; },
+    },
+    sessionManager: { getBranch: () => entries },
+  };
+  const last = (pattern: RegExp) => alerts.map((alert) => alert.text).filter((text) => pattern.test(text)).at(-1);
+  const launchedRef = () => /as ([a-z0-9-]+)\./.exec(last(/^Launched workflow /) ?? "")?.[1];
+  const settle = async (ref: string) => {
+    for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "review-ready"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "review-ready"), `expected review-ready for ${ref}`);
+  };
+
+  // No workflows installed: the notice names the directory and the file contract.
+  await command!("workflow", ctx);
+  assert.match(last(/No workflows installed/) ?? "", new RegExp(`Add ${agentDir}/workflows/<name>\\.md`));
+  assert.equal(selects.length, 0);
+
+  // A workflow added mid-session appears in the next launcher call; invalid siblings are reported.
+  await mkdir(join(agentDir, "workflows"));
+  const docs = "---\naccess: read\ndescription: Write the docs\n---\n\n## Workflow\n\nWrite it.\n\n## Recursive question\n\nWhat is missing?\n";
+  await writeFile(join(agentDir, "workflows", "docs.md"), docs);
+  await writeFile(join(agentDir, "workflows", "broken.md"), "---\naccess: read\ndescription: Broken\n---\n\n## Workflow\n\nNo question.\n");
+  await command!("workflow", ctx);
+  assert.match(last(/broken\.md: add a "Recursive question" section/) ?? "", /broken\.md/);
+  assert.deepEqual(selects.at(-1), ["docs · read · Write the docs"]);
+  assert.equal(launchedRef(), "docs-workflow");
+  await settle("docs-workflow");
+  const workflowTools = tools.map((tool) => tool.name);
+  assert.deepEqual(workflowTools, [...TOOLS]);
+  assert.ok(active.includes("worq_list") && active.includes("worq_send") && active.includes("worq_cancel"));
+  assert.ok(!active.includes("worq_spawn"));
+  assert.ok(!entries.some((entry) => entry.customType === "worq-enabled"), "a workflow launch does not enable Main's spawn");
+  const spawn = tools.find((tool) => tool.name === "worq_spawn")!;
+  assert.deepEqual((spawn.parameters as unknown as { properties: { kind: { enum: string[] } } }).properties.kind.enum, ["execute", "plan"]);
+  assert.doesNotMatch(spawn.description, /docs/);
+  assert.ok(!("workflow" in ops(["plan", "execute"])), "workflows are not a control op");
+  await assert.rejects(spawn.execute("id", { kind: "docs", title: "Docs", task: "x" }, undefined, undefined, ctx), /kind/);
+  await command!("cancel docs-workflow", ctx);
+
+  // Empty instructions launch the workflow as written; non-empty instructions become the task.
+  assert.equal(tasks.at(-1), "Run the docs workflow on this repository and submit its result.");
+  assert.equal(inputs.at(-1)?.title, "Additional instructions for docs (optional)");
+  assert.equal(inputs.at(-1)?.placeholder, "Leave empty to run the workflow as written");
+  answer = "Focus on the CLI reference";
+  await command!("workflow", ctx);
+  assert.equal(launchedRef(), "docs-workflow-2");
+  await settle("docs-workflow-2");
+  assert.equal(tasks.at(-1), "Focus on the CLI reference");
+  await command!("cancel docs-workflow-2", ctx);
+
+  // Escape at the instructions step or the menu cancels without launching.
+  const launches = () => alerts.filter((alert) => /^Launched workflow /.test(alert.text)).length;
+  const before = launches();
+  answer = undefined;
+  await command!("workflow", ctx);
+  assert.equal(launches(), before);
+  answer = "";
+  choose = "cancel";
+  await command!("workflow", ctx);
+  assert.equal(launches(), before);
+  choose = "first";
+
+  // `workflow` is a reserved first word with no arguments.
+  await command!("workflow extra", ctx);
+  assert.equal(last(/^Usage: \/worq workflow$/), "Usage: /worq workflow");
+  assert.equal(launches(), before);
+
+  // Non-TUI sessions are told the launcher needs a TUI.
+  const write = process.stderr.write;
+  let stderr = "";
+  process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as never;
+  try { await command!("workflow", { ...ctx, mode: "rpc" }); }
+  finally { process.stderr.write = write; }
+  assert.match(stderr, /Workflow launcher requires a TUI\./);
+
+  // /worq off still blocks Main's worq_spawn, but an explicit user workflow launch is honored.
+  await command!("off", ctx);
+  assert.ok(!active.includes("worq_spawn"));
+  answer = "";
+  await command!("workflow", ctx);
+  assert.equal(launchedRef(), "docs-workflow-3");
+  await settle("docs-workflow-3");
+  assert.ok(!active.includes("worq_spawn"));
+  await assert.rejects(spawn.execute("id", { kind: "plan", title: "Surface test", task: "blocked" }, undefined, undefined, ctx), /off/);
+  await command!("list", ctx);
+  assert.match(alerts.at(-1)!.text, /docs-workflow-3/);
+  await command!("cancel docs-workflow-3", ctx);
 });
 
 test("dispatch validates arguments against the shared schema", async (t) => {
