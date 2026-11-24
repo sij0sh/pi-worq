@@ -18,8 +18,13 @@ const contextUsage = ({ context }: Row) => {
   const total = n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${+(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k` : String(n);
   return `${context.percent.toFixed(1)}%/${total}`;
 };
-export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, toggle: () => void, inspect: (ref?: string, key?: string) => void, height: () => number) {
+export type SessionAction = 'cancel' | 'runtime';
+/** Activity text: cancellation and runtime changes outrank the current tool. */
+export const activityOf = (r: Row) => r.state === 'cancelling' ? '× cancelling' : r.change ?? (r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state);
+export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, toggle: () => void, inspect: (ref?: string, key?: string) => void, height: () => number, act?: (key: string, action: SessionAction) => void) {
   let visible: Row[] = [];
+  /** Column x ranges of the last render: MODEL opens the runtime picker, [×] cancels. */
+  let modelAt: [number, number] | undefined, cancelAt: [number, number] | undefined;
   return new MouseRegion({ invalidate() {}, render(w) {
     const all = [...data.rows.values()];
     const owners = all.filter(r => !r.parent && (working(r) || r.actor)).reverse().sort((a,b) => Number(!!b.actor)-Number(!!a.actor));
@@ -41,12 +46,15 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     // MODEL sits against ACTIVITY and takes only what the longest visible label needs, so the slack stays with titles.
     const longest = Math.max(0, ...visible.map(r => visibleWidth(modelLabel(r))));
     const modelWidth = Math.max(12, longest+1);
-    const showModel = w >= 74 && longest > 0 && w-40-activityWidth-modelWidth >= 18;
-    const sizes = w >= 74 ? [w-40-activityWidth-(showModel ? modelWidth : 0),...(showModel ? [modelWidth] : []),activityWidth,7,7,7,7,12]
+    const actions = act && w >= 74 ? 4 : 0;
+    const showModel = w >= 74 && longest > 0 && w-40-actions-activityWidth-modelWidth >= 18;
+    const sizes = w >= 74 ? [w-40-actions-activityWidth-(showModel ? modelWidth : 0),...(showModel ? [modelWidth] : []),activityWidth,7,7,7,7,12,...(actions ? [actions] : [])]
       : w >= 45 ? [w-18-activityWidth,activityWidth,8,10]
       : [Math.floor(w*.5),w-Math.floor(w*.5)];
     const table = (values:string[]) => sizes.map((n,i)=>cell(values[i]??'',n)).join('');
-    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT',...(showModel ? ['MODEL'] : []),'ACTIVITY','AGE','CACHE','TOK/S','TURNS','CTX']);
+    modelAt = showModel && act ? [sizes[0], sizes[0]+modelWidth] : undefined;
+    cancelAt = actions ? [w-actions, w] : undefined;
+    const labels = w < 35 ? cell(' AGENT · STATE',w) : table([' AGENT',...(showModel ? ['MODEL'] : []),'ACTIVITY','AGE','CACHE','TOK/S','TURNS','CTX',...(actions ? [''] : [])]);
     return [header,theme.fg('muted',labels),...visible.map(r=>{
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
@@ -57,13 +65,19 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const title = prefix ? `${prefix}${r.title}` : r.title;
       if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : prefix ? r.state : `${r.role} ${r.state}`}`,w);
       const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;
-      const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
-      const rest = table(['',...(showModel ? [modelLabel(r) || '—'] : []),activity,age,cache,speed,turns,contextUsage(r)]).slice(sizes[0]);
+      const activity = activityOf(r);
+      const model = modelLabel(r) || '—';
+      const rest = table(['',...(showModel ? [act && working(r) && r.state !== 'cancelling' ? `${model} ▾` : model] : []),activity,age,cache,speed,turns,contextUsage(r),...(actions ? [working(r) && r.state !== 'cancelling' ? ' [×]' : ''] : [])]).slice(sizes[0]);
       return theme.fg(r.state==='failed'?'error':r.blocker?'warning':working(r)?'success':'muted',cell(id,sizes[0])) + rest;
     })];
   } }, e=>{
     if(e.type!=='click'||e.button!=='left') return;
-    if(e.y===0 && e.x<3) toggle(); else if(e.y===0 && e.width>=35 && e.x<13) inspect(); else if(e.y>=2 && visible[e.y-2]) inspect(visible[e.y-2].ref,visible[e.y-2].key); else return;
+    const row = e.y>=2 ? visible[e.y-2] : undefined;
+    const within = (at?: [number, number]) => !!at && e.x>=at[0] && e.x<at[1];
+    if(e.y===0 && e.x<3) toggle(); else if(e.y===0 && e.width>=35 && e.x<13) inspect();
+    else if(row && act && working(row) && row.state!=='cancelling' && within(cancelAt)) act(row.key,'cancel');
+    else if(row && act && working(row) && row.state!=='cancelling' && within(modelAt)) act(row.key,'runtime');
+    else if(row) inspect(row.ref,row.key); else return;
     return {handled:true};
   });
 }

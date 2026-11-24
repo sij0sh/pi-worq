@@ -1,7 +1,7 @@
 import { Block } from "../contracts.ts";
 import type { Config } from "../runtime/config.ts";
 import { compose, EMPTY, skillTool, type Resources } from "../runtime/resources.ts";
-import { assertRuntime, type CoreHandle, type Driver, type SDKAdapter, type SessionEvent } from "./contract.ts";
+import { assertRuntime, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SDKAdapter, type SessionEvent } from "./contract.ts";
 import type { PiHost } from "./pi.ts";
 
 /** Explicit host dependencies, one optional entry per SDK that needs something from the host. */
@@ -75,18 +75,43 @@ export async function createDriver(host: HostServices, config: Config, resources
       });
       if (spec.signal.aborted) { handle.dispose(); throw spec.signal.reason; }
       let fallback = runtime.fallbackModel !== runtime.model ? runtime.fallbackModel : undefined;
+      let current: Runtime = { ...runtime, thinking };
+      const check = (change: RuntimeChange): Runtime => {
+        if (change.model === undefined && change.thinking === undefined) throw new Block("invalid-payload", "Nothing to change");
+        if (change.model !== undefined && change.model !== current.model && !caps.switchModel) throw new Block("capability", `${spec.name}: ${runtime.sdk} cannot switch models`);
+        if (!handle.configure) throw new Block("capability", `${spec.name}: ${runtime.sdk} cannot change a live session`);
+        const next: Runtime = { ...current, ...(change.model !== undefined ? { model: change.model } : {}), ...(change.thinking !== undefined ? { thinking: change.thinking } : {}) };
+        const levels = sdk.capabilities(next).thinking;
+        if (change.thinking !== undefined && !levels.includes(change.thinking)) {
+          throw new Block("capability", levels.length ? `${spec.name}: ${change.thinking} is not a thinking level for ${next.model ?? "this model"} (${levels.join(", ")})` : `${spec.name}: ${next.model ?? "this model"} has no thinking level control`);
+        }
+        return next;
+      };
+      const apply = async (change: RuntimeChange, next: Runtime) => {
+        await handle.configure!(change);
+        current = next;
+      };
       return {
         prompt: (text, options) => handle.prompt(text, options),
         steer: handle.steer && ((text) => handle.steer!(text)),
         get streaming() { return handle.streaming; },
+        get runtime() { return current; },
         abort: () => handle.abort(),
         async fallback() {
-          if (!fallback || !handle.switchModel) return false;
+          if (!fallback || !handle.configure) return false;
           const next = fallback;
           fallback = undefined;
-          await handle.switchModel(next);
+          await apply({ model: next }, { ...current, model: next });
           spec.emit({ type: "log", text: `switched to fallback model ${next}` });
           return true;
+        },
+        check(change) { check(change); },
+        async configure(change) {
+          const next = check(change);
+          await apply(change, next);
+          // Main chose this runtime: a stale preset fallback no longer applies.
+          if (change.model !== undefined) fallback = undefined;
+          spec.emit({ type: "log", text: `runtime changed by Main: ${next.model ?? "default model"}, thinking ${next.thinking ?? "uncontrolled"}` });
         },
         dispose: () => handle.dispose(),
       };

@@ -3,8 +3,9 @@ import { Block } from "./contracts.ts";
 import type { Config } from "./runtime/config.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
-import { prepareLaunch, type SelectLaunch } from './runtime/launch.ts';
-import type { Driver } from "./sdk/contract.ts";
+import { modelChoices, prepareLaunch, type ModelChoice, type SelectLaunch } from './runtime/launch.ts';
+import type { Driver, RuntimeChange } from "./sdk/contract.ts";
+import type { SessionControl, Sessions } from "./session.ts";
 import { reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {
@@ -32,6 +33,8 @@ function nameFrom(title: string) {
 export class Worq {
   private readonly starting = new Set<{ label: string }>();
   private readonly agents = new Map<string, Agent>();
+  /** Every live controllable session (owners, PQs, reviewers), keyed by telemetry row key. */
+  readonly sessions: Sessions = new Map();
   private readonly semaphore: Semaphore;
   private readonly deps: WorqDeps;
   constructor(deps: WorqDeps) {
@@ -81,7 +84,7 @@ export class Worq {
       signal.throwIfAborted();
       const { ref, dir } = await reserveName(root, this.deps.state, base);
       signal.throwIfAborted();
-      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, select: this.select },
+      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, select: this.select, sessions: this.sessions },
         { ref, title: title.trim(), dir, kind, task, attachments, verify, mode, reason });
       this.agents.set(ref, agent);
       agent.launch();
@@ -140,6 +143,25 @@ export class Worq {
     ].filter(Boolean).join("\n");
   }
   send(ref: string, text: string) { return this.get(ref).send(text); }
+  /** A live session by row key, or an owner by ref. */
+  session(target: string): SessionControl {
+    const found = this.sessions.get(target) ?? (this.agents.has(target) ? this.sessions.get(this.agents.get(target)!.id) : undefined);
+    if (!found) throw new Block("ended", "That session is no longer live");
+    return found;
+  }
+  /** Models the session may switch to: same harness, current first. */
+  async choices(target: string): Promise<ModelChoice[]> {
+    const session = this.session(target);
+    const runtime = session.runtime() ?? this.deps.config.runtime(session.role);
+    const current = { ...runtime, model: runtime.model ?? this.deps.driver.defaultModel?.(runtime.sdk) };
+    return modelChoices(this.deps.driver, session.role, current, this.deps.extensions ?? 0, current.sdk);
+  }
+  async configure(target: string, change: RuntimeChange): Promise<string> {
+    const session = this.session(target);
+    const outcome = await session.configure(change);
+    const what = [change.model && `model ${change.model}`, change.thinking && `thinking ${change.thinking}`].filter(Boolean).join(", ");
+    return outcome === "applied" ? `${session.label}: ${what} applied` : `${session.label}: ${what} queued until the current request settles`;
+  }
   async cancel(ref: string): Promise<string> {
     if (ref === "all") {
       const pending = this.starting.size;

@@ -12,7 +12,8 @@ const usage = `Usage: worq [--pid N] <command>
   log <ref> [-f]              agent activity (-f follows)
   spawn <kind> --title "Short title" [--attach <plan>]... [--mode fast|thorough] <task>         start an agent
   send <ref> <text>           steer, answer, or start the next round
-  cancel <ref|all>            close or cancel; branch kept`;
+  cancel <ref|all>            close or cancel; branch kept
+  configure <ref> [--model provider/id] [--thinking level]   change a live agent's runtime`;
 const ctl = join(statePath(), "ctl");
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; } };
 const sockets = () => {
@@ -80,6 +81,16 @@ async function main(argv) {
     }
     case "send": return print("send", { ref: first, text: rest.join(" ") });
     case "cancel": return print("cancel", { ref: first });
+    case "configure": {
+      const args = { ref: first };
+      while (rest.length) {
+        const flag = rest.shift();
+        const value = rest.shift();
+        if (!["--model", "--thinking"].includes(flag) || !value) throw new Error(`Usage: worq configure <ref> [--model provider/id] [--thinking level]`);
+        args[flag.slice(2)] = value;
+      }
+      return print("configure", args);
+    }
     case "log": {
       const follow = rest.includes("-f");
       let since = 0;

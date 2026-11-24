@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Static, TSchema } from "typebox";
 import { observe, type Observation } from "./telemetry.ts";
 import { Block, errorText, parse } from "./contracts.ts";
-import { tool, type CoreHandle, type Driver, type SessionEvent, type Tool } from "./sdk/contract.ts";
+import { tool, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SessionEvent, type Tool } from "./sdk/contract.ts";
 
 export const NUDGE = "You ended your turn without calling your finish tool. Re-ask your recursive question: if consequential work remains within your authority, do it; otherwise call the finish tool now.";
 const CONTINUE = "The previous model request failed. Continue the same assignment from the conversation and tool results so far.";
@@ -20,6 +20,25 @@ export class WorkerHandoff extends Error {
     this.turns = turns; this.ordinary = ordinary; this.closeout = closeout; this.trigger = trigger; this.quiescent = quiescent;
   }
 }
+
+/**
+ * One controllable live session (owner, PQ or reviewer), keyed like its telemetry row.
+ * Telemetry observes; this controls. Registered on creation, removed on disposal.
+ */
+export interface SessionControl {
+  key: string;
+  ref: string;
+  /** Role key (agent.plan, subagent, reviewer.intent …). */
+  role: string;
+  label: string;
+  /** What cancelling this session does, shown before confirmation. */
+  consequence: string;
+  runtime(): Runtime | undefined;
+  pending(): RuntimeChange | undefined;
+  cancel(): Promise<string>;
+  configure(change: RuntimeChange): Promise<"applied" | "queued">;
+}
+export type Sessions = Map<string, SessionControl>;
 
 /** What a caller supplies; the Conversation turns the adapter's event stream into these sinks. */
 export interface ConversationSpec {
@@ -75,6 +94,9 @@ export class Conversation<T extends TSchema> {
   private softTimer?: ReturnType<typeof setTimeout>;
   private since = 0;
   private readonly options: ConversationOptions<T>;
+  /** Main's runtime change waiting for the next safe boundary (prompt settled). */
+  private change?: RuntimeChange;
+  private applying: Promise<void> = Promise.resolve();
 
   constructor(options: ConversationOptions<T>) {
     this.remaining = options.minutes * 60_000;
@@ -82,6 +104,48 @@ export class Conversation<T extends TSchema> {
     this.signal = AbortSignal.any([options.signal, this.budget.signal]);
   }
   get streaming() { return this.handle?.streaming ?? false; }
+  /** Runtime in effect, else the one requested at launch. */
+  get runtime(): Runtime | undefined { return this.handle?.runtime ?? this.options.spec.runtime; }
+  get pendingChange(): RuntimeChange | undefined { return this.change && { ...this.change }; }
+
+  private note(value: string | undefined) { observe(this.options.spec.observe, { change: value }); }
+  private describe(change: RuntimeChange) {
+    const now = this.runtime;
+    const from = [now?.model?.split("/").at(-1), now?.thinking].filter(Boolean).join("/");
+    const to = [(change.model ?? now?.model)?.split("/").at(-1), change.thinking ?? now?.thinking].filter(Boolean).join("/");
+    return from ? `${from} → ${to}` : to;
+  }
+  /**
+   * Change model and/or thinking for this live session. Applies now when the session is idle,
+   * otherwise at the next safe boundary (the running prompt settles). Never interrupts a tool.
+   */
+  async configure(change: RuntimeChange): Promise<"applied" | "queued"> {
+    if (this.closed) throw new Block("ended", `${this.options.spec.name} has ended`);
+    this.handle?.check?.(change);
+    this.change = { ...this.change, ...change };
+    if (!this.handle || this.handle.streaming) {
+      this.options.spec.log(`runtime change queued (${this.describe(this.change)}): applies when the current request settles`);
+      this.note(`◷ ${this.describe(this.change)}`);
+      return "queued";
+    }
+    await this.flush();
+    return "applied";
+  }
+  /** Serialized: one runtime change at a time, never while a prompt is in flight. */
+  private flush(): Promise<void> {
+    this.applying = this.applying.then(async () => {
+      const change = this.change;
+      const handle = this.handle;
+      if (!change || !handle || this.closed) return;
+      this.change = undefined;
+      if (!handle.configure) { this.note(undefined); this.options.spec.log("runtime change dropped: this harness cannot change a live session"); return; }
+      this.note("↻ switching");
+      try { await handle.configure(change); }
+      catch (error) { this.options.spec.log(`runtime change failed: ${errorText(error)}`); this.options.warning?.(`${this.options.spec.name}: runtime change failed: ${errorText(error)}`); }
+      finally { this.note(undefined); }
+    });
+    return this.applying;
+  }
 
   private finishTool(): Tool {
     const { name, description, schema, validate } = this.options.finish;
@@ -224,6 +288,8 @@ export class Conversation<T extends TSchema> {
         gate.throwIfAborted();
         this.charge(); // Count attempts even when preflight fails before turn_start.
         gate.throwIfAborted();
+        await this.flush();               // safe boundary: no prompt in flight
+        gate.throwIfAborted();
         this.prepaid = true;
         const turn = handle.prompt(next);
         void turn.catch(() => {});        // an abandoned promise can still reject
@@ -324,5 +390,5 @@ export class Conversation<T extends TSchema> {
     clearTimeout(timer);
     return stopped && !handle.streaming;
   }
-  dispose() { this.closed = true; clearTimeout(this.softTimer); clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
+  dispose() { this.closed = true; if (this.change) this.note(undefined); this.change = undefined; clearTimeout(this.softTimer); clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
 }

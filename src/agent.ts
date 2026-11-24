@@ -8,7 +8,7 @@ import type { Limits } from "./runtime/config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
-import { Conversation, WorkerHandoff } from "./session.ts";
+import { Conversation, WorkerHandoff, type Sessions } from "./session.ts";
 import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
@@ -52,7 +52,10 @@ export interface AgentDeps {
   notify(event: AgentEvent): void;
   runtime?: Runtime;
   select(role: string, title: string, signal: AbortSignal): Promise<Runtime | undefined>;
+  /** Live controllable sessions, keyed by telemetry row key. */
+  sessions?: Sessions;
 }
+const notStarted = (label: string) => new Block("busy", `${label} has no live session yet; try again once it is running`);
 
 /**
  * One Main-spawned Pi SDK agent. Lifecycle per round: running (may delegate PQs, ask Main) → submit →
@@ -175,7 +178,20 @@ export class Agent {
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
   get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
-  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title, Boolean(this.kind.workflow)); this.start(); return this; }
+  launch() {
+    this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title, Boolean(this.kind.workflow));
+    const self = this;
+    this.deps.sessions?.set(this.id, {
+      key: this.id, ref: this.ref, role: `agent.${this.kind.name}`, label: this.headline,
+      get consequence() { return self.state === "review-ready" ? "Closes the run; its branch is kept." : "Stops the agent and every PQ and reviewer it owns; its branch is kept."; },
+      runtime: () => this.conversation?.runtime ?? this.deps.runtime,
+      pending: () => this.conversation?.pendingChange,
+      cancel: async () => { await this.cancel(); return `${this.ref} ${this.state}`; },
+      configure: (change) => { if (!this.conversation) throw notStarted(this.ref); return this.conversation.configure(change); },
+    });
+    this.start();
+    return this;
+  }
 
   log(line: string) {
     this.history.push({ seq: ++this.seq, line: one(clean(line), 400) });
@@ -236,6 +252,7 @@ export class Agent {
   async cancel() {
     if (this.ended) return;
     this.closing = this.state === "review-ready";
+    this.deps.telemetry?.state(this.id, "cancelling");
     this.controller.abort(new Block("cancelled", this.closing ? "Closed by Main" : "Cancelled by Main"));
     this.next?.reject(this.signal.reason);
     this.start();
@@ -303,6 +320,7 @@ export class Agent {
       }
     } finally {
       this.controller.abort(new Block("ended", "Agent ended"));
+      this.deps.sessions?.delete(this.id);
       const open = this.delegations.filter(d => (d.state === "queued" || d.state === "running")).map(d => ({ id: d.id, question: d.question }));
       for (const d of this.delegations) if ((d.state === "queued" || d.state === "running")) d.state = "cancelled";
       this.ask?.resolve(UNANSWERED);
@@ -384,10 +402,18 @@ export class Agent {
     const key = `${this.id}:${d.id}`;
     this.deps.telemetry?.add(key, this.ref, 'PQ', this.id, undefined, clean(d.question).replace(/\s+/g, " ").trim());
     this.deps.telemetry?.state(key, 'queued');
-    const signal = this.signal;
+    // Own controller: Main can cancel this PQ without touching its parent or siblings.
+    const own = new AbortController();
+    const signal = AbortSignal.any([this.signal, own.signal]);
     const { driver, prompts, limits, semaphore } = this.deps;
     let conversation: Conversation<typeof PqAnswer> | undefined;
     let release: (() => void) | undefined;
+    this.deps.sessions?.set(key, {
+      key, ref: this.ref, role, label: `PQ ${d.question}`, consequence: "Cancels this question; the parent is told it went unanswered.",
+      runtime: () => conversation?.runtime, pending: () => conversation?.pendingChange,
+      cancel: async () => { this.deps.telemetry?.state(key, 'cancelling'); own.abort(new Block("cancelled", "PQ cancelled by Main")); return `PQ cancelled: ${d.question}`; },
+      configure: (change) => { if (!conversation) throw notStarted("This PQ"); return conversation.configure(change); },
+    });
     try {
       const runtime = await this.deps.select(role, `${this.title} · ${d.question}`, signal);
       release = await semaphore.acquire(signal);
@@ -403,9 +429,10 @@ export class Agent {
       d.state = "answered";
     } catch (error) {
       if (this.signal.aborted) return;
-      d.state = error instanceof Block && error.code === 'cancelled' ? 'cancelled' : 'failed';
-      d.error = errorText(error);
+      d.state = own.signal.aborted || (error instanceof Block && error.code === 'cancelled') ? 'cancelled' : 'failed';
+      d.error = errorText(own.signal.aborted ? own.signal.reason : error);
     } finally {
+      this.deps.sessions?.delete(key);
       this.deps.telemetry?.state(key, this.signal.aborted ? 'cancelled' : d.state);
       release?.();
       conversation?.dispose();
@@ -499,7 +526,14 @@ export class Agent {
     let box: ReturnType<typeof processTools> | undefined;
     let conversation: Conversation<typeof ReviewReport> | undefined;
     let completed = false;
+    let cancelled = false;
     let release: (() => void) | undefined;
+    this.deps.sessions?.set(key, {
+      key, ref: this.ref, role: `reviewer.${name}`, label: `reviewer ${name} · round ${this.round}`, consequence: "Cancels this review; its verdict is recorded as unknown.",
+      runtime: () => conversation?.runtime, pending: () => conversation?.pendingChange,
+      cancel: async () => { cancelled = true; this.deps.telemetry?.state(key, 'cancelling'); own.abort(new Block("cancelled", "Review cancelled by Main")); return `Review ${name} cancelled`; },
+      configure: (change) => { if (!conversation) throw notStarted(`Reviewer ${name}`); return conversation.configure(change); },
+    });
     try {
       this.deps.telemetry?.state(key, 'queued');
       const runtime = await this.deps.select(`reviewer.${name}`, this.title, signal);
@@ -530,9 +564,10 @@ export class Agent {
       return { name, ...out, verdict: out.verdict as Verdict, artifacts: [...(out.artifacts ?? []), ...(box?.saved ?? [])] };
     } catch (error) {
       if (this.signal.aborted) throw error;
-      return { name, verdict: "unknown", error: errorText(error) };
+      return { name, verdict: "unknown", error: cancelled ? "Review cancelled by Main" : errorText(error) };
     } finally {
-      this.deps.telemetry?.state(key, this.signal.aborted ? 'cancelled' : completed ? 'done' : 'failed');
+      this.deps.sessions?.delete(key);
+      this.deps.telemetry?.state(key, this.signal.aborted || cancelled ? 'cancelled' : completed ? 'done' : 'failed');
       own.abort(new Block("ended", "Review ended"));
       release?.();
       conversation?.dispose();

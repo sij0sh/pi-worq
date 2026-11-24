@@ -2,11 +2,20 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
-import type { LaunchRequest, SelectLaunch } from './runtime/launch.ts';
-import type { Runtime } from './sdk/contract.ts';
+import type { LaunchRequest, ModelChoice, SelectLaunch } from './runtime/launch.ts';
+import type { Runtime, RuntimeChange } from './sdk/contract.ts';
 
 interface Pending extends LaunchRequest {
   selected: Runtime; deadline?: number; finish(error?: unknown): void;
+}
+function boxed(theme: { fg(color: string, s: string): string }, width: number, lines: string[]) {
+  if (width < 4) return lines.map(line => truncateToWidth(line, width));
+  const border = (s: string) => theme.fg('border', s);
+  const rule = '─'.repeat(width - 2);
+  return [border(`╭${rule}╮`), ...lines.map(line => {
+    const body = truncateToWidth(line, width - 4);
+    return `${border('│')} ${body}${' '.repeat(width - 3 - visibleWidth(body))}${border('│')}`;
+  }), border(`╰${rule}╯`)];
 }
 function cycle<T>(values: readonly T[], value: T, delta: number) {
   return values[(values.indexOf(value) + values.length + delta) % values.length];
@@ -47,13 +56,7 @@ export function launchPicker(ui: ExtensionContext['ui']): SelectLaunch {
               ...rows.slice(start, start + visibleCount).map(row => `${row === active ? '▸' : ' '} ${row.deadline === undefined ? 'paused' : `${Math.max(0, Math.ceil((row.deadline - Date.now()) / 1000))}s`} · ${clean(row.label).replace(/\s+/g, ' ')}`),
               `Preset: ${active.initial.name}`, ...[`Harness: ${r.sdk}`, `Model: ${r.model ?? 'SDK default'}`, `Thinking: ${r.thinking ?? 'SDK default'}`].map((s,i) => `${field === i ? '›' : ' '} ${clean(s).replace(/\s+/g, ' ')}`),
               '↑↓ field · ←→ change · Tab next agent', 'Enter launch now · A launch all · Esc cancel selected'];
-            if (width < 4) return lines.map(line => truncateToWidth(line, width));
-            const border = (s: string) => theme.fg('border', s);
-            const rule = '─'.repeat(width - 2);
-            return [border(`╭${rule}╮`), ...lines.map(line => {
-              const body = truncateToWidth(line, width - 4);
-              return `${border('│')} ${body}${' '.repeat(width - 3 - visibleWidth(body))}${border('│')}`;
-            }), border(`╰${rule}╯`)];
+            return boxed(theme, width, lines);
           },
           handleInput(data) {
             const row = active;
@@ -97,4 +100,47 @@ export function launchPicker(ui: ExtensionContext['ui']): SelectLaunch {
       } };
     rows.push(row); request.signal.addEventListener('abort', abort, { once: true }); refresh?.(); void show();
   });
+}
+
+export interface RuntimeRequest { label: string; current: Runtime; choices: ModelChoice[]; pending?: RuntimeChange }
+/**
+ * Live-session variant of the launch picker: no countdown, harness locked. Resolves the change
+ * (only fields that differ from the current runtime), or undefined when dismissed or unchanged.
+ */
+export async function runtimePicker(ui: ExtensionContext['ui'], request: RuntimeRequest): Promise<RuntimeChange | undefined> {
+  const { current, choices } = request;
+  const start = { model: request.pending?.model ?? current.model, thinking: request.pending?.thinking ?? current.thinking };
+  let choice = choices.find(c => c.model === start.model) ?? choices[0];
+  if (!choice) throw new Block('capability', 'No models available for this harness');
+  let thinking = start.thinking !== undefined && choice.levels.includes(start.thinking) ? start.thinking : choice.levels.includes('low') ? 'low' : choice.levels[0];
+  let field = 0;
+  return ui.custom<RuntimeChange | undefined>((tui, theme, _keys, done) => ({
+    invalidate() {},
+    render(width) {
+      const lines = [theme.fg('accent', `Runtime · ${clean(request.label).replace(/\s+/g, ' ')}`),
+        `  Harness: ${current.sdk} (locked)`,
+        ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'not controllable'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
+        theme.fg('muted', request.pending ? 'A change is already queued; this replaces it.' : 'Keeps the session; applies at the next safe execution boundary.'),
+        '↑↓ select · ←→ change · Enter apply · Esc dismiss'];
+      return boxed(theme, width, lines);
+    },
+    handleInput(data) {
+      if (matchesKey(data, 'escape')) return done(undefined);
+      if (matchesKey(data, 'enter')) {
+        const change: RuntimeChange = {};
+        if (choice.model !== current.model && choice.model !== undefined) change.model = choice.model;
+        if (thinking !== current.thinking && thinking !== undefined) change.thinking = thinking;
+        return done(change.model || change.thinking ? change : undefined);
+      }
+      if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab')) field = 1 - field;
+      else if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
+        const delta = matchesKey(data, 'left') ? -1 : 1;
+        if (field === 0) {
+          choice = cycle(choices, choice, delta);
+          if (thinking === undefined || !choice.levels.includes(thinking)) thinking = choice.levels.includes('low') ? 'low' : choice.levels[0];
+        } else if (choice.levels.length) thinking = cycle(choice.levels, thinking ?? choice.levels[0], delta);
+      } else return;
+      tui.requestRender();
+    },
+  }), { overlay: true, overlayOptions: { width: '70%', anchor: 'center' } });
 }

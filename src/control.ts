@@ -23,6 +23,8 @@ export function ops(kinds: string[]) {
     list: obj({ ref: Type.Optional(ref) }),
     send: obj({ ref, text: text(6000) }),
     cancel: obj({ ref: Type.Union([ref, Type.Literal("all")]) }),
+    /** Change a live agent's model and/or thinking level; keeps its session. */
+    configure: obj({ ref, model: Type.Optional(text(200)), thinking: Type.Optional(text(32)) }),
     /** CLI only: activity after a sequence number. */
     log: obj({ ref, since: Type.Optional(Type.Integer({ minimum: 0 })) }),
   } satisfies Record<string, TSchema>;
@@ -44,6 +46,7 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown,
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }
     case "cancel": return { text: await worq.cancel((args as Static<Ops["cancel"]>).ref) };
+    case "configure": { const { ref, model, thinking } = args as Static<Ops["configure"]>; return { text: await worq.configure(ref, { model, thinking }) }; }
     case "log": {
       const { ref, since } = args as Static<Ops["log"]>;
       const entries = worq.get(ref).tail(200, since ?? 0);

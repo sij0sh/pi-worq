@@ -33,7 +33,7 @@ export interface Runtime {
 
 /** What an SDK can do for a runtime. Pure data: the core judges (assertRuntime). */
 export interface Capabilities {
-  /** Handle.switchModel works. */
+  /** Handle.configure can change the model of a live session. */
   switchModel: boolean;
   /** Levels the runtime's model accepts; [] means no level control at all. */
   thinking: readonly string[];
@@ -80,6 +80,9 @@ export interface SessionSpec extends Spec {
   extensions: readonly ExtensionFile[];
 }
 
+/** A live runtime change; harness (sdk) stays locked for the session's lifetime. */
+export interface RuntimeChange { model?: string; thinking?: string }
+
 export type PromptOutcome = "completed" | "preflight-failed" | "failed" | "aborted";
 /** One live SDK session. */
 export interface Handle {
@@ -90,12 +93,20 @@ export interface Handle {
   readonly streaming: boolean;
   /** Settle the in-flight prompt and clear `streaming` within 5s. */
   abort(): Promise<void>;
-  /** Mechanics only: switch to this model ref. The core decides when and to what. */
-  switchModel?(ref: string): Promise<void>;
+  /** Mechanics only: apply model and/or thinking to the live session, keeping its history. The core decides when and to what. */
+  configure?(change: RuntimeChange): Promise<void>;
   dispose(): void;
 }
-/** Model fallback lives in the core: one switch to the runtime's fallbackModel. */
-export interface CoreHandle extends Omit<Handle, "switchModel"> { fallback(): Promise<boolean> }
+/** Model fallback and manual reconfiguration live in the core; both go through Handle.configure. */
+export interface CoreHandle extends Omit<Handle, "configure"> {
+  fallback(): Promise<boolean>;
+  /** The runtime currently in effect (after any change). Absent on test doubles. */
+  readonly runtime?: Runtime;
+  /** Throws Block when the change cannot apply to this session. */
+  check?(change: RuntimeChange): void;
+  /** Validate then apply. A manual model change supersedes the pending automatic fallback. */
+  configure?(change: RuntimeChange): Promise<void>;
+}
 
 /** Per-SDK adapter. */
 export interface SDKAdapter {

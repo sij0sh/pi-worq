@@ -89,7 +89,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
       const { runtime } = spec;
       const model = primary(runtime);
       if (!model) throw new Block("model", "Select a Pi model or set a runtime model in pi-worq.json");
-      const level = spec.thinking as Level | undefined;
+      let level = spec.thinking as Level | undefined;
       const outcomes = new Map<string, Outcome>();
       const calls = new Map<string, string>();
       let nextCall = 0;
@@ -168,13 +168,15 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         },
         get streaming() { return session.isStreaming; },
         abort: () => session.abort(),
-        async switchModel(ref) {
-          const next = find(ref, `${runtime.path}/fallbackModel`);
-          await session.setModel(next);
+        async configure(change) {
+          const next = change.model !== undefined ? find(change.model, `${runtime.path}/model`) : undefined;
+          if (change.thinking !== undefined) level = change.thinking as Level;
+          // setModel keeps the conversation, tool results and session identity.
+          if (next) await session.setModel(next);
           if (level) session.setThinkingLevel(level);
           setup(); report({ context: undefined });
-          const supported = thinkingLevels(next);
-          if (level && !supported.includes(level)) spec.emit({ type: "log", text: `thinking level ${level} is not supported by fallback model ${ref} (${supported.join(", ")}); Pi clamps it` });
+          const supported = thinkingLevels(next ?? session.model);
+          if (level && !supported.includes(level)) spec.emit({ type: "log", text: `thinking level ${level} is not supported by ${change.model ?? "the current model"} (${supported.join(", ")}); Pi clamps it` });
         },
         dispose() { report({ phase: "closed" }); outcomes.clear(); calls.clear(); unsubscribe(); session.dispose(); },
       };

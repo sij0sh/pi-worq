@@ -340,7 +340,7 @@ function recordingSdk(caps: Capabilities, seen: SessionSpec[], switched: string[
         seen.push(spec);
         const handle: Handle = {
           prompt: async () => "completed", get streaming() { return false; }, abort: async () => {}, dispose() {},
-          switchModel: async (ref) => { switched.push(ref); },
+          configure: async (change) => { if (change.model) switched.push(change.model); },
         };
         return handle;
       },

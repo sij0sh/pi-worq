@@ -7,7 +7,7 @@ export type Outcome = { kind: "exit"; code: number; stdout: boolean; stderr: boo
 export interface Setup { sdk?: string; model?: string; thinking?: string; skills: string[] }
 interface ContextEstimate { percent?: number; contextWindow: number }
 export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Setup } | { context: ContextEstimate | undefined }
-  | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
+  | { change: string | undefined } | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
 export const observe = <T>(sink: ((value: T) => void) | undefined, value: T) => { try { sink?.(value); } catch { /* display only */ } };
 export const label = (s: string | undefined) => s?.replace(/[^a-zA-Z0-9._+:/ -]/g, "?").slice(0, 96);
 export interface Revision {
@@ -20,8 +20,10 @@ export interface Call { name: string; at: number; outcome?: Outcome }
 export interface ReviewIdentity { round: number; slot: number }
 export interface Row {
   key: string; ref: string; title?: string; role: string; workflow?: boolean; parent?: string; review?: ReviewIdentity; born: number; since: number;
-  state: AgentState | "queued" | "answered" | "done"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
+  state: AgentState | "queued" | "answered" | "done" | "cancelling"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
   phase?: "request" | "idle" | "closed"; setup?: Setup; context?: ContextEstimate & { at: number }; cache: { responses: number; read: number; write: number; reads: number; writes: number };
+  /** Pending or in-progress runtime change, display text. */
+  change?: string;
   question?: string; turns?: number; rate?: number; speed?: number;
   current: Map<string, Call>; last?: Call;
 }
@@ -66,7 +68,12 @@ export class Telemetry {
           }
           r.current.clear();
         }
-      } else if ("setup" in value) r.setup = value.setup;
+      } else if ("setup" in value) {
+        // A new model invalidates model-specific estimates; budgets and turns stay cumulative.
+        if (r.setup && (r.setup.model !== value.setup.model || r.setup.thinking !== value.setup.thinking)) { r.speed = undefined; r.rate = undefined; r.context = undefined; this.event(key, `runtime ${value.setup.model ?? "?"}/${value.setup.thinking ?? "?"}`); }
+        r.setup = r.setup ? { ...value.setup, sdk: value.setup.sdk ?? r.setup.sdk, skills: value.setup.skills.length ? value.setup.skills : r.setup.skills } : value.setup;
+      }
+      else if ("change" in value) r.change = value.change;
       else if ("context" in value) r.context = value.context && { ...value.context, at: Date.now() };
       else if ('turn' in value) r.turns = (r.turns ?? 0) + 1;
       else if ("cache" in value) {
