@@ -97,13 +97,9 @@ Adding a built-in kind or reviewer = one Markdown file; a workflow = one skill f
 
 ```json
 {
-  "default": "standard",
-  "runtimes": {
-    "standard": { "sdk": "pi", "model": "provider/model", "fallbackModel": "provider/model", "thinking": "medium" },
-    "deep": { "model": "provider/model", "thinking": "high" },
-    "fast": { "model": "provider/model", "thinking": "low" }
-  },
-  "roles": { "agent.execute": "deep", "reviewer": "deep", "subagent": "fast" },
+  "plan": { "sdk": "pi", "model": "provider/model", "thinking": "high" },
+  "execute": { "thinking": "medium" },
+  "review": { "model": "provider/review-model" },
   "limits": {
     "agents": 4, "subagents": 6, "parallel": 4, "rounds": 3, "asks": 3,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
@@ -113,7 +109,7 @@ Adding a built-in kind or reviewer = one Markdown file; a workflow = one skill f
 }
 ```
 
-`runtimes` are named presets (`sdk` defaults to `pi`). `roles` maps `agent`, `agent.<kind>`, `subagent`, `subagent.<name>`, `reviewer`, `reviewer.<name>` to a preset. Resolution: exact role → role family → `default` → built-in `main` (Pi, Main's model). Presets never inherit from each other.
+Each launch defaults to the current Pi session's model and thinking level. Optional `plan`, `execute` and `review` overrides replace the fields you set; `review` covers all reviewers. The TUI picker still lets you change each launch. If upgrading, replace `default`, `runtimes` and `roles` with these direct overrides.
 
 Skills, instructions and extensions are **not** per role: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
 
@@ -147,6 +143,6 @@ Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` 
 
 `limits.runTurns` (default 1000) covers the worker, PQs, selected review batch and any authorized finalization. Per-session turn/time warnings and run warnings without grant headroom are display-only. If `limits.continuationTurns` (default 0) leaves room for a grant, near exhaustion an actionable checkpoint lets Main use `worq send REF '/continue N'`. Between requests a depleted run with headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. No grant raises a per-session turn/time limit, service quota or concurrency limit.
 
-Shared resources live in `<agentDir>/worq/`: `instructions/*.md` (appended to every system prompt), `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool) and `extensions/*.{mjs,js,ts}` (native Pi extensions; require `"approveExtensions": true`). Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own; extensions run operator code in-process, not a sandbox. Named PQs: map `roles["subagent.evidence"]` to a preset, then delegate with `name: "evidence"`. No candidate discovery is enabled.
+Shared resources live in `<agentDir>/worq/`: `instructions/*.md` (appended to every system prompt), `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool) and `extensions/*.{mjs,js,ts}` (native Pi extensions; require `"approveExtensions": true`). Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own; extensions run operator code in-process, not a sandbox. No candidate discovery is enabled.
 
 Agent names are exact lowercase slugs of their titles, with a numeric suffix on collision. Use the returned name for list, send, cancel and inspect. Plans are saved as `.agents/plans/plan-<name>.md`; revisions retain the same path. Existing plan files may be attached by their repo-relative path. At-sign mentions in tasks are always literal.

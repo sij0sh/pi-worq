@@ -10,8 +10,8 @@ import { label, type Outcome } from "../telemetry.ts";
 import { temporaryDirectory } from "../workspace.ts";
 import type { Capabilities, ExtensionFile, Handle, Runtime, SDKAdapter, SessionSpec, Tool } from "./contract.ts";
 
-/** What the Pi adapter needs from its host: Main's model and model registry, plus the agent dir for auth. */
-export type PiHost = Pick<ExtensionContext, "model" | "modelRegistry"> & { agentDir?: string };
+/** Main's live selection and model registry, plus the agent dir for auth. */
+export type PiHost = Pick<ExtensionContext, "model" | "modelRegistry" | "thinkingLevel"> & { agentDir?: string };
 
 const CORE_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
 const EXTRA_LEVELS = ["xhigh", "max"] as const;
@@ -79,6 +79,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
   return {
     async models() { return host.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`); },
     defaultModel() { const m = host.model; return m && `${m.provider}/${m.id}`; },
+    defaultThinking() { return host.thinkingLevel; },
     capabilities(runtime): Capabilities {
       return {
         switchModel: true, thinking: thinkingLevels(primary(runtime)), extensions: true, turnUnit: "request",
@@ -89,7 +90,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
       const { runtime } = spec;
       const model = primary(runtime);
       if (!model) throw new Block("model", "Select a Pi model or set a runtime model in pi-worq.json");
-      let level = spec.thinking as Level | undefined;
+      const level = spec.thinking as Level | undefined;
       const outcomes = new Map<string, Outcome>();
       const calls = new Map<string, string>();
       let nextCall = 0;
@@ -109,7 +110,17 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         sessionManager: manager,
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
       });
-      const setup = () => { try { report({ setup: { model: label(session.model && `${session.model.provider}/${session.model.id}`), thinking: label(session.thinkingLevel), skills: [] } }); } catch { /* display only */ } };
+      const beforeRequest = spec.beforeRequest;
+      if (beforeRequest) {
+        const prepare = session.agent.prepareRequest;
+        // Pi's prepareRequest reads session state for every request, after previous tools settle.
+        session.agent.prepareRequest = async (request, signal) => {
+          await beforeRequest(signal ?? spec.signal);
+          return (await prepare?.(request, signal)) ?? undefined;
+        };
+      }
+      const selection = () => ({ model: session.model && `${session.model.provider}/${session.model.id}`, thinking: session.thinkingLevel });
+      const setup = () => { try { const { model, thinking } = selection(); report({ setup: { model: label(model), thinking: label(thinking), skills: [] } }); } catch { /* display only */ } };
       const context = () => {
         try {
           const usage = session.getContextUsage();
@@ -183,15 +194,14 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         },
         get streaming() { return session.isStreaming; },
         abort: () => session.abort(),
+        get selection() { return selection(); },
         async configure(change) {
           const next = change.model !== undefined ? find(change.model, `${runtime.path}/model`) : undefined;
-          if (change.thinking !== undefined) level = change.thinking as Level;
+          const level = (change.thinking ?? session.thinkingLevel) as Level;
           // setModel keeps the conversation, tool results and session identity.
           if (next) await session.setModel(next);
-          if (level) session.setThinkingLevel(level);
+          session.setThinkingLevel(level);
           setup(); report({ context: undefined });
-          const supported = thinkingLevels(next ?? session.model);
-          if (level && !supported.includes(level)) spec.emit({ type: "log", text: `thinking level ${level} is not supported by ${change.model ?? "the current model"} (${supported.join(", ")}); Pi clamps it` });
         },
         dispose() { report({ phase: "closed" }); outcomes.clear(); calls.clear(); unsubscribe(); session.dispose(); },
       };

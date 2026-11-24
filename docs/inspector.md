@@ -6,7 +6,7 @@ The agent dock sits below the editor. Expand or collapse it with `[−]` / `[+]`
 
 Live rows (owners, PQs, reviewers) are controllable. In wide docks click MODEL (`▾`) to change model/thinking, or `[×]` to cancel; anywhere else on the row still inspects. In the inspector's Agents view press **M** (runtime) or **X** (cancel) on the selected role.
 
-- Model/thinking: same harness only (locked). Session, history, budgets and turns are kept. Applies immediately when idle, otherwise at the next safe boundary (current prompt settles); ACTIVITY shows `◷ old → new`, then `↻ switching`. Speed/cache/context estimates reset. A manual model change supersedes the preset fallback. CLI: `worq configure <ref> [--model p/id] [--thinking level]`, `/worq configure <ref> <model|-> [thinking]` (owners only).
+- Model/thinking: same harness only (locked). Session, history, budgets and turns are kept. Applies immediately when idle, otherwise before the next Pi model request, after any running tools finish. ACTIVITY shows `◷ old → new`, then `↻ switching`. Speed/cache/context estimates reset. CLI: `worq configure <ref> [--model p/id] [--thinking level]`, `/worq configure <ref> <model|-> [thinking]` (owners only).
 - Cancel (confirmed): owner → whole family (review-ready = normal close, branch kept); PQ → that question only, parent gets `[PQ cancelled]`; reviewer → verdict `unknown`, round still settles. Row shows `× cancelling` until termination.
 
 The inspector opens on live Activity, newest event first, labeled with its owner ref and child role when applicable. Passing a ref limits the timeline and roster to that family. Scroll down to older activity to pause; press **J** (Jump to live) to resume. New events never move the selected role used by Agents and Evidence.

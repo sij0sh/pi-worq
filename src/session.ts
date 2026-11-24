@@ -6,7 +6,6 @@ import { Block, errorText, parse } from "./contracts.ts";
 import { tool, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SessionEvent, type Tool } from "./sdk/contract.ts";
 
 export const NUDGE = "You ended your turn without calling your finish tool. Re-ask your recursive question: if consequential work remains within your authority, do it; otherwise call the finish tool now.";
-const CONTINUE = "The previous model request failed. Continue the same assignment from the conversation and tool results so far.";
 
 
 export class WorkerHandoff extends Error {
@@ -71,7 +70,7 @@ export interface ConversationOptions<T extends TSchema> {
 
 /**
  * The single session primitive. Drives one SDK session until it calls its finish tool:
- * queued messages, one settlement nudge, fallback model, turn and time budgets, cancellation.
+ * queued messages, one settlement nudge, turn and time budgets, cancellation.
  * `run` can be called again for another round in the same session.
  */
 export class Conversation<T extends TSchema> {
@@ -95,8 +94,10 @@ export class Conversation<T extends TSchema> {
   private softTimer?: ReturnType<typeof setTimeout>;
   private since = 0;
   private readonly options: ConversationOptions<T>;
-  /** Main's runtime change waiting for the next safe boundary (prompt settled). */
+  /** Main's runtime change waiting for the next safe boundary. */
   private change?: RuntimeChange;
+  /** Covers SDK preflight as well as streaming and tools. */
+  private prompting = false;
   private applying: Promise<void> = Promise.resolve();
 
   constructor(options: ConversationOptions<T>) {
@@ -118,35 +119,45 @@ export class Conversation<T extends TSchema> {
   }
   /**
    * Change model and/or thinking for this live session. Applies now when the session is idle,
-   * otherwise at the next safe boundary (the running prompt settles). Never interrupts a tool.
+   * otherwise before the next model request, or when the prompt settles. Never interrupts a tool.
    */
   async configure(change: RuntimeChange): Promise<"applied" | "queued"> {
-    if (this.closed) throw new Block("ended", `${this.options.spec.name} has ended`);
+    if (this.closed || this.signal.aborted) throw new Block("ended", `${this.options.spec.name} has ended`);
     if (this.handle && !this.handle.configure) throw new Block("capability", `${this.options.spec.name}: this harness cannot change a live session`);
-    this.handle?.check?.(change);
-    this.change = { ...this.change, ...change };
-    if (!this.handle || this.handle.streaming) {
-      this.options.spec.log(`runtime change queued (${this.describe(this.change)}): applies when the current request settles`);
-      this.note(`◷ ${this.describe(this.change)}`);
+    const next = { ...this.change, ...change };
+    this.handle?.check?.(next);
+    this.change = next;
+    if (!this.handle || this.prompting || this.handle.streaming) {
+      this.options.spec.log(`runtime change queued (${this.describe(next)}): applies at the next safe request boundary`);
+      this.note(`◷ ${this.describe(next)}`);
       return "queued";
     }
-    await this.flush();
+    await this.flush(this.signal, true);
     return "applied";
   }
-  /** Serialized: one runtime change at a time, never while a prompt is in flight. */
-  private flush(): Promise<void> {
-    this.applying = this.applying.then(async () => {
+  /** Only called while idle, after settlement, or at the adapter's pre-request boundary. */
+  private flush(signal = this.signal, interactive = false): Promise<void> {
+    const applying = this.applying.then(async () => {
       const change = this.change;
       const handle = this.handle;
-      if (!change || !handle || this.closed) return;
+      if (!change || !handle || this.closed || this.signal.aborted || signal.aborted) return;
       this.change = undefined;
       if (!handle.configure) { this.note(undefined); this.options.spec.log("runtime change dropped: this harness cannot change a live session"); return; }
       this.note("↻ switching");
       try { await handle.configure(change); }
-      catch (error) { this.options.spec.log(`runtime change failed: ${errorText(error)}`); this.options.warning?.(`${this.options.spec.name}: runtime change failed: ${errorText(error)}`); }
-      finally { this.note(undefined); }
+      catch (error) {
+        this.options.spec.log(`runtime change failed: ${errorText(error)}`);
+        if (interactive) throw error;
+        this.options.warning?.(`${this.options.spec.name}: runtime change failed: ${errorText(error)}`);
+      } finally { this.note(this.change ? `◷ ${this.describe(this.change)}` : undefined); }
     });
-    return this.applying;
+    this.applying = applying.catch(() => {});
+    return applying;
+  }
+  private async prompt(handle: CoreHandle, text: string, options?: { toolFree: boolean }) {
+    this.prompting = true;
+    try { return await handle.prompt(text, options); }
+    finally { this.prompting = false; }
   }
 
   private finishTool(): Tool {
@@ -223,6 +234,7 @@ export class Conversation<T extends TSchema> {
       id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, checkpoint: spec.checkpoint, skills: spec.skills, signal: this.signal,
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
+      beforeRequest: (signal) => this.flush(signal),
     });
     // An open that settles after cancellation or dispose must not leave a live session behind.
     if (this.closed || this.signal.aborted) { handle.dispose(); throw this.signal.reason ?? new Block("cancelled", `${spec.name} closed while opening`); }
@@ -297,10 +309,11 @@ export class Conversation<T extends TSchema> {
         await this.flush();               // safe boundary: no prompt in flight
         gate.throwIfAborted();
         this.prepaid = true;
-        const turn = handle.prompt(next);
+        const turn = this.prompt(handle, next);
         void turn.catch(() => {});        // an abandoned promise can still reject
         const outcome = await Promise.race([turn, aborted, excess]);
-        const failed = outcome === undefined ? undefined : outcome === "failed" || outcome === "preflight-failed";
+        // Also flush when no further SDK request follows (e.g. submission or waiting for PQs).
+        if (outcome !== undefined) await this.flush();
         if (gate.aborted) {
           await stopOnce();               // caller or budget abort: stop the turn, once
           if (caller.aborted) throw caller.reason;
@@ -309,15 +322,14 @@ export class Conversation<T extends TSchema> {
         }
         if (this.result !== undefined) return this.result;
         if (this.options.admitCloseout && this.turns >= this.options.turns) {
-          if (failed === undefined || this.excess.signal.aborted) {
+          if (outcome === undefined || this.excess.signal.aborted) {
             const quiescent = await stopOnce(true);
             gate.throwIfAborted();
             throw new WorkerHandoff(this.turns, this.ordinary, "", "automatic turn admission", quiescent);
           }
           await this.handoff(handle, gate, aborted, excess, stopOnce);
         }
-        if (failed) {
-          if (await handle.fallback()) { next = this.inbox.shift() ?? CONTINUE; continue; }
+        if (outcome === "failed" || outcome === "preflight-failed") {
           throw new Block("model", `${this.options.spec.name}: ${outcome === "preflight-failed" ? "model prompt rejected before request" : "model request failed"}`);
         }
         const queued = this.inbox.shift();
@@ -369,7 +381,7 @@ export class Conversation<T extends TSchema> {
       try {
         const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 15_000); });
         const result = await Promise.race([
-          handle.prompt("End this session. Do not use tools. Write a concise handoff for Main: completed work, evidence, blockers and next steps.", { toolFree: true }),
+          this.prompt(handle, "End this session. Do not use tools. Write a concise handoff for Main: completed work, evidence, blockers and next steps.", { toolFree: true }),
           deadline, excess, aborted,
         ]);
         settled = result !== undefined && !handle.streaming;

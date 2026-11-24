@@ -10,8 +10,8 @@ const int = (minimum: number, maximum: number) => Type.Optional(Type.Integer({ m
 const modelRef = Type.Optional(Type.String({ maxLength: 200 }));
 const name = Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9-]*$" });
 const thinking = Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z]+$" }));
-const RuntimeSchema = obj({ sdk: Type.Optional(name), model: modelRef, fallbackModel: modelRef, thinking });
-const ROLE = "^(agent|subagent|reviewer)(\\.[a-z][a-z0-9-]*)?$";
+const RuntimeSchema = obj({ sdk: Type.Optional(name), model: modelRef, thinking });
+const presets = ["plan", "execute", "review"] as const;
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
 const Limits = obj({
   agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), rounds: int(1, 20), asks: int(0, 20),
@@ -21,12 +21,10 @@ const Limits = obj({
   services: int(0, 8),
 });
 const ConfigSchema = obj({
-  /** Runtime used by roles with no `roles` entry. Absent = built-in "main" (Pi, Main's model). */
-  default: Type.Optional(name),
+  plan: Type.Optional(RuntimeSchema),
+  execute: Type.Optional(RuntimeSchema),
+  review: Type.Optional(RuntimeSchema),
   launch: Type.Optional(obj({ countdownSeconds: int(0, 120), interactive: Type.Optional(Type.Boolean()) })),
-  runtimes: Type.Optional(Type.Record(name, RuntimeSchema)),
-  /** Role → runtime name. Exact role wins over its family. */
-  roles: Type.Optional(Type.Record(Type.String({ pattern: ROLE }), name)),
   /** Approves executing the native extension files installed in the shared resource directory. */
   approveExtensions: Type.Optional(Type.Boolean()),
   limits: Type.Optional(Limits),
@@ -47,11 +45,11 @@ export interface Config {
   approveExtensions: boolean;
   /** SDKs named by declared presets (the router preloads them). */
   sdks: string[];
-  /** Resolve a role: exact role → role family → default → built-in "main". */
+  /** Return the override for Plan, Execute or Review, otherwise the built-in Pi runtime. */
   runtime(role: string): Runtime;
 }
 
-const LEGACY = ["agents", "scq", "harness", "harnesses", "model", "fallbackModel", "models"];
+const LEGACY = ["default", "runtimes", "roles", "agents", "scq", "harness", "harnesses", "model", "fallbackModel", "models"];
 
 /** Read <agentDir>/pi-worq.json. A missing file means defaults; an invalid one fails naming the key. */
 export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS)): Config {
@@ -63,29 +61,19 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
   }
   const data = json(raw, path);
   const legacy = data && typeof data === "object" ? LEGACY.filter((key) => key in data) : [];
-  if (legacy.length) throw new Block("config", `${path}: ${legacy.join(", ")} ${legacy.length > 1 ? "are" : "is"} from the old Worq format. Declare named presets in "runtimes" ({ "<name>": { "sdk", "model", "fallbackModel", "thinking" } }), map roles to them in "roles" (keys agent, agent.<kind>, subagent, subagent.<name>, reviewer, reviewer.<name>), and set "default". Skills, instructions and extensions are no longer per role: install them under <agentDir>/worq/.`);
+  if (legacy.length) throw new Block("config", `${path}: ${legacy.join(", ")} ${legacy.length > 1 ? "are" : "is"} from the old Worq format. Remove those keys and put any SDK, model or thinking overrides directly in "plan", "execute" or "review" (each takes { "sdk", "model", "thinking" }). Other roles use the current Pi session. Shared resources belong under <agentDir>/worq/.`);
   const config = parse(ConfigSchema, data, path);
-  const runtimes = config.runtimes ?? {};
-  const roles = config.roles ?? {};
-
   const resolved = new Map<string, Runtime>();
-  for (const [key, preset] of Object.entries(runtimes)) {
+  for (const key of presets) {
+    const preset = config[key];
+    if (!preset) continue;
     const sdk = preset.sdk ?? "pi";
-    if (!sdks.includes(sdk)) throw new Block("config", `${path}: /runtimes/${key}/sdk: unknown sdk "${sdk}" (available: ${sdks.join(", ")})`);
-    for (const field of ["model", "fallbackModel"] as const) {
-      const value = preset[field];
-      const pattern = SDKS[sdk]?.modelRef;
-      if (value !== undefined && pattern && !pattern.test(value)) throw new Block("config", `${path}: /runtimes/${key}/${field} "${value}" is not a valid ${sdk} model ref (expected ${pattern})`);
-    }
-    resolved.set(key, { name: key, sdk, path: `/runtimes/${key}`, via: "", ...preset, ...(preset.sdk ? {} : { sdk }) });
+    const location = `/${key}`;
+    if (!sdks.includes(sdk)) throw new Block("config", `${path}: ${location}/sdk: unknown sdk "${sdk}" (available: ${sdks.join(", ")})`);
+    const pattern = SDKS[sdk]?.modelRef;
+    if (preset.model !== undefined && pattern && !pattern.test(preset.model)) throw new Block("config", `${path}: ${location}/model "${preset.model}" is not a valid ${sdk} model ref (expected ${pattern})`);
+    resolved.set(key, { ...preset, name: key, sdk, path: location, via: location });
   }
-  const lookup = (key: string, via: string) => {
-    const runtime = resolved.get(key);
-    if (!runtime) throw new Block("config", `${path}: ${via}: unknown runtime "${key}" (declared: ${[...resolved.keys()].join(", ") || "none"})`);
-    return { ...runtime, via };
-  };
-  if (config.default) lookup(config.default, "/default");
-  for (const [role, key] of Object.entries(roles)) lookup(key, `/roles/${role}`);
 
   return {
     path,
@@ -94,12 +82,8 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
     approveExtensions: config.approveExtensions ?? false,
     sdks: [...new Set([...resolved.values()].map((r) => r.sdk))],
     runtime(role) {
-      if (role.startsWith("subagent.") && !Object.hasOwn(roles, role)) throw new Block("config", `Unknown named child ${role}: declare roles["${role}"]`);
-      const [family] = role.split(".");
-      if (Object.hasOwn(roles, role)) return lookup(roles[role], `/roles/${role}`);
-      if (Object.hasOwn(roles, family)) return lookup(roles[family], `/roles/${family}`);
-      if (config.default) return lookup(config.default, "/default");
-      return { ...MAIN };
+      const key = role === "agent.plan" ? "plan" : role === "agent.execute" ? "execute" : (role === "reviewer" || role.startsWith("reviewer.")) ? "review" : "";
+      return { ...(resolved.get(key) ?? MAIN) };
     },
   };
 }

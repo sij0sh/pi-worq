@@ -1,51 +1,37 @@
 # Configuration
 
-One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), plus one optional shared resource directory: `<agentDir>/worq/`. With neither, every role runs on Main's model at thinking level `low`.
+One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), plus one optional shared resource directory: `<agentDir>/worq/`. By default, every new Worq session uses Main's current Pi model and thinking level.
 
 Both are read once per Pi session, when the first Worq tool call creates the Worq instance. Edit, then start a new Pi session; running agents keep what they launched with.
 
-Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Unknown sdks, unknown runtime names and malformed model refs fail at load as `config`. A capability mismatch fails as `capability` at spawn / before each PQ or reviewer.
+Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Unknown SDKs and malformed model refs fail at load as `config`. A capability mismatch fails as `capability` at spawn / before each PQ or reviewer.
 
 ```json
 {
-  "default": "standard",
+  "plan": { "sdk": "pi", "model": "provider/model", "thinking": "high" },
+  "execute": { "thinking": "medium" },
+  "review": { "model": "provider/review-model" },
   "launch": { "countdownSeconds": 5, "interactive": true },
-  "runtimes": {
-    "standard": { "sdk": "pi", "model": "provider/model", "fallbackModel": "provider/model", "thinking": "medium" },
-    "deep": { "model": "provider/model", "thinking": "high" },
-    "fast": { "model": "provider/model", "thinking": "low" }
-  },
-  "roles": { "agent.plan": "deep", "agent.execute": "standard", "agent.foundation": "deep", "subagent": "fast", "subagent.evidence": "standard", "reviewer": "deep" },
   "approveExtensions": false,
   "limits": { "agents": 4, "runTurns": 1000, "continuationTurns": 0 }
 }
 ```
 
-Top-level keys: `default`, `launch`, `runtimes`, `roles`, `approveExtensions`, `limits`. Nothing else is accepted. The pre-0.0.28 keys (`harness`, `harnesses`, `model`, `fallbackModel`, `models`) fail with a migration message.
+Top-level keys: `plan`, `execute`, `review`, `launch`, `approveExtensions`, `limits`.
 
-## Runtimes
+## Runtime overrides
 
-A runtime is a named preset: `sdk` (default `pi`), `model`, `fallbackModel`, `thinking`. Every field optional. Presets are independent — no field inherits from another preset or layer, so switching a role's SDK is changing one name.
+`plan` and `execute` apply to the corresponding workers. `review` applies to every independent reviewer. PQ subagents and workflows always start with Main's live Pi selection. Overrides are independent, and all three keys and their fields are optional.
 
-- `model` absent → Main's model. Ref shape is per SDK: `<provider>/<model>` for Pi, checked at load.
-- `thinking` absent → `low` when the SDK supports it. A level the model rejects fails as `capability`.
-- `fallbackModel` → used once, when a model request fails (preflight or mid-run). Ignored when equal to `model`. Worq decides when and to what; the adapter only switches.
+- `sdk`: execution backend (default `pi`; the only backend shipped today).
+- `model`: defaults to Main's current model for Pi. Pi refs use `<provider>/<model>`. Other SDKs use their own model refs and defaults.
+- `thinking`: defaults to Main's current thinking level when the selected Pi model supports it; otherwise the SDK decides. An explicitly configured unsupported level fails as `capability`.
 
-## Roles
-
-`roles` maps a role key to a runtime name:
-
-| Key | Selects |
-|---|---|
-| `agent` / `agent.<kind>` | Every agent / one kind or workflow |
-| `subagent` / `subagent.<name>` | Unnamed PQs / a PQ delegated with `name: "<name>"` |
-| `reviewer` / `reviewer.<name>` | Every reviewer / one, e.g. `reviewer.intent` |
-
-Resolution: **exact role → role family → `default` → built-in `main`** (`sdk: pi`, Main's model). Named children must be declared: delegating to `subagent.evidence` without `roles["subagent.evidence"]` fails as `Unknown named child`.
+To migrate, remove `default`, `runtimes` and `roles`. Copy any worker and reviewer settings you still want directly into `plan`, `execute` and `review`, keeping only `sdk`, `model` and `thinking`. Remove the old runtime keys even if you don't want any overrides.
 
 ## Launch picker
 
-In the TUI, each new SDK session starts a five-second countdown with its role’s preset selected. Use `roles["agent.<workflow-name>"]` to give an installed workflow its own default. Parallel sessions share one popup: Tab selects a pending agent, ↑/↓ selects harness, model or thinking, and ←/→ changes it. Editing pauses that agent’s countdown. Enter launches immediately, A launches all, and Esc cancels the selected launch. Overrides apply only to this session; changing model or harness drops its configured fallback. Existing conversations continue without another countdown.
+In the TUI, each new SDK session starts a five-second countdown with Main's current selection or the configured role override preselected. Parallel sessions share one popup: Tab selects a pending agent, ↑/↓ selects harness, model or thinking, and ←/→ changes it. Editing pauses that agent’s countdown. Enter launches immediately, A launches all, and Esc cancels the selected launch. Picker changes apply only to that session. Existing conversations continue without another countdown.
 
 Set `"launch": { "interactive": true, "countdownSeconds": 5 }` in `pi-worq.json` to customize this. `interactive: false`, zero seconds, or a non-TUI host launches defaults immediately. Only Pi ships today.
 
@@ -69,19 +55,19 @@ Installed once, identical for every role and every SDK. Never part of model sele
 
 ## Subagents and reviewers
 
-Subagents are read-only sessions answering one probing question. The delegating agent chooses the role with an optional name:
+Subagents are read-only sessions answering one probing question. The delegating agent can give a subagent an optional name:
 
 ```json
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-`name` maps to `subagent.<name>`; omitting it selects `subagent`. Each named child gets its own runtime, plus its own `subagentTurns` / `subagentMinutes` budget from the shared allowance below. Depth is one: a subagent cannot delegate.
+The name labels the child without changing its runtime default. Each child has its own `subagentTurns` / `subagentMinutes` budget and draws from the shared run allowance below. Depth is one: a subagent cannot delegate.
 
-Callers do not select reviewers by name. The kind's review policy runs on submit, and each reviewer resolves `reviewer.<name>` (`intent`, `decision`, …). Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows are never reviewed. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Callers do not select reviewers by name. The kind's review policy runs on submit, and all reviewers use the same `review` override when set. Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows are never reviewed. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
 
 ## Workflows
 
-Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. Roles: `agent.<name>` for one workflow, `agent` for all agents. `limits.agents` counts live workflows; turns spend from the same budgets. No reviewers. See `docs/workflows.md`.
+Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. `limits.agents` counts live workflows; turns spend from the same budgets. No reviewers. See `docs/workflows.md`.
 
 ## Limits
 
@@ -124,34 +110,20 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 
 | Failure | Cause | Fix |
 |---|---|---|
-| `… old Worq format` | Pre-0.0.28 keys | Move to `runtimes` + `roles`; resources to `<agentDir>/worq/` |
-| `/runtimes/x/model … not a valid pi model ref` | Ref shape | Use `<provider>/<model>` |
+| `… old Worq format` | Obsolete runtime keys | Move overrides to `plan`, `execute` or `review`; resources to `<agentDir>/worq/` |
+| `/plan/model … not a valid pi model ref` | Ref shape | Use `<provider>/<model>` |
 | `unknown sdk` | `sdk` names no registered adapter | Use `pi` |
-| `unknown runtime` | `default`/`roles` names an undeclared preset | Declare it in `runtimes` |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
 | `Extension approval required` | Files in `worq/extensions/` | Set `approveExtensions: true` or remove them |
 | `cannot load the … native extension(s)` | A role's SDK has no native extension support | Remove the extensions or keep that role on `pi` |
 | `Untrusted resource` / `Repository resource` | Escaping link, or `worq/` inside a checkout | Move the file / directory |
-| `Unknown named child` | `name` delegated without a `roles` entry | Declare `roles["subagent.<name>"]` |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
 | `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |
 | `invocation` | User-only workflow sent to `worq_spawn`, or a built-in kind to `/worq workflow` | `/worq workflow`; `worq_spawn` for built-ins |
 | `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` |
 
 ## Recipes
-
-Cheap workers, strong reviewers:
-
-```json
-{
-  "default": "cheap",
-  "runtimes": { "cheap": { "model": "anthropic/claude-haiku-4-5", "thinking": "low" }, "strong": { "model": "anthropic/claude-opus-4-1", "thinking": "high" } },
-  "roles": { "reviewer": "strong" }
-}
-```
-
-A named evidence child: `roles["subagent.evidence"]` → a preset, and put its rules in `<agentDir>/worq/skills/evidence/SKILL.md` (every role sees the index; any role can read it).
 
 Long autonomous runs with an approval step:
 

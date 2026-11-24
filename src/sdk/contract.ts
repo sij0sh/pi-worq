@@ -17,17 +17,16 @@ export interface Tool<T extends TSchema = TSchema> {
 }
 export const tool = <T extends TSchema>(name: string, description: string, parameters: T, run: Tool<T>["run"]): Tool => ({ name, description, parameters, run } as Tool);
 
-/** One named preset from config `runtimes`, resolved for a role. */
+/** One runtime selection for a session. */
 export interface Runtime {
-  /** Preset name; "main" is the built-in preset (Pi, Main's model). */
+  /** Preset name; "main" uses the current Pi session. */
   name: string;
   sdk: string;
   model?: string;
-  fallbackModel?: string;
   thinking?: string;
-  /** JSON path the preset came from (`/runtimes/<name>`), "" for the built-in one. */
+  /** JSON path the override came from, "" for the built-in runtime. */
   path: string;
-  /** JSON path that selected the preset for this role (`/roles/<key>`, `/default`), "" when built-in. */
+  /** JSON path that selected the override, "" when built-in. */
   via: string;
 }
 
@@ -68,6 +67,8 @@ export interface Spec {
   /** Session-specific skill packages (a workflow's own), indexed and readable alongside the shared ones. */
   skills?: readonly import("../runtime/skills.ts").Skill[];
   emit(event: SessionEvent): void;
+  /** Optional safe boundary before a model request, including tool continuations within a prompt. */
+  beforeRequest?(signal: AbortSignal): Promise<void>;
   /** Aborts session opening; an adapter must not leave a live session behind it. */
   signal: AbortSignal;
 }
@@ -76,7 +77,7 @@ export interface ExtensionFile { name: string; bytes: Buffer }
 /** Fully resolved session request: what an adapter receives. */
 export interface SessionSpec extends Spec {
   runtime: Runtime;
-  /** Resolved thinking level (runtime's, else the core default when supported). */
+  /** Selected thinking level; absent leaves it to the SDK. */
   thinking?: string;
   extensions: readonly ExtensionFile[];
 }
@@ -95,18 +96,18 @@ export interface Handle {
   readonly streaming: boolean;
   /** Settle the in-flight prompt and clear `streaming` within 5s. */
   abort(): Promise<void>;
+  /** Effective SDK selection, including SDK defaults and any clamping. */
+  readonly selection?: RuntimeChange;
   /** Mechanics only: apply model and/or thinking to the live session, keeping its history. The core decides when and to what. */
   configure?(change: RuntimeChange): Promise<void>;
   dispose(): void;
 }
-/** Model fallback and manual reconfiguration live in the core; both go through Handle.configure. */
-export interface CoreHandle extends Omit<Handle, "configure"> {
-  fallback(): Promise<boolean>;
+export interface CoreHandle extends Omit<Handle, "configure" | "selection"> {
   /** The runtime currently in effect (after any change). Absent on test doubles. */
   readonly runtime?: Runtime;
   /** Throws Block when the change cannot apply to this session. */
   check?(change: RuntimeChange): void;
-  /** Validate then apply. A manual model change supersedes the pending automatic fallback. */
+  /** Validate then apply. */
   configure?(change: RuntimeChange): Promise<void>;
 }
 
@@ -114,6 +115,7 @@ export interface CoreHandle extends Omit<Handle, "configure"> {
 export interface SDKAdapter {
   models(): Promise<readonly string[]>;
   defaultModel?(): string | undefined;
+  defaultThinking?(): string | undefined;
   capabilities(runtime: Runtime): Capabilities;
   open(spec: SessionSpec): Promise<Handle>;
 }
@@ -121,14 +123,19 @@ export interface SDKAdapter {
 export interface Driver {
   catalog?(): Promise<ReadonlyMap<string, readonly string[]>>;
   defaultModel?(sdk: string): string | undefined;
+  defaultThinking?(sdk: string): string | undefined;
   capabilities(role: string, runtime?: Runtime): Capabilities;
   open(spec: Spec): Promise<CoreHandle>;
+}
+
+/** Inherit only levels the selected model supports. Explicit overrides are validated separately. */
+export function supportedThinking(level: string | undefined, levels: readonly string[]): string | undefined {
+  return level !== undefined && levels.includes(level) ? level : undefined;
 }
 
 const at = (runtime: Runtime, field: string) => runtime.path ? `${runtime.path}/${field}` : field;
 /** Judge a resolved runtime against what its SDK can do. Raises Block("capability") naming the config path. */
 export function assertRuntime(runtime: Runtime, caps: Capabilities, extensions = 0): void {
-  if (runtime.fallbackModel !== undefined && !caps.switchModel) throw new Block("capability", `${at(runtime, "fallbackModel")}: ${runtime.sdk} cannot switch models`);
   if (runtime.thinking !== undefined && !caps.thinking.includes(runtime.thinking)) {
     throw new Block("capability", caps.thinking.length
       ? `${at(runtime, "thinking")}: ${runtime.thinking} is not a ${runtime.sdk} thinking level (${caps.thinking.join(", ")})`

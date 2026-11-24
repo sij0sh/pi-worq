@@ -3,7 +3,7 @@ import { matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tu
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
 import type { LaunchRequest, ModelChoice, SelectLaunch } from './runtime/launch.ts';
-import type { Runtime, RuntimeChange } from './sdk/contract.ts';
+import { supportedThinking, type Runtime, type RuntimeChange } from './sdk/contract.ts';
 
 interface Pending extends LaunchRequest {
   selected: Runtime; deadline?: number; finish(error?: unknown): void;
@@ -17,8 +17,10 @@ function boxed(theme: { fg(color: string, s: string): string }, width: number, l
     return `${border('│')} ${body}${' '.repeat(width - 3 - visibleWidth(body))}${border('│')}`;
   }), border(`╰${rule}╯`)];
 }
-function cycle<T>(values: readonly T[], value: T, delta: number) {
-  return values[(values.indexOf(value) + values.length + delta) % values.length];
+function cycle<T>(values: readonly T[], value: T | undefined, delta: number) {
+  const at = value === undefined ? -1 : values.indexOf(value);
+  const start = at < 0 && delta < 0 ? 0 : at;
+  return values[(start + values.length + delta) % values.length];
 }
 
 /** One overlay per Worq instance. Editing a row never delays its siblings. */
@@ -76,9 +78,8 @@ export function launchPicker(ui: ExtensionContext['ui']): SelectLaunch {
                 const sdk = cycle([...new Set(row.choices.map(c => c.sdk))], r.sdk, delta);
                 if (sdk !== r.sdk) choice = row.choices.find(c => c.sdk === sdk)!;
               } else if (field === 1) choice = cycle(row.choices.filter(c => c.sdk === r.sdk), choice, delta);
-              const thinking = field === 2 ? cycle(choice.levels, r.thinking ?? '', delta) : choice.levels.includes(r.thinking ?? '') ? r.thinking : choice.levels.includes('low') ? 'low' : choice.levels[0];
-              row.selected = { ...r, sdk: choice.sdk, model: choice.model, thinking,
-                fallbackModel: choice.sdk === row.initial.sdk && choice.model === row.initial.model ? row.initial.fallbackModel : undefined };
+              const thinking = field === 2 ? cycle(choice.levels, r.thinking, delta) : supportedThinking(r.thinking, choice.levels);
+              row.selected = { ...r, sdk: choice.sdk, model: choice.model, thinking };
             } else return;
             refresh?.();
           },
@@ -105,22 +106,22 @@ export function launchPicker(ui: ExtensionContext['ui']): SelectLaunch {
 export interface RuntimeRequest { label: string; current: Runtime; choices: ModelChoice[]; pending?: RuntimeChange }
 /**
  * Live-session variant of the launch picker: no countdown, harness locked. Resolves the change
- * (only fields that differ from the current runtime), or undefined when dismissed or unchanged.
+ * (only fields that differ from the pending selection or current runtime), or undefined when dismissed or unchanged.
  */
 export async function runtimePicker(ui: ExtensionContext['ui'], request: RuntimeRequest): Promise<RuntimeChange | undefined> {
   const { current, choices } = request;
   const start = { model: request.pending?.model ?? current.model, thinking: request.pending?.thinking ?? current.thinking };
   let choice = choices.find(c => c.model === start.model) ?? choices[0];
   if (!choice) throw new Block('capability', 'No models available for this harness');
-  let thinking = start.thinking !== undefined && choice.levels.includes(start.thinking) ? start.thinking : choice.levels.includes('low') ? 'low' : choice.levels[0];
+  let thinking = supportedThinking(start.thinking, choice.levels);
   let field = 0;
   return ui.custom<RuntimeChange | undefined>((tui, theme, _keys, done) => ({
     invalidate() {},
     render(width) {
       const lines = [theme.fg('accent', `Runtime · ${clean(request.label).replace(/\s+/g, ' ')}`),
         `  Harness: ${current.sdk} (locked)`,
-        ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'not controllable'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
-        theme.fg('muted', request.pending ? 'A change is already queued; this replaces it.' : 'Keeps the session; applies at the next safe execution boundary.'),
+        ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'SDK default'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
+        theme.fg('muted', request.pending ? 'Editing a queued change.' : 'Keeps the session; applies at the next safe execution boundary.'),
         '↑↓ select · ←→ change · Enter apply · Esc dismiss'];
       return boxed(theme, width, lines);
     },
@@ -128,8 +129,8 @@ export async function runtimePicker(ui: ExtensionContext['ui'], request: Runtime
       if (matchesKey(data, 'escape')) return done(undefined);
       if (matchesKey(data, 'enter')) {
         const change: RuntimeChange = {};
-        if (choice.model !== current.model && choice.model !== undefined) change.model = choice.model;
-        if (thinking !== current.thinking && thinking !== undefined) change.thinking = thinking;
+        if (choice.model !== start.model && choice.model !== undefined) change.model = choice.model;
+        if (thinking !== start.thinking && thinking !== undefined) change.thinking = thinking;
         return done(change.model || change.thinking ? change : undefined);
       }
       if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab')) field = 1 - field;
@@ -137,8 +138,8 @@ export async function runtimePicker(ui: ExtensionContext['ui'], request: Runtime
         const delta = matchesKey(data, 'left') ? -1 : 1;
         if (field === 0) {
           choice = cycle(choices, choice, delta);
-          if (thinking === undefined || !choice.levels.includes(thinking)) thinking = choice.levels.includes('low') ? 'low' : choice.levels[0];
-        } else if (choice.levels.length) thinking = cycle(choice.levels, thinking ?? choice.levels[0], delta);
+          thinking = supportedThinking(thinking, choice.levels);
+        } else if (choice.levels.length) thinking = cycle(choice.levels, thinking, delta);
       } else return;
       tui.requestRender();
     },

@@ -27,8 +27,6 @@ export interface FakeOptions {
   steer?: "queue" | "throw" | "none";
   /** Number of model requests that fail before one succeeds. */
   failures?: number;
-  /** Number of fallback switches the handle still has. */
-  fallbacks?: number;
   /** Image payloads a tool returned. */
   images?: { mimeType: string; data: string }[];
   /** Argument-validation failures the fake reported as tool-error events. */
@@ -68,7 +66,6 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
     let stopRequested = false;
     let release: (() => void) | undefined;
     let failures = options.failures ?? 0;
-    let fallbacks = options.fallbacks ?? 0;
     const controller = new AbortController();
     const handle: CoreHandle = {
       async prompt(first) {
@@ -118,11 +115,6 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
         if (options.aborts) options.aborts.n++;
         controller.abort();
         if (options.abort !== "dangle") { stopRequested = true; release?.(); }
-      },
-      async fallback() {
-        if (fallbacks <= 0) return false;
-        fallbacks--;
-        return true;
       },
       checkpoint: () => spec.name === "agent.plan" ? "fake-active-branch" : undefined,
       dispose() {},

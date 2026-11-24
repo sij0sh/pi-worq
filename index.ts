@@ -127,7 +127,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const dir = agentDir();
         const config = loadConfig(dir);
         const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
-        const host = { get model() { return ctx.model; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
+        const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, config, resources);
         if (closing) throw new Error('Worq closed');
         return instance = new Worq({ select: ctx.mode === 'tui' ? launchPicker(ctx.ui) : undefined, telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify });

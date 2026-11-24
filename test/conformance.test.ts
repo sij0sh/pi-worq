@@ -186,19 +186,8 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     await assert.rejects(guarded(c.run("hang")), (error: unknown) => error instanceof Block && error.code === "time-limit");
   }
 
-  // fallback
-  {
-    const prompts = (options.prompts ??= []);
-    const c = open(make(caps));
-    const before = prompts.length;
-    const outcome = await c.run("fail").then((value) => value, (error: unknown) => error);
-    if (caps.switchModel) {
-      assert.ok(!(outcome instanceof Block), `${name}: with a fallback the request continues`);
-      assert.match(prompts[before + 1] ?? "", /previous model request failed/, `${name}: the fallback re-prompts with CONTINUE`);
-    } else {
-      assert.ok(outcome instanceof Block && outcome.code === "model", `${name}: no fallback left is Block(model)`);
-    }
-  }
+  // provider preflight failures are surfaced
+  await assert.rejects(open(make(caps)).run("fail"), (error: unknown) => error instanceof Block && error.code === "model");
 
   // thinking: the list is data on the adapter, empty only without level control
   {
@@ -208,18 +197,11 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
 
   // denial paths: a capability-minimal adapter must refuse what it cannot do, naming the config path
   {
-    const preset = (extra: Partial<Runtime>): Runtime => ({ name: "p", sdk: name, path: "/runtimes/p", via: "/roles/agent", ...extra });
+    const preset = (extra: Partial<Runtime>): Runtime => ({ name: "plan", sdk: name, path: "/plan", via: "/plan", ...extra });
     const iso = { ...caps, context: FULL_CAPS.context };
-    if (caps.switchModel) {
-      assert.doesNotThrow(() => assertRuntime(preset({ fallbackModel: "p/m" }), iso), `${name}: a supported fallback is accepted`);
-    } else {
-      assert.throws(() => assertRuntime(preset({ fallbackModel: "p/m" }), iso),
-        (error: unknown) => error instanceof Block && error.code === "capability" && /\/runtimes\/p\/fallbackModel/.test(error.message),
-        `${name}: a configured fallback on an sdk without model switching is denied naming the preset path`);
-    }
     if (caps.thinking.length === 0) {
       assert.throws(() => assertRuntime(preset({ thinking: "high" }), iso),
-        (error: unknown) => error instanceof Block && error.code === "capability" && /\/runtimes\/p\/thinking/.test(error.message),
+        (error: unknown) => error instanceof Block && error.code === "capability" && /\/plan\/thinking/.test(error.message),
         `${name}: a configured level without level control is denied naming the preset path`);
     } else {
       assert.doesNotThrow(() => assertRuntime(preset({ thinking: "high" }), iso), `${name}: a supported level is accepted`);
@@ -269,14 +251,10 @@ export const script: Script = async (turn) => {
   if (prompt === "main") { await turn.tool("submit", { value: "ok" }); return; }
   if (prompt === "context") { await turn.tool("submit", { value: turn.system }); return; }
   if (prompt === "id") { await turn.tool("submit", { value: turn.spec.id }); return; }
-  if (prompt.startsWith("The previous model request failed")) { await turn.tool("submit", { value: "continued" }); return; }
 };
 
 const record: FakeOptions = { images: [], toolErrors: [], prompts: [], aborts: { n: 0 }, calls: { n: 0 } };
-const make = (caps: Capabilities) => {
-  record.fallbacks = caps.switchModel ? 1 : 0;
-  return fakeHarness(caps, { x: script }, record);
-};
+const make = (caps: Capabilities) => fakeHarness(caps, { x: script }, record);
 
 test("conformance: MINIMAL and FULL adapters", async () => {
   await adapterConformance("adapter", make, record);
@@ -330,17 +308,17 @@ test("conformance: a session that finishes opening after dispose is disposed, no
 });
 
 /** A recording SDK adapter: proves the router hands adapters a resolved, prepared spec. */
-function recordingSdk(caps: Capabilities, seen: SessionSpec[], switched: string[]): SDKRecord {
+function recordingSdk(caps: Capabilities, seen: SessionSpec[], defaultThinking?: () => string): SDKRecord {
   return {
     modelRef: /.*/,
     load: async (): Promise<SDKAdapter> => ({
       models: async () => ['m/a', 'm/b'],
       capabilities: () => caps,
+      defaultThinking,
       async open(spec) {
         seen.push(spec);
         const handle: Handle = {
           prompt: async () => "completed", get streaming() { return false; }, abort: async () => {}, dispose() {},
-          configure: async (change) => { if (change.model) switched.push(change.model); },
         };
         return handle;
       },
@@ -351,33 +329,32 @@ const configFor = (runtime: (role: string) => Runtime, sdks: string[] = ["pi"]):
   ({ path: "test", limits: DEFAULT_LIMITS, approveExtensions: false, sdks, runtime });
 const roleSpec = (name: string): Spec => ({ id: "s", name, cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
 
-test("registry: createDriver routes by runtime, prepares the shared environment, owns fallback", async () => {
+test("registry: createDriver routes by runtime and prepares the shared environment", async () => {
   const seen: SessionSpec[] = [];
-  const switched: string[] = [];
-  const sdks = { pi: recordingSdk(FULL_CAPS, seen, switched), test: recordingSdk(FULL_CAPS, seen, switched) };
-  const fast: Runtime = { name: "fast", sdk: "test", model: "m/a", fallbackModel: "m/b", path: "/runtimes/fast", via: "/roles/subagent" };
-  const config = configFor((role) => role === "subagent" ? fast : { ...MAIN }, ["test"]);
+  const sdks = { pi: recordingSdk(FULL_CAPS, seen, () => "medium"), test: recordingSdk(FULL_CAPS, seen) };
+  const review: Runtime = { name: "review", sdk: "test", model: "m/a", path: "/review", via: "/review" };
+  const config = configFor((role) => role === "reviewer.intent" ? review : { ...MAIN }, ["test"]);
   const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
   const driver = await createDriver({}, config, resources, sdks);
   for (const role of ["agent.plan", "subagent", "reviewer.intent"]) {
     const handle = await driver.open(roleSpec(role));
     const spec = seen.at(-1)!;
-    assert.equal(spec.runtime.sdk, role === "subagent" ? "test" : "pi", `${role} routes to its runtime's sdk`);
+    assert.equal(spec.runtime.sdk, role === "reviewer.intent" ? "test" : "pi", `${role} routes to its runtime's sdk`);
     assert.match(spec.system, /^S\n\nOperator instructions a\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
     assert.ok(!spec.system.includes("Run lint"), `${role}: skill bodies load on demand`);
     assert.equal(await spec.tools.find((t) => t.name === "skill")!.run({ name: "lint" }, new AbortController().signal), "Run lint");
     assert.equal(spec.extensions.length, 1, `${role}: same extensions`);
-    assert.equal(spec.thinking, role === "subagent" ? "low" : "low", "core default thinking level");
-    assert.equal(await handle.fallback(), role === "subagent", "fallback only when the runtime names one");
-    assert.equal(await handle.fallback(), false, "fallback is used once");
+    assert.equal(spec.thinking, role === "reviewer.intent" ? undefined : "medium", "use the selected SDK's host thinking level when available");
+    handle.dispose();
   }
-  assert.deepEqual(switched, ["m/b"]);
-  const override = { ...fast, model: 'm/b', fallbackModel: undefined, thinking: 'high' };
+  const override = { ...review, model: 'm/b', thinking: 'high' };
   const selected = await driver.open({ ...roleSpec('agent.plan'), runtime: override });
   assert.equal(seen.at(-1)?.runtime, override);
-  assert.equal(await selected.fallback(), false);
+  selected.dispose();
+  (await driver.open({ ...roleSpec('agent.plan'), runtime: { ...MAIN, model: 'm/a' } })).dispose();
+  assert.equal(seen.at(-1)?.thinking, undefined, "an admitted SDK default stays resolved");
 
-  const minimal = await createDriver({}, configFor(() => ({ ...MAIN })), resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, [], []) });
+  const minimal = await createDriver({}, configFor(() => ({ ...MAIN })), resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, []) });
   await assert.rejects(minimal.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "capability" && /extension/.test(error.message));
   const unknown = await createDriver({}, configFor(() => ({ ...MAIN, sdk: "claude" })), EMPTY, sdks);
   assert.throws(() => unknown.capabilities("agent.plan"), (error: unknown) => error instanceof Block && error.code === "config" && /unknown sdk "claude"/.test(error.message));
@@ -387,13 +364,13 @@ test("pi: capability snapshot derives thinking from the runtime's model", () => 
   const model = { provider: "p", id: "m", reasoning: true, thinkingLevelMap: { xhigh: "x" } };
   const registry = { find: (provider: string, id: string) => provider === "p" && id === "m" ? model : undefined };
   const adapter = piAdapter({ model: undefined, modelRegistry: registry } as never);
-  const caps = adapter.capabilities({ ...MAIN, model: "p/m", path: "/runtimes/x" });
+  const caps = adapter.capabilities({ ...MAIN, model: "p/m", path: "/plan" });
   assert.equal(caps.switchModel, true);
   assert.equal(caps.turnUnit, "request");
   assert.deepEqual(caps.thinking, ["off", "minimal", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(caps.context, { system: "replace", ambientInstructions: false });
   assert.deepEqual(piAdapter({ model, modelRegistry: registry } as never).capabilities(MAIN).thinking, caps.thinking, "no runtime model: Main's model");
-  assert.throws(() => adapter.capabilities({ ...MAIN, model: "q/z", path: "/runtimes/x" }), /\/runtimes\/x\/model: Pi does not know model q\/z/);
+  assert.throws(() => adapter.capabilities({ ...MAIN, model: "q/z", path: "/plan" }), /\/plan\/model: Pi does not know model q\/z/);
   assert.deepEqual(thinkingLevels({ reasoning: false }), ["off"]);
   assert.deepEqual(thinkingLevels(undefined), []);
 });
@@ -412,7 +389,7 @@ test("live: Pi adapter opens a real session and submits", { skip: process.env.WO
   const model = models.getModel(ref.slice(0, at), ref.slice(at + 1));
   assert.ok(model, `unknown model ${ref}`);
   const registry = { find: (provider: string, id: string) => models.getModel(provider, id) };
-  const runtime: Runtime = { name: "live", sdk: "pi", model: ref, path: "/runtimes/live", via: "/default" };
+  const runtime: Runtime = { name: "live", sdk: "pi", model: ref, path: "/plan", via: "/plan" };
   const driver = await createDriver({ pi: { model, modelRegistry: registry } as never }, configFor(() => runtime));
   const caps = driver.capabilities("subagent");
   assert.ok(caps.thinking.length > 0, "the live model must expose a thinking level");

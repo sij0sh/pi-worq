@@ -1,5 +1,5 @@
 import type { Config } from './config.ts';
-import { assertRuntime, type Driver, type Runtime } from '../sdk/contract.ts';
+import { assertRuntime, supportedThinking, type Driver, type Runtime } from '../sdk/contract.ts';
 
 export interface ModelChoice { sdk: string; model?: string; levels: readonly string[] }
 export interface LaunchRequest { label: string; initial: Runtime; choices: ModelChoice[]; seconds: number; signal: AbortSignal }
@@ -13,7 +13,7 @@ export async function modelChoices(driver: Driver, role: string, current: Runtim
     if (sdk !== undefined && name !== sdk) continue;
     for (const model of new Set(models)) {
       if (name === current.sdk && model === current.model) continue;
-      const candidate = { ...current, sdk: name, model, thinking: undefined, fallbackModel: undefined };
+      const candidate = { ...current, sdk: name, model, thinking: undefined };
       try {
         const supported = driver.capabilities(role, candidate);
         assertRuntime(candidate, supported, extensions);
@@ -31,7 +31,7 @@ export async function prepareLaunch(config: Config, driver: Driver, extensions: 
   const initial: Runtime = { ...preset, model: preset.model ?? driver.defaultModel?.(preset.sdk) };
   const caps = driver.capabilities(role, initial);
   assertRuntime(initial, caps, extensions);
-  initial.thinking ??= caps.thinking.includes('low') ? 'low' : undefined;
+  initial.thinking ??= supportedThinking(driver.defaultThinking?.(preset.sdk), caps.thinking);
   let runtime = initial;
   const { interactive = true, countdownSeconds: seconds = 5 } = config.launch ?? {};
   if (select && driver.catalog && interactive && seconds > 0) {

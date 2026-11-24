@@ -166,7 +166,7 @@ export class Worq {
     const session = this.session(target);
     const outcome = await session.configure(change);
     const what = [change.model && `model ${change.model}`, change.thinking && `thinking ${change.thinking}`].filter(Boolean).join(", ");
-    return outcome === "applied" ? `${session.label}: ${what} applied` : `${session.label}: ${what} queued until the current request settles`;
+    return outcome === "applied" ? `${session.label}: ${what} applied` : `${session.label}: ${what} queued for the next safe request boundary`;
   }
   async cancel(ref: string): Promise<string> {
     if (ref === "all") {

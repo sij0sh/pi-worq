@@ -51,17 +51,17 @@ test("conversation: turn limit aborts", async () => {
   await assert.rejects(c.run("go"), /turn limit/);
 });
 
-test("config: defaults, model lookup by specificity, invalid keys name the file", async (t) => {
+test("config: defaults, role overrides, invalid keys name the file", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   assert.deepEqual(loadConfig(dir).limits, DEFAULT_LIMITS);
-  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ default: "a", runtimes: { a: { model: "a/m" }, b: { model: "b/r" }, c: { model: "c/i" } }, roles: { reviewer: "b", "reviewer.intent": "c" }, limits: { rounds: 5 } }));
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ plan: { model: "a/m" }, review: { model: "b/r" }, limits: { rounds: 5 } }));
   const config = loadConfig(dir);
   assert.equal(config.limits.rounds, 5);
   assert.equal(config.limits.agents, DEFAULT_LIMITS.agents);
   assert.equal(config.runtime("agent.plan").model, "a/m");
   assert.equal(config.runtime("reviewer.pair").model, "b/r");
-  assert.equal(config.runtime("reviewer.intent").model, "c/i");
+  assert.equal(config.runtime("reviewer.intent").model, "b/r");
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: 0 } }));
   assert.throws(() => loadConfig(dir), /pi-worq\.json: \/limits\/rounds/);
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ agents: { plan: {} }, scq: {} }));

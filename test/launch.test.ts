@@ -19,7 +19,7 @@ function surface() {
   }) };
   return { pick: launchPicker(ui as unknown as ExtensionContext['ui']), input: (key: string) => component.handleInput!(key), render: () => component.render(80).join('\n'), get opens() { return opens; } };
 }
-const request = (): LaunchRequest => ({ initial: { ...MAIN, model: 'p/a', fallbackModel: 'p/b', thinking: 'high' }, seconds: 5,
+const request = (): LaunchRequest => ({ initial: { ...MAIN, model: 'p/a', thinking: 'high' }, seconds: 5,
   choices: [{ sdk: 'pi', model: 'p/a', levels: ['low','high'] }, { sdk: 'pi', model: 'p/b', levels: ['off'] }, { sdk: 'other', model: 'c', levels: ['off','low'] }],
   label: 'reviewer.intent', signal: new AbortController().signal });
 
@@ -31,15 +31,15 @@ test('parallel launches share a surface, editing pauses only one countdown', asy
   const b = s.pick({ ...req, label: 'subagent' });
   assert.equal(s.opens, 1);
   assert.match(s.render(), /5s · subagent/);
+  assert.match(s.render(), /Thinking: high/);
   s.input('\x1b[B'); s.input('\x1b[C'); // model p/b
   assert.match(s.render(), /paused · reviewer.intent/);
-  assert.match(s.render(), /Thinking: off/);
+  assert.match(s.render(), /Thinking: SDK default/);
   t.mock.timers.tick(5000);
   assert.deepEqual(await b, req.initial);
   assert.equal(launched, false);
   s.input('\r');
-  assert.deepEqual(await a, { ...req.initial, model: 'p/b', fallbackModel: undefined, thinking: 'off' });
-  assert.equal(req.initial.fallbackModel, 'p/b');
+  assert.deepEqual(await a, { ...req.initial, model: 'p/b', thinking: undefined });
 });
 
 test('harness changes refresh the model and levels; cancellation never confirms', async () => {
@@ -49,7 +49,7 @@ test('harness changes refresh the model and levels; cancellation never confirms'
   s.input('\x1b'); await assert.rejects(a, /cancelled/);
   s.input('\x1b[C');
   assert.match(s.render(), /Harness: other/); assert.match(s.render(), /Model: c/);
-  s.input('a'); assert.equal((await b).thinking, 'low');
+  s.input('a'); assert.equal((await b).thinking, undefined);
 });
 
 test('worker and selected reviewer each pick once for the sealed batch', async t => {
@@ -90,10 +90,19 @@ test('shutdown aborts an admission still in the picker', async () => {
 test('defaults skip discovery without UI or with countdown disabled', async () => {
   const config = loadConfig('/nonexistent/worq-test'), driver = fakeDriver({});
   driver.catalog = () => { throw new Error('unexpected discovery'); };
-  driver.defaultModel = () => 'p/main';
-  assert.equal((await prepareLaunch(config, driver, 0, 'agent.plan', '', request().signal)).model, 'p/main');
+  let model = 'p/main', thinking = 'high';
+  driver.defaultModel = () => model;
+  driver.defaultThinking = () => thinking;
+  const signal = request().signal;
+  const first = await prepareLaunch(config, driver, 0, 'agent.plan', '', signal);
+  assert.deepEqual(first, { ...MAIN, model: 'p/main', thinking: 'high' });
   config.launch = { countdownSeconds: 0, interactive: true };
-  assert.equal((await prepareLaunch(config, driver, 0, 'agent.plan', '', request().signal, surface().pick)).model, 'p/main');
+  model = 'p/new'; thinking = 'off';
+  assert.deepEqual(await prepareLaunch(config, driver, 0, 'subagent.evidence', '', signal, surface().pick), { ...MAIN, model: 'p/new', thinking: 'off' });
+  thinking = 'unsupported';
+  assert.equal((await prepareLaunch(config, driver, 0, 'agent.plan', '', signal)).thinking, undefined);
+  config.runtime = () => ({ ...MAIN, model: 'p/override', thinking: 'medium' });
+  assert.deepEqual(await prepareLaunch(config, driver, 0, 'agent.plan', '', signal), { ...MAIN, model: 'p/override', thinking: 'medium' });
 });
 
 

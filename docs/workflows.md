@@ -54,11 +54,7 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 
 ## Configuration
 
-Workflows are kinds; `roles` keys apply: `agent.<name>` one workflow, `agent` all agents. `limits.asks`, `agentTurns`, `agentMinutes`, `runTurns` apply unchanged.
-
-```json
-{ "runtimes": { "deep": { "model": "provider/model", "thinking": "high" } }, "roles": { "agent.foundation": "deep" } }
-```
+Workflows start with the current Pi session's model and thinking level. Use the launch picker to override a single launch. `limits.asks`, `agentTurns`, `agentMinutes`, `runTurns` apply unchanged.
 
 ## Problems
 

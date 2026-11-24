@@ -10,9 +10,9 @@ Adding an SDK = one file under `src/sdk/` + one record in `src/sdk/registry.ts`.
 src/sdk/contract.ts       contract types, assertRuntime
 src/sdk/registry.ts       SDKS metadata (lazy loaders) + createDriver role router
 src/sdk/pi.ts             Pi adapter
-src/runtime/config.ts     runtimes / roles / limits
+src/runtime/config.ts     Plan, Execute, Review overrides / limits
 src/runtime/resources.ts  shared instructions, skills, extensions snapshot
-src/session.ts            Conversation (budgets, nudges, fallback policy, queueing)
+src/session.ts            Conversation (budgets, nudges, queueing)
 ```
 
 ## Ownership
@@ -22,7 +22,7 @@ src/session.ts            Conversation (budgets, nudges, fallback policy, queuei
 | Runtime resolution (role → preset) | Native model resolution |
 | Shared resources, prompt composition, `skill` tool | Loading native extension bytes |
 | Tool schema validation and dispatch fencing | Native tool registration |
-| Fallback policy and live runtime changes (when, to what, validation) | `configure` mechanics |
+| Live runtime changes (when, to what, validation) | Safe request boundary and `configure` mechanics |
 | Budgets, turn charging | Emitting `turn` events |
 | Workflow and completion | Session execution |
 | Event → log/telemetry formatting | Native event translation |
@@ -38,14 +38,15 @@ export const SDKS: Record<string, SDKRecord> = { pi: { … } };
 export async function createDriver(host, config, resources): Promise<Driver>;
 ```
 
-`HostServices` carries explicit per-SDK host dependencies (`pi: { model, modelRegistry, agentDir }`) — no opaque context. `createDriver` preloads `pi` plus every SDK a declared preset names. The TUI discovers other registered adapters on demand. Worq resolves the preset once per launch and passes the selected runtime through the conversation. Per `open(spec)` the driver checks that runtime, runs `assertRuntime`, picks the thinking default, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter. It wraps the handle with the core's one-shot `fallback()`.
+`HostServices` carries explicit per-SDK host dependencies (`pi: { model, modelRegistry, thinkingLevel, agentDir }`) — no opaque context. `createDriver` preloads `pi` plus any SDK named by a role override. The TUI discovers other registered adapters on demand. Worq snapshots the selection at launch and passes it through the conversation. Per `open(spec)` the driver checks that runtime, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter.
 
 ## Contract
 
 ```ts
 interface SDKAdapter {
   models(): Promise<readonly string[]>; // selectable native model refs
-  defaultModel?(): string | undefined;  // snapshot the host's current default
+  defaultModel?(): string | undefined;  // read the host's current model
+  defaultThinking?(): string | undefined; // read the host's current thinking level
   capabilities(runtime: Runtime): Capabilities;
   open(spec: SessionSpec): Promise<Handle>;
 }
@@ -56,6 +57,7 @@ interface SessionSpec {
   tools: Tool[];                  // already validated + fenced by the core
   extensions: ExtensionFile[];    // shared native extension bytes
   emit(event: SessionEvent): void;
+  beforeRequest?(signal: AbortSignal): Promise<void>; // await once prior tools have settled
   signal: AbortSignal;            // aborts opening
 }
 interface Handle {
@@ -63,6 +65,7 @@ interface Handle {
   steer?(text): Promise<void>;    // optional; absent or throwing → core queues
   readonly streaming: boolean;
   abort(): Promise<void>;
+  readonly selection?: { model?: string; thinking?: string }; // effective SDK settings
   configure?(change: { model?; thinking? }): Promise<void>;  // keeps history; harness stays locked
   dispose(): void;
 }
@@ -79,7 +82,7 @@ type SessionEvent =
 | Long-blocking tools | Await a tool for as long as it takes (`ask_main` parks up to `limits.askMinutes`); propagate its abort signal. |
 | Image output | `{ text, image }` reaches the model as image content. |
 | Tool errors | Emit `tool-error` for SDK-side failures (argument validation included); never throw out of the session. |
-| Outcomes | `preflight-failed` = no work started (credentials etc.); `failed` = a model request errored after starting. Both trigger the core's fallback once. |
+| Outcomes | `preflight-failed` = no work started (credentials etc.); `failed` = a model request errored after starting. Both surface as model failures. |
 | Abort | Settles the in-flight `prompt()` and clears `streaming` within 5s. |
 | Open | Respect `spec.signal`; the core disposes a handle that finishes opening after cancel/dispose. |
 | Dispose | Idempotent. |
@@ -87,11 +90,11 @@ type SessionEvent =
 
 ## Capabilities
 
-Pure data; `assertRuntime(runtime, caps, extensionCount)` judges and names the preset path (`/runtimes/<name>/thinking`).
+Pure data; `assertRuntime(runtime, caps, extensionCount)` judges and names the preset path (e.g. `/plan/thinking`).
 
 | Field | Meaning | Denial |
 |---|---|---|
-| `switchModel` | `Handle.configure` can change the model | `fallbackModel` set → `capability` |
+| `switchModel` | `Handle.configure` can change the model | Manual model switch when `false` → `capability` |
 | `thinking` | Levels the runtime's model accepts; `[]` = no level control | Configured level outside the list → `capability` |
 | `context` | `replace` + no ambient instructions required | Anything else refuses the session |
 | `extensions` | Can load shared native extensions | Installed extensions + `false` → `capability` |
@@ -107,7 +110,7 @@ Shared `extensions/` files are SDK-native (Pi API). A non-Pi adapter reports `ex
 
 ## Conformance
 
-`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, fallback ownership, extension denial, unknown sdk) is asserted against `createDriver` with a recording adapter.
+`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, extension denial, unknown SDK) is asserted against `createDriver` with a recording adapter.
 
 The live Pi run opens a real session, dispatches a Worq tool and submits: `WORQ_CONFORMANCE_PI=1 WORQ_CONFORMANCE_MODEL=<provider>/<model> npm test`. Unset, it skips.
 
@@ -120,9 +123,8 @@ For a process-boundary SDK the minimum `ask_main`-preserving equivalent is a loo
 ### Pi (`pi`)
 
 - `src/sdk/pi.ts` → `piAdapter(host)`.
-- Refs `<provider>/<model>` (`^[^/\s]+\/[^\s]+$`); unknown ref → `config` naming `/runtimes/<name>/model`; nothing resolves → `model`.
+- Refs `<provider>/<model>` (`^[^/\s]+\/[^\s]+$`); unknown ref → `config` naming the override (e.g. `/plan/model`); nothing resolves → `model`.
 - Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and extension-registered providers match Main.
 - Capabilities: `switchModel: true`, thinking from the model, `extensions: true`, `turnUnit: "request"`, isolated context.
-- A fallback model that cannot take the level is clamped by Pi with one log line.
-- `configure` uses `session.setModel` / `setThinkingLevel`; the level is mutable, so a later fallback keeps Main's latest choice.
-- Live changes: `Conversation.configure` applies at once when idle, else queues (merged) until the running prompt settles; never interrupts a tool. A manual model change cancels the preset fallback.
+- `configure` uses `session.setModel` / `setThinkingLevel`. Pi clamps an incompatible level on a model-only switch; the adapter reports the effective level.
+- Live changes apply at once when idle, or before the next request, even inside the same prompt. The adapter awaits `beforeRequest` before resolving provider inputs, never interrupting a running tool. For adapters without that hook, the core applies queued changes when the prompt settles.

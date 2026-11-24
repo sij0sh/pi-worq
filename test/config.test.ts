@@ -21,82 +21,46 @@ async function configOf(value: unknown, sdks?: string[]): Promise<Config> {
 }
 const configError = (error: unknown) => error instanceof Block && error.code === "config";
 
-const example = {
-  default: "standard",
-  runtimes: {
-    standard: { model: "openai/gpt-5", fallbackModel: "anthropic/claude-haiku-4-5", thinking: "medium" },
-    deep: { sdk: "pi", model: "openai/gpt-5", thinking: "high" },
-    fast: { model: "anthropic/claude-haiku-4-5", thinking: "low" },
-  },
-  roles: { "agent.execute": "deep", subagent: "fast", reviewer: "deep", "reviewer.intent": "standard" },
-  limits: { rounds: 3 },
-};
-
-test("config: exact role → family → default", async () => {
-  const config = await configOf(example);
-  const rows: [role: string, runtime: string, via: string][] = [
-    ["agent.plan", "standard", "/default"],
-    ["agent.execute", "deep", "/roles/agent.execute"],
-    ["subagent", "fast", "/roles/subagent"],
-    ["reviewer.intent", "standard", "/roles/reviewer.intent"],
-    ["reviewer.pair", "deep", "/roles/reviewer"],
-  ];
-  for (const [role, name, via] of rows) {
-    const runtime = config.runtime(role);
-    assert.equal(runtime.name, name, `${role} runtime`);
-    assert.equal(runtime.via, via, `${role} selected by`);
-    assert.equal(runtime.sdk, "pi", `${role} sdk defaults to pi`);
-    assert.equal(runtime.path, `/runtimes/${name}`);
+test("config: only Plan, Execute and Review have overrides", async () => {
+  const config = await configOf({
+    plan: { model: "openai/gpt-5", thinking: "medium" },
+    execute: { sdk: "pi", thinking: "high" },
+    review: { model: "anthropic/claude-haiku-4-5" },
+  });
+  assert.deepEqual(config.runtime("agent.plan"), { name: "plan", sdk: "pi", path: "/plan", via: "/plan", model: "openai/gpt-5", thinking: "medium" });
+  assert.equal(config.runtime("agent.execute").thinking, "high");
+  for (const role of ["reviewer.intent", "reviewer.pair"]) {
+    assert.equal(config.runtime(role).model, "anthropic/claude-haiku-4-5");
+    assert.equal(config.runtime(role).thinking, undefined, "overrides do not inherit from each other");
   }
-  assert.equal(config.runtime("agent.plan").fallbackModel, "anthropic/claude-haiku-4-5");
-  assert.equal(config.runtime("reviewer.pair").fallbackModel, undefined, "presets never inherit fields from each other");
+  for (const role of ["agent.foundation", "subagent", "subagent.evidence"]) {
+    assert.deepEqual(config.runtime(role), { name: "main", sdk: "pi", path: "", via: "" });
+  }
   assert.deepEqual(config.sdks, ["pi"]);
 });
 
-test('config: launch preferences are independent of per-workflow presets', async () => {
-  assert.deepEqual((await configOf({})).launch, { interactive: true, countdownSeconds: 5 });
-  const config = await configOf({ ...example, roles: { agent: 'standard', 'agent.foundation': 'deep' }, launch: { interactive: false, countdownSeconds: 8 } });
+test('config: launch preferences are independent of runtime overrides', async () => {
+  const defaults = await configOf({});
+  assert.equal(defaults.runtime('agent.plan').name, 'main');
+  assert.deepEqual(defaults.launch, { interactive: true, countdownSeconds: 5 });
+  const config = await configOf({ plan: { thinking: 'high' }, launch: { interactive: false, countdownSeconds: 8 } });
   assert.deepEqual(config.launch, { interactive: false, countdownSeconds: 8 });
-  assert.equal(config.runtime('agent.foundation').name, 'deep');
-  assert.equal(config.runtime('agent.plan').name, 'standard');
   await assert.rejects(configOf({ launch: { countdownSeconds: -1 } }), /countdownSeconds/);
 });
 
-test("config: no file or no default is the built-in main runtime", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
-  assert.deepEqual(loadConfig(dir).runtime("agent.plan"), { name: "main", sdk: "pi", path: "", via: "" });
-  const config = await configOf({ runtimes: { x: { thinking: "high" } }, roles: { reviewer: "x" } });
-  assert.equal(config.runtime("agent.plan").name, "main");
-  assert.equal(config.runtime("reviewer.intent").name, "x");
-});
-
-test("config: refs, sdks and runtime names are validated at load, naming the key", async () => {
-  await assert.rejects(configOf({ runtimes: { a: { model: "not-a-ref" } } }), (error) => configError(error) && /\/runtimes\/a\/model/.test((error as Block).message));
-  await assert.rejects(configOf({ runtimes: { a: { fallbackModel: "/bad" } } }), (error) => configError(error) && /\/runtimes\/a\/fallbackModel/.test((error as Block).message));
-  await assert.rejects(configOf({ runtimes: { a: { sdk: "claude" } } }), (error) => configError(error) && /unknown sdk "claude"/.test((error as Block).message));
-  await assert.rejects(configOf({ default: "nope" }), (error) => configError(error) && /\/default: unknown runtime "nope"/.test((error as Block).message));
-  await assert.rejects(configOf({ runtimes: { a: {} }, roles: { reviewer: "b" } }), (error) => configError(error) && /\/roles\/reviewer: unknown runtime "b"/.test((error as Block).message));
-  const mixed = await configOf({ runtimes: { a: { sdk: "claude", model: "anything" } }, roles: { reviewer: "a" } }, ["pi", "claude"]);
+test("config: model refs and SDK names are validated at load, naming the key", async () => {
+  await assert.rejects(configOf({ plan: { model: "not-a-ref" } }), (error) => configError(error) && /\/plan\/model/.test((error as Block).message));
+  await assert.rejects(configOf({ review: { sdk: "claude" } }), (error) => configError(error) && /\/review\/sdk: unknown sdk "claude"/.test((error as Block).message));
+  const mixed = await configOf({ review: { sdk: "claude", model: "anything" } }, ["pi", "claude"]);
   assert.equal(mixed.runtime("reviewer.intent").sdk, "claude");
   assert.deepEqual(mixed.sdks, ["claude"]);
 });
 
 test("config: legacy keys fail with a migration message", async () => {
-  for (const legacy of [{ model: "a/m" }, { harness: "pi" }, { models: { agent: {} } }, { harnesses: {} }]) {
-    await assert.rejects(configOf(legacy), (error) => configError(error) && /old Worq format[\s\S]*runtimes[\s\S]*<agentDir>\/worq/.test((error as Block).message));
+  for (const legacy of [{ default: "a", runtimes: { a: {} }, roles: {} }, { model: "a/m" }, { harness: "pi" }]) {
+    await assert.rejects(configOf(legacy), (error) => configError(error) && /old Worq format[\s\S]*plan[\s\S]*execute[\s\S]*review/.test((error as Block).message));
   }
-});
-
-test("config: named children must be declared", async () => {
-  const config = await configOf({ runtimes: { a: {} }, roles: { "subagent.evidence": "a" } });
-  assert.equal(config.runtime("subagent.evidence").name, "a");
-  assert.throws(() => config.runtime("subagent.typo"), /Unknown named child/);
-});
-
-test("config: a denied fallback is Block(capability) naming the preset", async () => {
-  const config = await configOf({ runtimes: { a: { fallbackModel: "a/b" } }, roles: { subagent: "a" } });
-  assert.throws(() => assertRuntime(config.runtime("subagent"), { ...MINIMAL_CAPS, context: FULL_CAPS.context }),
-    (error: unknown) => error instanceof Block && error.code === "capability" && /\/runtimes\/a\/fallbackModel/.test(error.message));
+  await assert.rejects(configOf({ plan: { fallbackModel: "a/b" } }), /fallbackModel/);
 });
 
 /** A caller may branch on the code alone. */
@@ -107,8 +71,8 @@ test("config: every refusal carries a stable code", async () => {
   assert.throws(() => loadConfig(dir), byCode("invalid-json"));
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: "three" } }));
   assert.throws(() => loadConfig(dir), byCode("invalid-payload"));
-  await assert.rejects(configOf({ runtimes: { a: { model: "not-a-ref" } } }), byCode("config"));
-  const runtime: Runtime = { name: "a", sdk: "pi", thinking: "high", path: "/runtimes/a", via: "/default" };
+  await assert.rejects(configOf({ plan: { model: "not-a-ref" } }), byCode("config"));
+  const runtime: Runtime = { name: "plan", sdk: "pi", thinking: "high", path: "/plan", via: "/plan" };
   assert.throws(() => assertRuntime(runtime, MINIMAL_CAPS), byCode("capability"));
 });
 
@@ -125,9 +89,8 @@ async function spawnFailure(fail: unknown, role: string, selected = true): Promi
 }
 
 test("config: spawn validates only the selected agent role", async () => {
-  await spawnFailure({ runtimes: { a: { thinking: "high" } }, roles: { "agent.plan": "a" } }, "/runtimes/a/thinking");
-  await spawnFailure({ runtimes: { a: { fallbackModel: "a/b" } }, roles: { subagent: "a" } }, "/runtimes/a/fallbackModel", false);
-  await spawnFailure({ runtimes: { a: { thinking: "high" } }, roles: { "reviewer.pair": "a" } }, "/runtimes/a/thinking", false);
+  await spawnFailure({ plan: { thinking: "high" } }, "/plan/thinking");
+  await spawnFailure({ execute: { thinking: "high" }, review: { thinking: "high" } }, "/review/thinking", false);
 });
 
 /** A selected reviewer is checked before acquiring a slot or creating its snapshot. */
@@ -152,7 +115,7 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
       prompts, limits: DEFAULT_LIMITS, state, root, semaphore, notify() {},
       async select(role) {
         checks.push(role);
-        assertRuntime({ name: "a", sdk: "pi", thinking: "high", path: "/runtimes/a", via: "/roles/reviewer.intent" }, role === deny ? { ...MINIMAL_CAPS, context: FULL_CAPS.context } : FULL_CAPS);
+        assertRuntime({ name: "a", sdk: "pi", thinking: "high", path: "/review", via: "/review" }, role === deny ? { ...MINIMAL_CAPS, context: FULL_CAPS.context } : FULL_CAPS);
         return undefined;
       },
     }, { ref, kind, task: "Uppercase the greeting", attachments: [] });

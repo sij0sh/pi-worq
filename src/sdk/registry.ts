@@ -1,7 +1,7 @@
 import { Block } from "../contracts.ts";
 import type { Config } from "../runtime/config.ts";
 import { compose, EMPTY, skillTool, type Resources } from "../runtime/resources.ts";
-import { assertRuntime, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SDKAdapter, type SessionEvent } from "./contract.ts";
+import { assertRuntime, supportedThinking, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SDKAdapter, type SessionEvent } from "./contract.ts";
 import type { PiHost } from "./pi.ts";
 
 /** Explicit host dependencies, one optional entry per SDK that needs something from the host. */
@@ -22,8 +22,7 @@ export const SDKS: Record<string, SDKRecord> = {
 
 /**
  * The core's single Driver. Per role it resolves the runtime preset, judges it against the SDK's
- * capabilities, prepares the shared environment (instructions, skill index + `skill` tool, extensions)
- * and owns fallback policy; the adapter only executes.
+ * capabilities and prepares the shared environment (instructions, skill index + `skill` tool, extensions).
  */
 export async function createDriver(host: HostServices, config: Config, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = SDKS): Promise<Driver> {
   const adapters = new Map<string, SDKAdapter>();
@@ -51,16 +50,19 @@ export async function createDriver(host: HostServices, config: Config, resources
       return catalog;
     },
     defaultModel(sdk) { return adapter(sdk).defaultModel?.(); },
+    defaultThinking(sdk) { return adapter(sdk).defaultThinking?.(); },
     capabilities(role, runtime = config.runtime(role)) {
       return adapter(runtime.sdk).capabilities(runtime);
     },
     async open(spec): Promise<CoreHandle> {
       spec.signal.throwIfAborted();
-      const runtime = spec.runtime ?? config.runtime(spec.name);
-      const sdk = adapter(runtime.sdk);
+      const preset = spec.runtime ?? config.runtime(spec.name);
+      const sdk = adapter(preset.sdk);
+      const runtime = spec.runtime ?? { ...preset, model: preset.model ?? sdk.defaultModel?.() };
       const caps = sdk.capabilities(runtime);
       assertRuntime(runtime, caps, resources.extensions.length);
-      const thinking = runtime.thinking ?? (caps.thinking.includes("low") ? "low" : undefined);
+      // A supplied selection was resolved at admission, even if it leaves thinking to the SDK.
+      const thinking = runtime.thinking ?? (spec.runtime ? undefined : supportedThinking(sdk.defaultThinking?.(), caps.thinking));
       const { skills: own = [], ...rest } = spec;
       const packages = [...resources.skills, ...own.filter((s) => !resources.skills.some((r) => r.name === s.name))];
       const skill = skillTool(packages);
@@ -74,8 +76,7 @@ export async function createDriver(host: HostServices, config: Config, resources
         tools: skill && !rest.tools.some((t) => t.name === skill.name) ? [...rest.tools, skill] : rest.tools,
       });
       if (spec.signal.aborted) { handle.dispose(); throw spec.signal.reason; }
-      let fallback = runtime.fallbackModel !== runtime.model ? runtime.fallbackModel : undefined;
-      let current: Runtime = { ...runtime, thinking };
+      let current: Runtime = { ...runtime, thinking, ...handle.selection };
       const check = (change: RuntimeChange): Runtime => {
         if (change.model === undefined && change.thinking === undefined) throw new Block("invalid-payload", "Nothing to change");
         if (change.model !== undefined && change.model !== current.model && !caps.switchModel) throw new Block("capability", `${spec.name}: ${runtime.sdk} cannot switch models`);
@@ -87,34 +88,21 @@ export async function createDriver(host: HostServices, config: Config, resources
         }
         return next;
       };
-      const apply = async (change: RuntimeChange, next: Runtime) => {
-        await handle.configure!(change);
-        current = next;
-      };
       return {
         prompt: (text, options) => handle.prompt(text, options),
         steer: handle.steer && ((text) => handle.steer!(text)),
         get streaming() { return handle.streaming; },
         get runtime() { return current; },
         abort: () => handle.abort(),
-        async fallback() {
-          if (!fallback || !handle.configure) return false;
-          const next = fallback;
-          fallback = undefined;
-          await apply({ model: next }, { ...current, model: next });
-          spec.emit({ type: "log", text: `switched to fallback model ${next}` });
-          return true;
-        },
         check(change) { check(change); },
         async configure(change) {
           const next = check(change);
-          await apply(change, next);
-          // Main chose this runtime: a stale preset fallback no longer applies.
-          if (change.model !== undefined) fallback = undefined;
-          spec.emit({ type: "log", text: `runtime changed by Main: ${next.model ?? "default model"}, thinking ${next.thinking ?? "uncontrolled"}` });
+          await handle.configure!(change);
+          current = { ...next, ...handle.selection };
+          spec.emit({ type: "log", text: `runtime changed by Main: ${current.model ?? "default model"}, thinking ${current.thinking ?? "uncontrolled"}` });
         },
         checkpoint: () => handle.checkpoint?.(),
-      dispose: () => handle.dispose(),
+        dispose: () => handle.dispose(),
       };
     },
   };

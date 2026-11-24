@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { isModelType } from "@earendil-works/pi-ai/models";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Block, obj, text } from "../src/contracts.ts";
-import { DEFAULT_LIMITS, type Config } from "../src/runtime/config.ts";
+import { DEFAULT_LIMITS, loadConfig, type Config } from "../src/runtime/config.ts";
 import { EMPTY } from "../src/runtime/resources.ts";
-import type { CoreHandle, Driver, Handle, Runtime, RuntimeChange, SDKAdapter, Spec } from "../src/sdk/contract.ts";
-import { createDriver } from "../src/sdk/registry.ts";
+import { tool, type CoreHandle, type Driver, type Handle, type Runtime, type RuntimeChange, type SDKAdapter, type Spec } from "../src/sdk/contract.ts";
+import { createDriver, type HostServices } from "../src/sdk/registry.ts";
+import { thinkingLevels } from "../src/sdk/pi.ts";
 import { Conversation } from "../src/session.ts";
 import { Telemetry } from "../src/telemetry.ts";
 import { FULL_CAPS, pass, planSubmission, repo, setup } from "./fake.ts";
@@ -36,7 +42,6 @@ test("conversation: a change during a prompt is queued, merged and applied befor
           return "completed";
         },
         get streaming() { return streaming; }, abort: async () => { release?.(); }, dispose() {},
-        fallback: async () => false,
         check(change) { if (change.thinking === "bogus") throw new Block("capability", "bogus"); },
         async configure(change) { log.push(`configure ${JSON.stringify(change)}`); },
       };
@@ -56,7 +61,8 @@ test("conversation: a change during a prompt is queued, merged and applied befor
     assert.ok(!log.some((l) => l.startsWith("configure")), "never applied mid-prompt");
     release!();
     assert.deepEqual(await running, { value: "done" });
-    assert.deepEqual(log, ["prompt go", `configure {"model":"p/a","thinking":"high"}`, log[2]], "one merged change, before the next prompt");
+    assert.equal(log.length, 3);
+    assert.equal(log[1], `configure {"model":"p/a","thinking":"high"}`, "one merged change, before the next prompt");
     assert.equal(c.pendingChange, undefined);
     assert.equal(await c.configure({ thinking: "low" }), "applied", "idle sessions change immediately");
     c.dispose();
@@ -64,7 +70,7 @@ test("conversation: a change during a prompt is queued, merged and applied befor
   } finally { clearTimeout(keep); }
 });
 
-test("registry: configure validates against the new model, tracks the runtime and supersedes fallback", async () => {
+test("registry: configure validates against the new model and tracks the runtime", async () => {
   const applied: RuntimeChange[] = [];
   const levels: Record<string, string[]> = { "m/a": ["off", "low", "high"], "m/b": ["off"] };
   const adapter: SDKAdapter = {
@@ -76,7 +82,7 @@ test("registry: configure validates against the new model, tracks the runtime an
       return handle;
     },
   };
-  const runtime: Runtime = { name: "r", sdk: "pi", model: "m/a", fallbackModel: "m/b", path: "/runtimes/r", via: "/default" };
+  const runtime: Runtime = { name: "plan", sdk: "pi", model: "m/a", thinking: "low", path: "/plan", via: "/plan" };
   const config: Config = { path: "t", limits: DEFAULT_LIMITS, approveExtensions: false, sdks: ["pi"], runtime: () => runtime };
   const driver = await createDriver({}, config, EMPTY, { pi: { modelRef: /.*/, load: async () => adapter } });
   const handle = await driver.open({ id: "s", name: "agent.plan", cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal });
@@ -84,9 +90,55 @@ test("registry: configure validates against the new model, tracks the runtime an
   assert.throws(() => handle.check!({ model: "m/b", thinking: "high" }), (e: unknown) => e instanceof Block && e.code === "capability", "thinking is judged against the new model");
   await handle.configure!({ thinking: "high" });
   assert.equal(handle.runtime?.thinking, "high");
-  await handle.configure!({ model: "m/a" });
-  assert.equal(await handle.fallback(), false, "a manual model change supersedes the preset fallback");
-  assert.deepEqual(applied, [{ thinking: "high" }, { model: "m/a" }]);
+  await handle.configure!({ model: "m/b", thinking: "off" });
+  assert.deepEqual(applied, [{ thinking: "high" }, { model: "m/b", thinking: "off" }]);
+  assert.deepEqual(handle.runtime, { ...runtime, model: "m/b", thinking: "off" });
+});
+
+test("Pi applies a queued model and thinking switch after tools, within the same prompt", { timeout: 10_000 }, async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "worq-runtime-test-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false, authPath: join(cwd, "auth.json"), modelsPath: join(cwd, "models.json") });
+  const [first, second] = modelRuntime.getAllModels().filter(m => isModelType(m, "chat"))
+    .filter(m => m.provider === "openai" && ["medium", "high"].every(level => thinkingLevels(m).includes(level)));
+  assert.ok(first && second);
+  await modelRuntime.setRuntimeApiKey("openai", "test-transport-only");
+  const registry = { runtime: modelRuntime, find: (provider: string, id: string) => [first, second].find(m => m.provider === provider && m.id === id) };
+  const driver = await createDriver({ pi: { model: first, modelRegistry: registry as unknown as NonNullable<HostServices["pi"]>["modelRegistry"], thinkingLevel: "medium", agentDir: cwd } }, loadConfig(cwd));
+  const requests: { model: string; thinking?: string; roles: string[] }[] = [];
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  modelRuntime.streamSimple = (model, { messages }, options) => {
+    requests.push({ model: model.id, thinking: options?.reasoning, roles: messages.map(m => m.role) });
+    const initial = requests.length === 1;
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "done", reason: "toolUse", message: {
+      role: "assistant", api: model.api, provider: model.provider, model: model.id, usage, timestamp: Date.now(), stopReason: "toolUse",
+      content: [{ type: "toolCall", id: `call_${requests.length}`, name: initial ? "hold" : "submit", arguments: initial ? {} : { value: "done" } }],
+    } });
+    return stream;
+  };
+  let release: (() => void) | undefined;
+  const hold = tool("hold", "Wait for the test.", obj({}), () => new Promise<string>(resolve => { release = () => resolve("tool finished"); }));
+  const c = new Conversation({ driver, finish, signal: new AbortController().signal, turns: 4, minutes: 1,
+    spec: { name: "agent.plan", cwd, system: "S", tools: [hold], log() {} } });
+  const done = c.run("go");
+  void done.catch(() => {});
+  try {
+    await until(() => release !== undefined);
+    assert.equal(c.runtime?.model, `openai/${first.id}`);
+    assert.equal(c.runtime?.thinking, "medium");
+    assert.equal(await c.configure({ model: `openai/${second.id}` }), "queued");
+    assert.equal(await c.configure({ thinking: "high" }), "queued");
+    assert.equal(requests.length, 1, "the running tool is not interrupted");
+    assert.equal(c.runtime?.model, `openai/${first.id}`);
+    release!();
+    assert.deepEqual(await done, { value: "done" });
+    assert.deepEqual(requests.map(({ model, thinking }) => [model, thinking]), [[first.id, "medium"], [second.id, "high"]]);
+    assert.deepEqual(requests[1].roles, ["system", "user", "assistant", "toolResult"], "the next request keeps the same history");
+    assert.equal(c.runtime?.model, `openai/${second.id}`);
+    assert.equal(c.runtime?.thinking, "high");
+    assert.equal(c.pendingChange, undefined);
+  } finally { release?.(); c.dispose(); }
 });
 
 test("controls: cancelling one PQ leaves its siblings and parent running; cancelling the owner stops the family", async (t) => {
