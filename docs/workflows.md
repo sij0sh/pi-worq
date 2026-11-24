@@ -27,8 +27,9 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `description` | yes | Shown in the `/worq workflow` menu and the `worq_spawn` kind list. |
 | `disable-model-invocation` | no | `true`: user-only (`/worq workflow`). `false`/absent: also a `worq_spawn` kind, control-socket and CLI kind. |
 | `access` | no | `read`: no worktree, result saved as an artifact. Absent or `write`: own worktree, pins `worq/<ref>`. |
+| `review` | no | `true`: one independent review per submission. Absent/`false`: none. |
 
-Unknown keys are ignored. `reviewers` and `invocation` are rejected. The body has no required sections; the agent also receives the Worq protocol, guard and `submit` tool.
+Unknown keys are ignored. Built-in kinds (`prompts/kinds/*.md`) use the same profile keys. The body has no required sections; the agent also receives the Worq protocol, guard and `submit` tool.
 
 ## Supporting files
 
@@ -43,18 +44,18 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 
 - Menu label: `name · access[ · user-only] · description`. Escape at either step cancels. TUI only; `/worq workflow` takes no arguments.
 - A menu launch activates `worq_list`/`worq_send`/`worq_cancel`, never `worq_spawn`, and is honored under `/worq off`.
-- `worq_spawn` refuses `mode` and `verify` for workflows, and refuses user-only workflows (`invocation`).
+- `worq_spawn` refuses `verify` for unreviewed workflows, and refuses user-only workflows (`invocation`).
 
 ## Lifecycle
 
-- **No reviewers.** Prompt says the result must be self-contained; digest says `No reviewers ran: this result is unverified.`; policy `none (workflow)`.
-- Completion is the terminal `review-ready` notice. The slot is released and the result remains available through `worq_list`.
-- Read: `PlanReport` saved to `.agents/plans/plan-<ref>.md`, headed `# Workflow result: <title>`.
-- Write: `WorkReport`, commit pinned on `worq/<ref>`. Worq never merges; verify before merging by hand.
+- **Review only with `review: true`.** Otherwise the prompt says the result must be self-contained and the digest says `unreviewed`.
+- Submission parks the agent (session and worktree kept, slot released); Main resumes it with `worq_send` or closes it with `worq_cancel`.
+- Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Workflow result: <title>`.
+- Write: commit pinned on `worq/<ref>`. Worq never merges; verify before merging by hand.
 
 ## Configuration
 
-Workflows start with the current Pi session's model and thinking level. Use the launch picker to override a single launch. `limits.asks`, `agentTurns`, `agentMinutes`, `runTurns` apply unchanged.
+Workflows start with the current Pi session's model and thinking level. Use the launch picker to override a single launch. `limits.asks`, `agentTurns`, `agentMinutes`, `idleMinutes` apply unchanged.
 
 ## Problems
 
@@ -66,9 +67,8 @@ Workflows start with the current Pi session's model and thinking level. Use the 
 | `name "<x>" must match the folder name` | Fix `name` or rename. |
 | `description is required` | Add `description`. |
 | `disable-model-invocation must be true or false` | Fix the value. |
-| `access must be read or write (absent = write)` | Fix the value. |
-| `workflows run no reviewers; remove "reviewers"` | Delete the key. |
-| `use "disable-model-invocation: true" instead of "invocation"` | Replace the key. |
+| `access must be read or write` | Fix the value. |
+| `review must be true or false` | Fix the value. |
 | `SKILL.md body is blank` | Add instructions. |
 | `move to <dir>/<name>/SKILL.md` | Convert the old flat file. |
 | `symlinked workflows are not followed` | Copy the folder. |

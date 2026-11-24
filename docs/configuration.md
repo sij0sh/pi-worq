@@ -13,7 +13,7 @@ Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-paylo
   "review": { "model": "provider/review-model" },
   "launch": { "countdownSeconds": 5, "interactive": true },
   "approveExtensions": false,
-  "limits": { "agents": 4, "runTurns": 1000, "continuationTurns": 0 }
+  "limits": { "agents": 4, "idleMinutes": 60 }
 }
 ```
 
@@ -21,13 +21,13 @@ Top-level keys: `plan`, `execute`, `review`, `launch`, `approveExtensions`, `lim
 
 ## Runtime overrides
 
-`plan` and `execute` apply to the corresponding workers. `review` applies to every independent reviewer. PQ subagents and workflows always start with Main's live Pi selection. Overrides are independent, and all three keys and their fields are optional.
+`plan` and `execute` apply to the corresponding workers. `review` applies to every independent review. PQ subagents and workflows always start with Main's live Pi selection. Overrides are independent, and all three keys and their fields are optional.
 
 - `sdk`: execution backend (default `pi`; the only backend shipped today).
 - `model`: defaults to Main's current model for Pi. Pi refs use `<provider>/<model>`. Other SDKs use their own model refs and defaults.
 - `thinking`: defaults to Main's current thinking level when the selected Pi model supports it; otherwise the SDK decides. An explicitly configured unsupported level fails as `capability`.
 
-To migrate, remove `default`, `runtimes` and `roles`. Copy any worker and reviewer settings you still want directly into `plan`, `execute` and `review`, keeping only `sdk`, `model` and `thinking`. Remove the old runtime keys even if you don't want any overrides.
+To migrate, remove `default`, `runtimes` and `roles`. Copy any worker and review settings you still want directly into `plan`, `execute` and `review`, keeping only `sdk`, `model` and `thinking`. Remove the old runtime keys even if you don't want any overrides.
 
 ## Launch picker
 
@@ -53,7 +53,7 @@ Installed once, identical for every role and every SDK. Never part of model sele
 - Safety: the directory must not sit inside a Git checkout (`Repository resource`); entries are resolved with `realpath` and must stay inside it (`Untrusted resource`); regular files ≤ 256 KiB.
 - Ambient discovery stays off: no global Pi settings, AGENTS.md, packages or skills from Main or the candidate checkout are loaded.
 
-## Subagents and reviewers
+## Subagents and review
 
 Subagents are read-only sessions answering one probing question. The delegating agent can give a subagent an optional name:
 
@@ -61,13 +61,13 @@ Subagents are read-only sessions answering one probing question. The delegating 
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-The name labels the child without changing its runtime default. Each child has its own `subagentTurns` / `subagentMinutes` budget and draws from the shared run allowance below. Depth is one: a subagent cannot delegate.
+The name labels the child without changing its runtime default. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
 
-Callers do not select reviewers by name. The kind's review policy runs on submit, and all reviewers use the same `review` override when set. Plan agents are always reviewed; execute agents are reviewed unless spawned with `verify: false`; workflows are never reviewed. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
+Each submission of a `review: true` kind gets one review subagent (`prompts/review.md`, `review` override when set). Built-in plan and execute are reviewed unless spawned with `verify: false`; workflows only when they set `review: true`. `worq list <ref>` prints each role actually used with its resolved JSON and source paths.
 
 ## Workflows
 
-Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. `limits.agents` counts live workflows; turns spend from the same budgets. No reviewers. See `docs/workflows.md`.
+Skill packages at `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `disable-model-invocation: true` keeps one user-only (`/worq workflow`); otherwise it is also a `worq_spawn` kind. `limits.agents` counts active workflows; turns spend from the same budgets. Reviewed only with `review: true`. See `docs/workflows.md`.
 
 ## Limits
 
@@ -75,36 +75,27 @@ Every value is optional; absent keys use these defaults.
 
 | Key | Default | Applies to |
 |---|---|---|
-| `agents` | 4 | Live agents; spawn fails as `at-capacity` |
-| `subagents` | 6 | PQs per run (`pq-limit`) |
-| `parallel` | 4 | Concurrent subagents and reviewers |
-| `rounds` | 3 | Legacy setting accepted for compatibility; each candidate now has one review batch |
+| `agents` | 4 | Active (non-parked) agents; spawn or resume fails as `at-capacity` |
+| `subagents` | 6 | PQs per agent (`pq-limit`) |
+| `parallel` | 4 | Concurrent subagents (PQs and reviews) |
 | `asks` | 3 | `ask_main` calls per session |
-| `agentTurns` | 80 | Turns in one agent session |
+| `agentTurns` | 80 | Turns per agent invocation (spawn or resume) |
 | `subagentTurns` | 16 | Turns in one subagent session |
-| `reviewerTurns` | 40 | Turns in one reviewer session |
-| `agentMinutes` | 30 | Wall clock for one agent session, paused while Main answers |
+| `reviewerTurns` | 40 | Turns in one review session |
+| `agentMinutes` | 30 | Wall clock per agent invocation, paused while Main answers |
 | `subagentMinutes` | 5 | Wall clock for one subagent session |
-| `reviewerMinutes` | 10 | Wall clock for one reviewer session |
+| `reviewerMinutes` | 10 | Wall clock for one review session |
 | `askMinutes` | 15 | How long `ask_main` waits before returning "unanswered" |
-| `runTurns` | 1000 | Cumulative turns for one agent: worker, PQs, the selected batch and any authorized finalization |
-| `continuationTurns` | 0 | Extra cumulative turns Main may grant |
-| `checkpointSeconds` | 15 | How long a depleted run waits between requests for a grant |
-| `services` | 2 | Services an execute reviewer may start (`service-limit`) |
+| `idleMinutes` | 60 | How long a parked agent keeps its session and worktree before closing |
+| `services` | 2 | Services a write-kind review may start (`service-limit`) |
 
-Two separate budgets are at work. Per-session limits (`agentTurns`, `agentMinutes`, `asks`) are hard — no grant raises them. `runTurns` is a pool shared by everything one agent does, so a reviewer spends from the same account.
-
-Near the pool's end Worq reports the remaining allowance. If a grant is still available, the `checkpoint` wakes Main, which may answer `worq send <ref> "/continue N"` to grow the pool by `N`. Between requests a depleted run with headroom waits up to `checkpointSeconds` for approval; a streaming turn cannot be paused, so approve before the stop. Without grant headroom, exhaustion fails the agent with `run-limit`. Low-budget notices without headroom and per-session turn/time warnings are visible but do not wake Main or enter its model context.
-
-## Routes
-
-`mode` is chosen per spawn, not in the config file: `fast` for a small, reversible, plainly verifiable change; `thorough` for a broad change or a user-owned decision. It is a hint passed to the worker. For `plan`, `fast` runs only `subtraction` if configured; otherwise it uses the full roster, like default and `thorough`. It does not change execute review, model, thinking level, tools or budgets. The optional `reason` records why. Workflows refuse `mode` and `verify`. `worq spawn execute --mode fast "task"` in the CLI, `{ mode, reason }` through the tool.
+Budgets are per invocation and hard. Exhausting one parks the agent unreviewed with its last response and a pinned partial commit; `worq send <ref> <text>` resumes it with a fresh budget. Per-session warnings are visible but do not wake Main.
 
 ## Verifying a configuration
 
-- `worq list <ref>` shows route, review policy, `spent/allowance` turns, and each role's resolved runtime (`name`, `sdk`, `path`, `via`).
+- `worq list <ref>` shows review policy and each role's resolved runtime (`name`, `sdk`, `path`, `via`).
 - The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <path>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
-- Skipped verification reads `review: explicitly skipped`.
+- Skipped review reads `Review: none`.
 
 ## Failures and fixes
 
@@ -121,12 +112,11 @@ Near the pool's end Worq reports the remaining allowance. If a grant is still av
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
 | `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |
 | `invocation` | User-only workflow sent to `worq_spawn`, or a built-in kind to `/worq workflow` | `/worq workflow`; `worq_spawn` for built-ins |
-| `run-limit` | Cumulative turns spent | Raise `runTurns`, or configure `continuationTurns` |
 
 ## Recipes
 
-Long autonomous runs with an approval step:
+Longer agent invocations, parked sessions kept for a working day:
 
 ```json
-{ "limits": { "runTurns": 2000, "continuationTurns": 500, "checkpointSeconds": 30 } }
+{ "limits": { "agentTurns": 200, "agentMinutes": 90, "idleMinutes": 480 } }
 ```

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Agent, type Semaphore } from "../src/agent.ts";
+import { Agent } from "../src/agent.ts";
+import type { Semaphore } from "../src/subagent.ts";
 import { DEFAULT_LIMITS, loadConfig, type Config } from "../src/runtime/config.ts";
 import { Block } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
@@ -29,7 +30,8 @@ test("config: only Plan, Execute and Review have overrides", async () => {
   });
   assert.deepEqual(config.runtime("agent.plan"), { name: "plan", sdk: "pi", path: "/plan", via: "/plan", model: "openai/gpt-5", thinking: "medium" });
   assert.equal(config.runtime("agent.execute").thinking, "high");
-  for (const role of ["reviewer.intent", "reviewer.pair"]) {
+  {
+    const role = "review";
     assert.equal(config.runtime(role).model, "anthropic/claude-haiku-4-5");
     assert.equal(config.runtime(role).thinking, undefined, "overrides do not inherit from each other");
   }
@@ -52,7 +54,7 @@ test("config: model refs and SDK names are validated at load, naming the key", a
   await assert.rejects(configOf({ plan: { model: "not-a-ref" } }), (error) => configError(error) && /\/plan\/model/.test((error as Block).message));
   await assert.rejects(configOf({ review: { sdk: "claude" } }), (error) => configError(error) && /\/review\/sdk: unknown sdk "claude"/.test((error as Block).message));
   const mixed = await configOf({ review: { sdk: "claude", model: "anything" } }, ["pi", "claude"]);
-  assert.equal(mixed.runtime("reviewer.intent").sdk, "claude");
+  assert.equal(mixed.runtime("review").sdk, "claude");
   assert.deepEqual(mixed.sdks, ["claude"]);
 });
 
@@ -93,8 +95,8 @@ test("config: spawn validates only the selected agent role", async () => {
   await spawnFailure({ execute: { thinking: "high" }, review: { thinking: "high" } }, "/review/thinking", false);
 });
 
-/** A selected reviewer is checked before acquiring a slot or creating its snapshot. */
-test("agent: a reviewer whose role check fails takes no semaphore slot and no snapshot", async (t) => {
+/** The review's runtime is checked before acquiring a slot or creating its snapshot. */
+test("agent: a review whose role check fails takes no semaphore slot and no snapshot", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const prompts = loadPrompts();
@@ -102,15 +104,15 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
   const seen: Spec[] = [];
   const acquires: string[] = [];
   const checks: string[] = [];
-  /** Every reviewer's cwd: a snapshot checkout ends in review-<round>-<name>/product (src/agent.ts:332). */
+  /** Every review's cwd: a snapshot checkout ends in review-<round>/product. */
   const cwds: string[] = [];
   const semaphore = { acquire: async () => { acquires.push("acquire"); return () => {}; } } as unknown as Semaphore;
-  /** One execute agent; `deny` names the single reviewer role whose harness cannot honour its choice. */
+  /** One execute agent; `deny` names the role whose harness cannot honour its choice. */
   const run = async (ref: string, deny?: string) => {
     const agent = new Agent({
       driver: fakeDriver({
-        "agent.execute": (turn) => turn.tool("submit", { summary: "Uppercased the greeting", changes: ["app.py"] }).then(() => {}),
-        reviewer: (turn) => { cwds.push(turn.spec.cwd); return turn.tool("report", pass).then(() => {}); },
+        "agent.execute": (turn) => turn.tool("submit", { summary: "Uppercased the greeting" }).then(() => {}),
+        review: (turn) => { cwds.push(turn.spec.cwd); return turn.tool("submit", pass).then(() => {}); },
       }, seen),
       prompts, limits: DEFAULT_LIMITS, state, root, semaphore, notify() {},
       async select(role) {
@@ -121,7 +123,7 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
     }, { ref, kind, task: "Uppercase the greeting", attachments: [] });
     agent.launch();
     const deadline = Date.now() + 20_000;
-    while (agent.state !== "review-ready") {
+    while (agent.state !== "parked") {
       if (agent.ended || Date.now() > deadline) throw new Error(`agent ${ref} ended ${agent.state}: ${agent.error}`);
       await sleep(5);
     }
@@ -131,22 +133,22 @@ test("agent: a reviewer whose role check fails takes no semaphore slot and no sn
   // Control: when the check passes, the semaphore is taken and the reviewer is handed a snapshot checkout,
   // so the zeros asserted below come from the check, not from an inert double.
   const control = await run("abce");
-  assert.deepEqual(control.reviews.map((r) => [r.name, r.verdict]), [["intent", "pass"]]);
+  assert.deepEqual(control.reviews.map((r) => r.verdict), ["pass"]);
   assert.deepEqual(acquires, ["acquire"], "a passing check reaches semaphore.acquire once");
-  assert.match(cwds[0], /review-1-intent[/\\]product$/, "a passing check reaches snapshot");
+  assert.match(cwds[0], /review-1[/\\]product$/, "a passing check reaches snapshot");
   acquires.length = 0;
   cwds.length = 0;
   seen.length = 0;
 
-  const denied = await run("abcd", "reviewer.intent");
-  assert.deepEqual(denied.reviews.map((r) => [r.name, r.verdict]), [["intent", "unknown"]], "a denied role is recorded as unknown, never pass");
+  const denied = await run("abcd", "review");
+  assert.deepEqual(denied.reviews.map((r) => r.verdict), ["inconclusive"], "a denied role is recorded as inconclusive, never pass");
   assert.match(denied.reviews[0].error ?? "", /thinking/, "the record carries the real capability refusal");
-  assert.ok(checks.includes("reviewer.intent"), "the check ran");
-  assert.deepEqual(acquires, [], "the denied reviewer never reaches semaphore.acquire");
-  // mkdir(scratch) and snapshot() both sit behind that acquire (src/agent.ts:328-332), so no checkout can exist.
-  assert.ok(!cwds.some((cwd) => /review-1-intent/.test(cwd)), "no reviewer cwd, so snapshot never ran");
-  assert.ok(!existsSync(join(state, denied.id, "review-1-intent")), "no scratch directory either");
-  assert.ok(!seen.some((spec) => spec.name === "reviewer.intent"), "the driver never opened the denied reviewer's session");
+  assert.ok(checks.includes("review"), "the check ran");
+  assert.deepEqual(acquires, [], "the denied review never reaches semaphore.acquire");
+  // The workspace (mkdir + snapshot) is prepared behind that acquire, so no checkout can exist.
+  assert.ok(!cwds.some((cwd) => /review-1/.test(cwd)), "no review cwd, so snapshot never ran");
+  assert.ok(!existsSync(join(state, denied.id, "review-1")), "no scratch directory either");
+  assert.ok(!seen.some((spec) => spec.name === "review"), "the driver never opened the denied review's session");
   await control.cancel();
   await denied.cancel();
 });

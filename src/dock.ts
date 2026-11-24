@@ -3,7 +3,7 @@ import type { Theme } from '@earendil-works/pi-coding-agent';
 import type { Row, Telemetry } from './telemetry.ts';
 
 export const shade = (theme: Theme, text: string) => theme.style?.(text, { bg: mixColors(theme.colors.customMessageBg, theme.colors.accent, 0.55) }) ?? text;
-export const working = (r: Row) => !['review-ready','closed','handed-off','answered','done','failed','cancelled'].includes(r.state);
+export const working = (r: Row) => !['parked','closed','done','failed','cancelled'].includes(r.state);
 export function elapsed(ms: number) {
   const s = Math.max(0, Math.floor(ms/1000));
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}m ${s%60}s` : `${Math.floor(s/3600)}h ${Math.floor(s/60)%60}m`;

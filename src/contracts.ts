@@ -25,31 +25,15 @@ export const errorText = (error: unknown) => error instanceof Error ? error.mess
 const notes = (max = 8) => Type.Optional(array(text(600), max));
 const basis = literals(["observed", "documented", "assumed"] as const);
 
-/** Agent submission for read-access kinds (plan). Rendered to <repo>/.agents/plans/. */
-export const PlanReport = obj({
-  summary: text(2400),
-  criteria: Type.Optional(array(text(400), 12, 1)),
-  decisions: Type.Optional(array(obj({ id: Type.String({ pattern: "^D\\d{1,2}$" }), choice: text(800), basis: text(800), alternative: text(500), tradeoff: text(500), revisit: text(400) }), 12)),
-  assumptions: notes(),
-  tree: Type.Optional(text(6000)),
-  document: Type.Optional(text(60_000)),
-});
-/** Agent submission for write-access kinds (execute). */
-export const WorkReport = obj({
-  summary: text(2400),
-  changes: notes(16),
-  checksRun: notes(),
-  assumptions: notes(),
-  concerns: notes(),
-});
-export type PlanReport = Static<typeof PlanReport>;
-export type WorkReport = Static<typeof WorkReport>;
+/** The one agent submission: a summary plus a Markdown report shaped by the kind's prompt. */
+export const Submission = obj({ summary: text(2400), report: Type.Optional(text(60_000)) });
+export type Submission = Static<typeof Submission>;
 
 /** Probing-question subagent answer. */
 export const PqAnswer = obj({ answer: text(1400), basis, unresolved: notes(4), newQuestions: notes(4) });
 export type PqAnswer = Static<typeof PqAnswer>;
 
-export const verdicts = ["pass", "fail", "inconclusive", "plan-fault", "not-applicable"] as const;
+export const verdicts = ["pass", "findings", "inconclusive"] as const;
 export const Finding = obj({
   witness: Type.String({ minLength: 1, maxLength: 800, description: "Specific counterexample or gap, with evidence and impact if not given separately" }),
   basis: Type.Optional(text(400)),
@@ -57,10 +41,10 @@ export const Finding = obj({
   change: Type.Optional(text(500)),
   need: Type.Optional(Type.Boolean({ description: "true when only the requester can settle it" })),
 });
-/** Reviewer report. A crash, timeout or invalid report is recorded as unknown, never pass. */
+/** Review report. A crash, timeout or invalid report is recorded as inconclusive, never pass. */
 export const ReviewReport = obj({ verdict: literals(verdicts), summary: text(1600), findings: array(Finding, 12), artifacts: notes(6) });
 export type ReviewReport = Static<typeof ReviewReport>;
-export type Verdict = typeof verdicts[number] | "unknown";
+export type Verdict = typeof verdicts[number];
 
 export const command = { executable: text(1024), args: array(Type.String({ maxLength: 4096 }), 32) };
 export const PtyAction = Type.Union([

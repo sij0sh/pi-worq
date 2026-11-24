@@ -101,13 +101,12 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
       await loadExtensions(resources, spec.extensions);
       spec.signal.throwIfAborted();
       spec.emit({ type: "log", text: `Pi model ${model.provider}/${model.id}` });
-      const manager = SessionManager.inMemory(spec.cwd, undefined, spec.checkpoint ? JSON.parse(spec.checkpoint) : undefined);
       const { session } = await createAgentSession({
         cwd: spec.cwd, model, ...(level ? { thinkingLevel: level } : {}), resourceLoader: resources,
         tools: tools.map((t) => t.name), customTools: tools,
         ...(host.agentDir ? { agentDir: host.agentDir } : {}),
         ...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
-        sessionManager: manager,
+        sessionManager: SessionManager.inMemory(spec.cwd),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
       });
       const beforeRequest = spec.beforeRequest;
@@ -171,13 +170,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         if (event.type === "agent_end" || event.type === "compaction_end") { report({ phase: "idle" }); context(); }
       });
       return {
-        checkpoint() {
-          if (session.isStreaming) return undefined;
-          const bytes = JSON.stringify([manager.getHeader(), ...manager.getBranch()]);
-          return Buffer.byteLength(bytes) <= 512 * 1024 ? bytes : undefined;
-        },
-        async prompt(text, options) {
-          if (options?.toolFree) session.setActiveToolsByName([]);
+        async prompt(text) {
           failed = false;
           let began = false;
           try { await session.prompt(text, { preflightResult: (state) => { began = state === "started"; } }); }

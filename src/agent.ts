@@ -3,52 +3,25 @@ import { createHash, randomUUID } from "node:crypto";
 import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkReport, type Verdict } from "./contracts.ts";
+import { Block, errorText, obj, PqAnswer, ReviewReport, Submission, text, type Verdict } from "./contracts.ts";
 import type { Limits } from "./runtime/config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
-import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
-import { Conversation, WorkerHandoff, type Sessions } from "./session.ts";
+import { clean, DIGEST, one, planMarkdown, pqMessage, reportText, reviewLines, reviewStatus, type ReviewRecord } from "./render.ts";
+import { Conversation, type Sessions } from "./session.ts";
 import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
+import { runSubagent, type Semaphore, type SubagentDeps, type Workspace } from "./subagent.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
+import type { Revision, Telemetry } from "./telemetry.ts";
 
-import { label, type Revision, type Telemetry } from './telemetry.ts';
-
-export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed" | "handed-off";
-const checkpoints = new Map<string, { bytes: string; timer: ReturnType<typeof setTimeout> }>();
-function claimCheckpoint(id: string) {
-  const saved = checkpoints.get(id);
-  if (!saved) return undefined;
-  clearTimeout(saved.timer);
-  checkpoints.delete(id);
-  return saved.bytes;
-}
-
-export const ENDED: AgentState[] = ["review-ready", "closed", "cancelled", "failed", "handed-off"];
-export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed" | "handed-off"; ref: string; text: string }
+/** parked: submitted (or out of budget), session and worktree retained until Main resumes or closes it. */
+export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "parked" | "closed" | "cancelled" | "failed";
+export const ENDED: AgentState[] = ["closed", "cancelled", "failed"];
+export interface AgentEvent { type: "parked" | "ask" | "warning" | "failed"; ref: string; text: string }
 export interface Attachment { path: string; text: string }
-export interface Delegation { role?: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
+export interface Delegation { role: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
-
-/** Bounded concurrency shared by subagents and reviewers. */
-export class Semaphore {
-  private free: number;
-  private readonly queue: (() => void)[] = [];
-  constructor(size: number) { this.free = size; }
-  async acquire(signal: AbortSignal): Promise<() => void> {
-    signal.throwIfAborted();
-    if (this.free > 0) this.free--;
-    else await new Promise<void>((resolve, reject) => {
-      const go = () => { signal.removeEventListener("abort", stop); resolve(); };
-      const stop = () => { this.queue.splice(this.queue.indexOf(go), 1); reject(signal.reason); };
-      this.queue.push(go);
-      signal.addEventListener("abort", stop, { once: true });
-    });
-    let released = false;
-    return () => { if (released) return; released = true; const next = this.queue.shift(); if (next) next(); else this.free++; };
-  }
-}
 
 export interface AgentDeps {
   telemetry?: Telemetry;
@@ -64,11 +37,10 @@ export interface AgentDeps {
   /** Live controllable sessions, keyed by telemetry row key. */
   sessions?: Sessions;
 }
-const notStarted = (label: string) => new Block("busy", `${label} has no live session yet; try again once it is running`);
 
 /**
- * One Main-spawned Pi SDK agent. Lifecycle per round: running (may delegate PQs, ask Main) → submit →
- * reviewing (one parallel batch) → terminal review-ready (Main adjudicates).
+ * One Main-spawned SDK agent. Each round: running (may delegate PQs, ask Main) → submit →
+ * one independent review (when the profile asks) → parked. Main resumes it with worq_send or closes it.
  * Never spawns, retries or merges on its own.
  */
 export class Agent {
@@ -78,16 +50,8 @@ export class Agent {
   readonly task: string;
   readonly attachments: Attachment[];
   readonly title: string;
-  readonly verify: boolean;
-  readonly reason?: string;
-  readonly mode?: "fast" | "thorough";
-  private reviewPolicy?: string;
-  get reviewPolicyLabel() {
-    if (this.kind.access === "write" && !this.verify) return "explicitly skipped";
-    if (this.reviewPolicy) return this.reviewPolicy;
-    if (this.kind.workflow) return "none (workflow)";
-    return this.kind.name === "plan" && this.mode === "fast" ? "pending roster selection" : "kind roster";
-  }
+  /** The profile reviews and the spawn did not opt out. */
+  readonly reviewed: boolean;
   readonly branch?: string;
   readonly owner = process.pid;
   state: AgentState = "starting";
@@ -95,25 +59,17 @@ export class Agent {
   started = Date.now();
   finished?: number;
   error?: string;
+  /** Pinned commit of the latest submission. */
   candidate?: string;
+  /** Unreviewed commit of work left by budget exhaustion or close. */
   recoverySha?: string;
-  private checkpointRuntime?: Runtime;
-  private finalizing?: { controller: AbortController; done: Promise<void> };
-  finalization?: { status: "running" | "unreviewed" | "failed"; path?: string; digest?: string; error?: string };
-
-  async discardContinuity() {
-    claimCheckpoint(this.id);
-    this.finalizing?.controller.abort(new Block("cancelled", "Finalization cancelled by Main"));
-    await this.finalizing?.done;
-  }
-  batch?: "complete" | "skipped" | "incomplete";
-  handoff?: { path?: string; partial?: string; error?: string; inline?: string };
-  private unresolved?: string;
+  /** Why the latest round parked without a submission. */
+  exhausted?: string;
   diffstat?: string;
   plan?: { path: string; text: string };
   work?: string;
   submission?: string;
-  reviews: ReviewRecord[] = [];
+  readonly reviews: ReviewRecord[] = [];
   readonly delegations: Delegation[] = [];
   readonly launches: { role: string; runtime: Runtime; label?: string }[] = [];
   ask?: { question: string; resolve(answer: string): void };
@@ -122,61 +78,18 @@ export class Agent {
   private seq = 0;
   private dir?: string;
   private project?: Project;
-  private conversation?: Conversation<typeof PlanReport | typeof WorkReport>;
-  private revision?: Revision;
-  private planRound?: number;
-  private priorReviewRound?: number;
+  private conversation?: Conversation<typeof Submission>;
   private asks = 0;
-  private spent = 0;
-  private grant = 0;
-  private warned = false;
-  private warning = (message: string) => this.budgetNotice("warning", message);
-  private budgetNotice(type: "warning" | "checkpoint", message: string) {
-    this.log(message);
-    this.deps.notify({ type, ref: this.ref, text: `${this.headline} ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
-  }
-  private readonly checkpoints = new Set<() => void>();
-  private beforeAttempt = async (signal: AbortSignal) => {
-    const { runTurns, continuationTurns, checkpointSeconds } = this.deps.limits;
-    if (this.spent < runTurns + this.grant || this.grant >= continuationTurns) return;
-    // Only wait between requests. A streaming Pi turn cannot be suspended safely.
-    this.warned = true;
-    this.deps.telemetry?.state(this.id, this.state, 'budget');
-    this.budgetNotice("checkpoint", `No turns left. Main may approve up to ${continuationTurns - this.grant} more via /continue N within ${checkpointSeconds}s.`);
-    await new Promise<void>(resolve => {
-      const wake = () => { clearTimeout(timer); signal.removeEventListener("abort", wake); this.checkpoints.delete(wake); resolve(); };
-      const timer = setTimeout(wake, checkpointSeconds * 1000);
-      this.checkpoints.add(wake);
-      signal.addEventListener("abort", wake, { once: true });
-      if (signal.aborted || this.spent < runTurns + this.grant) wake();
-    });
-    this.deps.telemetry?.state(this.id, this.state, this.state === 'waiting' ? 'ask' : undefined);
-  };
-  private chargeTurn = () => {
-    const limits = this.deps.limits;
-    const left = limits.runTurns + this.grant - this.spent - 1;
-    if (left < 0) this.controller.abort(new Block("run-limit", "Cumulative turn allowance exhausted"));
-    else this.spent++;
-    if (left >= 0 && left <= Math.max(1, Math.floor(limits.runTurns / 10)) && !this.warned) {
-      this.warned = true;
-      const headroom = limits.continuationTurns - this.grant;
-      // A grant can prevent a hard stop even if the next model turn is inside a streaming request.
-      if (headroom > 0) this.budgetNotice("checkpoint", `${left} further run turns authorized; ${headroom} available for explicit approval via /continue N.`);
-      else this.warning(`${left} further run turns authorized; no additional turns can be granted.`);
-    }
-  };
-  private admitCloseout = () => {
-    // Reviewers start after submission and settle before another worker round.
-    if (this.signal.aborted || this.state !== "running" || this.openPqs ||
-        this.deps.limits.runTurns + this.grant - this.spent < 2) return false;
-    this.spent++;
-    return true;
-  };
+  private wakeParked?: (message: string | undefined) => void;
   private readonly controller = new AbortController();
   private readonly deps: AgentDeps;
   private start!: () => void;
+  private warning = (message: string) => {
+    this.log(message);
+    this.deps.notify({ type: "warning", ref: this.ref, text: `${this.headline} ${message}` });
+  };
 
-  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean }) {
     this.deps = deps;
     this.ref = input.ref;
     this.title = input.title ?? input.ref;
@@ -185,9 +98,7 @@ export class Agent {
     if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
-    this.mode = input.mode;
-    this.reason = input.reason;
-    this.verify = input.verify ?? true;
+    this.reviewed = input.kind.review && input.verify !== false;
     if (input.kind.access === "write") this.branch = `worq/${input.ref}`;
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
@@ -195,16 +106,23 @@ export class Agent {
   get headline() { return `${this.title} (${this.ref}) · ${this.kind.name}`; }
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
-  get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
+  /** Idle sessions hold no execution slot. */
+  get active() { return !this.ended && this.state !== "parked"; }
+  get openPqs() { return this.delegations.filter((d) => d.state === "queued" || d.state === "running").length; }
+  /** The current round's review, if it ran. */
+  get review() { return this.reviews.find((r) => r.round === this.round); }
   launch() {
-    this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title, Boolean(this.kind.workflow));
+    this.deps.telemetry?.add(this.id, this.ref, this.kind.name, undefined, undefined, undefined, this.title, Boolean(this.kind.skill));
     this.deps.sessions?.set(this.id, {
       key: this.id, ref: this.ref, role: `agent.${this.kind.name}`, label: this.headline,
-      consequence: "Stops the agent and every PQ and reviewer it owns; its branch is kept.",
+      consequence: "Stops the agent and every PQ and review it owns; its branch is kept.",
       runtime: () => this.conversation?.runtime ?? this.deps.runtime,
       pending: () => this.conversation?.pendingChange,
       cancel: async () => { await this.cancel(); return `${this.ref} ${this.state}`; },
-      configure: (change) => { if (!this.conversation) throw notStarted(this.ref); return this.conversation.configure(change); },
+      configure: (change) => {
+        if (!this.conversation) throw new Block("busy", `${this.ref} has no live session yet; try again once it is running`);
+        return this.conversation.configure(change);
+      },
     });
     this.start();
     return this;
@@ -216,164 +134,134 @@ export class Agent {
     if (this.history.length > 200) this.history.splice(40, this.history.length - 200);
   }
   tail(lines = 20, since = 0) { return this.history.filter((h) => h.seq > since).slice(-lines); }
-  private set(state: AgentState) { this.state = state; this.deps.telemetry?.state(this.id, state, state === 'waiting' ? 'ask' : state === 'review-ready' ? 'adjudicate' : undefined); this.log(`state ${state}`); this.publish(); }
+  private set(state: AgentState) {
+    this.state = state;
+    this.deps.telemetry?.state(this.id, state, state === "waiting" ? "ask" : state === "parked" ? "adjudicate" : undefined);
+    this.log(`state ${state}`);
+    this.publish();
+  }
   private publish() {
     if (!this.dir) return;
     try {
       const file = join(this.dir, "record.json");
-      writeFileSync(`${file}.tmp`, `${JSON.stringify({ version: 1, ...this.view(), history: this.history }, null, 2)}\n`, { mode: 0o600 });
+      writeFileSync(`${file}.tmp`, `${JSON.stringify({ version: 2, ...this.view(), history: this.history }, null, 2)}\n`, { mode: 0o600 });
       renameSync(`${file}.tmp`, file);
     } catch { /* the record is forensic; the live view stays authoritative */ }
   }
   view() {
     return {
       ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
-      budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
-      worktree: this.work, branch: this.branch, candidate: this.candidate, recoverySha: this.recoverySha, batch: this.batch, reviewedDigest: this.reviewedDigest, finalization: this.finalization, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      worktree: this.work, branch: this.branch, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
-      handoff: this.handoff, reviews: this.reviews, started: this.started, finished: this.finished,
+      reviews: this.reviews, started: this.started, finished: this.finished,
     };
   }
 
-  /** Main's one talk verb: steer an active run or answer an open ask. */
+  /** Main's one talk verb: steer a running agent, answer an open ask, or resume a parked session. */
   send(textIn: string): string {
     const message = textIn.trim();
-    if (message.startsWith("/continue")) {
-      const count = Number(/^\/continue ([1-9]\d*)$/.exec(message)?.[1]);
-      if (this.ended || !this.warned || !Number.isSafeInteger(count) || count > this.deps.limits.continuationTurns - this.grant) throw new Block("run-limit", "No such checkpoint allowance");
-      this.grant += count; this.warned = false;
-      for (const wake of this.checkpoints) wake();
-      this.log(`Main approved ${count} more run turns`);
-      return `Cumulative allowance ${this.deps.limits.runTurns + this.grant}`;
-    }
-    if (message.startsWith("/finalize ")) return this.finalize(message.slice(10));
     if (!message) throw new Block("empty", "Nothing to send");
-    this.log(`← main: ${message}`);
     switch (this.state) {
       case "running":
+        this.log(`← main: ${message}`);
         this.conversation?.deliver(`Main: ${message}`);
         return `Steered ${this.ref}`;
       case "waiting":
+        this.log(`← main: ${message}`);
         this.ask?.resolve(`Main: ${message}`);
         return `Answered ${this.ref}`;
+      case "parked":
+        this.log(`← main: ${message}`);
+        this.wakeParked?.(`Main: ${message}`);
+        return `Resumed ${this.ref} (round ${this.round + 1})`;
       case "starting": case "reviewing":
         throw new Block("busy", `${this.ref} is ${this.state}; wait for its next message`);
       default:
         throw new Block("ended", `${this.ref} is ${this.state}`);
     }
   }
-  /** Stop everything this live agent owns. Bounded. */
+  /** Close a parked agent; stop a live one. Bounded. */
   async cancel() {
     if (this.ended) return;
-    this.deps.telemetry?.state(this.id, "cancelling");
-    this.controller.abort(new Block("cancelled", "Cancelled by Main"));
+    if (this.state === "parked") this.wakeParked?.(undefined);
+    else {
+      this.deps.telemetry?.state(this.id, "cancelling");
+      this.controller.abort(new Block("cancelled", "Cancelled by Main"));
+    }
     this.start();
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([this.done.catch(() => {}), new Promise<void>((resolve) => { timer = setTimeout(resolve, 15_000); })]);
     clearTimeout(timer);
   }
 
+  private get children(): SubagentDeps {
+    const { driver, prompts, semaphore, select, telemetry, sessions } = this.deps;
+    return { driver, guard: prompts.guard, semaphore, select, telemetry, sessions, warning: this.warning,
+      launched: (role, runtime, label) => { this.launches.push({ role, runtime, label }); } };
+  }
+
   private async run() {
     const { prompts, limits, root, driver } = this.deps;
     const signal = this.signal;
-    let handoff: WorkerHandoff | undefined;
     let box: ReturnType<typeof processTools> | undefined;
     try {
       signal.throwIfAborted();
       this.dir ??= await agentDirectory(this.deps.state, this.ref);
-      if (this.kind.access === "write") {
+      const write = this.kind.access === "write";
+      if (write) {
         this.project = await baselineProject(root, signal);
         this.work = await worktree(this.project, this.dir, this.branch!, signal);
         this.log(`worktree on ${this.branch} from ${this.project.baseline.slice(0, 10)}`);
       }
       const cwd = this.work ?? root;
       const tools: Tool[] = [...readTools(cwd), this.delegateTool(cwd), this.askTool()];
-      if (this.kind.access === "write") {
+      if (write) {
         box = processTools(cwd, join(this.dir, "runtime"), { signal });
         tools.push(...writeTools(cwd), ...box.tools);
       }
-      const write = this.kind.access === "write";
-      const workflow = this.kind.workflow;
-      const noReviewers = workflow ? "\n\nNo independent reviewers run for this workflow; submit a self-contained result." : "";
+      const unreviewed = this.reviewed ? "" : "\n\nNo independent review runs for this agent; submit a self-contained result.";
       this.conversation = new Conversation({
-        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, admitCloseout: this.admitCloseout, pending: () => this.openPqs,
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(workflow ? { skills: [workflow.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${noReviewers}\n\n${prompts.guard}`, log: (line) => this.log(line) },
+        driver, signal, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}${unreviewed}\n\n${prompts.guard}`, log: (line) => this.log(line) },
         finish: {
-          name: "submit", schema: write ? WorkReport : PlanReport,
-          description: workflow ? `Submit your result.${write ? "" : " Worq saves it to .agents/plans/."}` : write ? "Submit your work for independent review." : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
-          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
+          schema: Submission,
+          description: `Submit your result${this.reviewed ? " for independent review" : ""}.${write ? "" : " Worq saves it to .agents/plans/."}`,
+          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "queued" || d.state === "running").map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
-      const message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
-      this.round = 1;
-      this.set("running");
-      const report = await this.conversation.run(message);
-      this.checkpointRuntime = this.conversation.runtime ?? this.deps.runtime;
-      const checkpoint = this.kind.name === "plan" ? this.conversation.checkpoint() : undefined;
-      this.conversation.dispose();
-      this.conversation = undefined;
-      await this.review(report);
-      if (checkpoint && this.batch === "complete" && checkpoints.size < 8) {
-        const timer = setTimeout(() => claimCheckpoint(this.id), 15 * 60_000);
-        timer.unref();
-        checkpoints.set(this.id, { bytes: checkpoint, timer });
+      let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      while (message !== undefined) {
+        this.round++;
+        this.exhausted = this.recoverySha = undefined;
+        this.set("running");
+        try { await this.submit(await this.conversation.run(message)); }
+        catch (error) {
+          // Budget exhaustion keeps the last response and partial work; Main may resume with a fresh budget.
+          if (signal.aborted || this.conversation.disposed || !(error instanceof Block && (error.code === "turn-limit" || error.code === "time-limit"))) throw error;
+          this.exhausted = errorText(error);
+          const partial = this.work && await pin(this.work, signal, `worq ${this.ref}: round ${this.round} partial (unreviewed)`);
+          if (partial && partial !== this.candidate) this.recoverySha = partial;
+        }
+        message = await this.park();
       }
+      this.state = "closed";
     } catch (error) {
-      if (signal.aborted && signal.reason?.code !== "run-limit") this.state = "cancelled";
-      else if (!signal.aborted && error instanceof WorkerHandoff) {
-        handoff = error;
-        this.state = "handed-off";
-      } else {
-        this.error = errorText(signal.reason ?? error);
-        this.state = "failed";
-      }
+      if (signal.aborted) this.state = "cancelled";
+      else { this.error = errorText(error); this.state = "failed"; }
     } finally {
       this.controller.abort(new Block("ended", "Agent ended"));
       this.deps.sessions?.delete(this.id);
-      const open = this.delegations.filter(d => (d.state === "queued" || d.state === "running")).map(d => ({ id: d.id, question: d.question }));
-      for (const d of this.delegations) if ((d.state === "queued" || d.state === "running")) d.state = "cancelled";
+      for (const d of this.delegations) if (d.state === "queued" || d.state === "running") d.state = "cancelled";
       this.ask?.resolve(UNANSWERED);
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
-      if (handoff) {
-        this.handoff = handoff.quiescent ? {} : { error: "SDK quiescence could not be confirmed" };
-        if (this.work) {
-          const failure = [this.handoff.error, this.error].filter(Boolean).join("; ");
-          if (failure) this.handoff.error = failure;
-          else {
-            try { this.handoff.partial = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: unreviewed handoff`); }
-            catch (error) { this.handoff.error = errorText(error); }
-          }
-        }
-        const evidence = JSON.stringify({
-          status: "handed-off", round: this.round, objective: this.task, trigger: handoff.trigger,
-          workerTurns: handoff.turns, sharedTurns: { spent: this.spent, allowance: limits.runTurns + this.grant },
-          unreviewed: { ordinary: handoff.ordinary || "No completed ordinary assistant text observed.", closeout: handoff.closeout || undefined, unresolvedQuestion: this.unresolved, openPqs: open, partialCommit: this.handoff.partial },
-          priorReview: { round: this.priorReviewRound, candidate: this.candidate, recoverySha: this.recoverySha, batch: this.batch, reviewedDigest: this.reviewedDigest, finalization: this.finalization, plan: this.plan?.path, planRound: this.planRound, reviews: this.reviews },
-          recovery: { worktree: this.work, branch: this.branch, error: this.handoff.error, cleanup: this.work ? "Main owns later cleanup; ignored files remain in the worktree." : undefined },
-        }, null, 2);
-        const file = join(this.dir!, `handoff-${this.round}.json`);
-        try {
-          writeFileSync(`${file}.tmp`, `${evidence}\n`, { mode: 0o600 });
-          renameSync(`${file}.tmp`, file);
-          this.handoff.path = file;
-        } catch (error) {
-          this.handoff.error = [this.handoff.error, `Handoff write failed: ${errorText(error)}`].filter(Boolean).join("; ");
-          this.handoff.inline = JSON.stringify({
-            objective: this.task.slice(0, 1000), trigger: handoff.trigger,
-            ordinary: handoff.ordinary.slice(-4000) || "No completed ordinary assistant text observed.",
-            closeout: handoff.closeout.slice(-2000) || undefined, unresolvedQuestion: this.unresolved,
-          }, null, 2);
-        }
-      } else if (this.work && this.project) {
+      if (this.work && this.project) {
         // Never remove the only copy of interrupted work.
         try {
-          const reviewed = this.candidate;
           const recovered = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
-          if (recovered !== reviewed) {
+          if (recovered !== this.candidate) {
             this.recoverySha = recovered;
             this.log(`Recovery SHA ${recovered}: UNVERIFIED / not merge-ready`);
-            if (this.revision) this.deps.telemetry?.source(this.id, this.revision.round);
           }
           await removeWorktree(this.project.root, this.work);
           this.work = undefined;
@@ -381,73 +269,37 @@ export class Agent {
           this.log(`Worktree retained at ${this.work}: ${errorText(error)}`);
         }
       }
-      if (this.state === "reviewing") this.state = "review-ready";
-      this.deps.telemetry?.state(this.id, this.state, this.state === 'failed' ? 'failure' : undefined);
-      const interrupted = this.deps.telemetry?.live.get(this.id);
-      if (interrupted?.status === 'reviewing') this.deps.telemetry?.revision({ ...interrupted, status: 'inconclusive' }, true);
-      this.deps.telemetry?.live.delete(this.id);
-      this.deps.telemetry?.changed();
+      const telemetry = this.deps.telemetry;
+      telemetry?.state(this.id, this.state, this.state === "failed" ? "failure" : undefined);
+      const interrupted = telemetry?.live.get(this.id);
+      if (interrupted?.status === "reviewing") telemetry?.revision({ ...interrupted, status: "inconclusive" }, true);
+      telemetry?.live.delete(this.id);
+      telemetry?.changed();
       this.finished = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
-      if (this.state === "review-ready") this.deps.notify({ type: "review-ready", ref: this.ref, text: `${this.digest()}\nReview is sealed. If changes are needed, start a fresh plan with fresh independent review.` });
-      if (this.handoff) this.deps.notify({ type: "handed-off", ref: this.ref, text: [
-        `${this.headline} handed-off (round ${this.round}); partial work is unreviewed.`,
-        this.handoff.path, this.candidate && `Prior candidate: ${this.candidate}`, this.plan && `Prior plan: ${this.plan.path}`, this.work && `Retained worktree: ${this.work} (Main owns cleanup).`,
-        this.handoff.partial && `Unreviewed recovery commit: ${this.handoff.partial}`, this.handoff.error, this.handoff.inline,
-      ].filter(Boolean).join("\n") });
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
       if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
 
-  get reviewedDigest() { return this.plan && createHash("sha256").update(this.plan.text).digest("hex"); }
-
-  private finalize(json: string): string {
-    if (json.length > 24_000) throw new Block("finalization", "Decision exceeds size limit");
-    if (this.state !== "review-ready" || this.kind.name !== "plan" || this.batch !== "complete" || !this.plan || this.finalization) throw new Block("finalization", "Requires a terminal, complete planning batch with an unused checkpoint");
-    let input;
-    try { input = JSON.parse(json); } catch { throw new Block("finalization", "Expected a JSON material-pivot decision"); }
-    if (input?.materialPivot !== true || input?.directionSettled !== true || input?.independentReviewRequired !== false || typeof input?.decision !== "string" || !input.decision.trim() || input.decision.length > 4000 || !Array.isArray(input.unresolved) || input.unresolved.length > 16 || input.unresolved.some((v: unknown) => typeof v !== "string" || v.length > 1000)) throw new Block("finalization", "Main must confirm materialPivot:true, directionSettled:true, independentReviewRequired:false, decision and unresolved requirements");
-    const digest = this.reviewedDigest!;
-    if (input.reviewedDigest !== digest) throw new Block("finalization", "Reviewed plan digest mismatch");
-    if (this.spent >= this.deps.limits.runTurns + this.grant) throw new Block("run-limit", "No remaining authorized turns");
-    const checkpoint = claimCheckpoint(this.id);
-    if (!checkpoint) throw new Block("finalization", "Original Pi checkpoint unavailable or expired; start a fresh independently reviewed plan");
-    const payload = JSON.stringify({ reviewed: this.plan.text, findings: this.reviews, reviewedDigest: digest, decision: input.decision, unresolved: input.unresolved });
-    this.finalization = { status: "running" };
-    this.publish();
-    const controller = new AbortController();
-    const done = this.runFinalization(checkpoint, payload, this.plan.path, digest, input.unresolved, controller.signal).finally(() => { this.finalizing = undefined; });
-    this.finalizing = { controller, done };
-    return `Finalizing ${this.ref} once; the result will not be independently reviewed.`;
-  }
-
-  private async runFinalization(checkpoint: string, payload: string, reviewedPath: string, digest: string, unresolved: string[], caller: AbortSignal) {
-    const { driver, limits, root } = this.deps;
-    const runtime = this.checkpointRuntime;
-    const signal = AbortSignal.any([caller, AbortSignal.timeout(Math.min(limits.agentMinutes * 60_000, 120_000))]);
-    const conversation = new Conversation({
-      driver, signal, beforeAttempt: async () => { if (this.spent >= limits.runTurns + this.grant) throw new Block("run-limit", "No remaining authorized turns"); }, chargeTurn: () => { this.spent++; }, warning: this.warning,
-      turns: Math.min(limits.agentTurns, 4), minutes: limits.agentMinutes,
-      spec: { runtime, checkpoint, name: "agent.plan", cwd: root, tools: [], system: "Finalize the plan once following Main’s settled material pivot. Preserve unresolved requirements. Submit a full revised plan. This is not independent review or execution authorization.", log: line => this.log(line) },
-      finish: { name: "submit", description: "Submit the unreviewed finalization.", schema: PlanReport },
+  /** Wait for Main: a message resumes the same session, close or idle expiry ends it. */
+  private park(): Promise<string | undefined> {
+    this.set("parked");
+    this.deps.notify({ type: "parked", ref: this.ref, text: this.digest() });
+    return new Promise((resolve) => {
+      const done = (message: string | undefined) => {
+        clearTimeout(timer);
+        this.signal.removeEventListener("abort", abort);
+        this.wakeParked = undefined;
+        resolve(message);
+      };
+      const abort = () => done(undefined);
+      const timer = setTimeout(() => { this.log(`idle for ${this.deps.limits.idleMinutes}m; closing`); done(undefined); }, this.deps.limits.idleMinutes * 60_000);
+      timer.unref?.();
+      this.signal.addEventListener("abort", abort, { once: true });
+      this.wakeParked = done;
     });
-    try {
-      const report = await conversation.run(payload);
-      const path = `.agents/plans/plan-${this.ref}-finalized.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: 1, task: this.task, report, label: "Finalized plan" });
-      const bytes = `> NOT INDEPENDENTLY REVIEWED. No inherited approval. Reviewed evidence: ${reviewedPath} (SHA-256 ${digest}).\n\nUnresolved requirements (Main): ${JSON.stringify(unresolved)}\n\n${markdown}`;
-      signal.throwIfAborted();
-      await writeScoped(root, path, bytes, { create: true });
-      this.finalization = { status: "unreviewed", path, digest: createHash("sha256").update(bytes).digest("hex") };
-    } catch (error) {
-      this.finalization = { status: "failed", error: errorText(error) };
-    } finally {
-      conversation.dispose();
-      this.publish();
-      this.deps.notify({ type: "review-ready", ref: this.ref, text: this.finalization?.path ? `Finalized plan: ${this.finalization.path} — NOT INDEPENDENTLY REVIEWED. Main must explicitly adopt it for authorized execution.` : `Finalization failed: ${this.finalization?.error}. Original reviewed evidence is unchanged.` });
-    }
   }
 
   private delegateTool(cwd: string): Tool {
@@ -458,49 +310,22 @@ export class Agent {
         const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "queued" };
         this.delegations.push(d);
         this.log(`→ PQ: ${question}`);
-        void this.pq(d, cwd, name ? `subagent.${name}` : "subagent");
+        void this.pq(d, cwd);
         return `Delegated PQ: ${question}\nKeep working, or end your turn to wait for the [PQ] answer.`;
       });
   }
-  private async pq(d: Delegation, cwd: string, role: string) {
-    const key = `${this.id}:${d.id}`;
-    this.deps.telemetry?.add(key, this.ref, 'PQ', this.id, undefined, clean(d.question).replace(/\s+/g, " ").trim());
-    this.deps.telemetry?.state(key, 'queued');
-    // Own controller: Main can cancel this PQ without touching its parent or siblings.
-    const own = new AbortController();
-    const signal = AbortSignal.any([this.signal, own.signal]);
-    const { driver, prompts, limits, semaphore } = this.deps;
-    let conversation: Conversation<typeof PqAnswer> | undefined;
-    let release: (() => void) | undefined;
-    this.deps.sessions?.set(key, {
-      key, ref: this.ref, role, label: `PQ ${d.question}`, consequence: "Cancels this question; the parent is told it went unanswered.",
-      runtime: () => conversation?.runtime, pending: () => conversation?.pendingChange,
-      cancel: async () => { this.deps.telemetry?.state(key, 'cancelling'); own.abort(new Block("cancelled", "PQ cancelled by Main")); return `PQ cancelled: ${d.question}`; },
-      configure: (change) => { if (!conversation) throw notStarted("This PQ"); return conversation.configure(change); },
+  private async pq(d: Delegation, cwd: string) {
+    const { prompts, limits } = this.deps;
+    const result = await runSubagent(this.children, {
+      key: `${this.id}:${d.id}`, parent: this.id, ref: this.ref, role: d.role, row: "PQ", question: clean(d.question).replace(/\s+/g, " ").trim(),
+      label: `PQ ${d.question}`, title: `${this.title} · ${d.question}`, consequence: "Cancels this question; the parent is told it went unanswered.",
+      system: prompts.pq, payload: JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2),
+      schema: PqAnswer, description: "Return your answer to the probing question.", turns: limits.subagentTurns, minutes: limits.subagentMinutes,
+      cwd, signal: this.signal, log: (line) => this.log(`PQ ${d.question}: ${line}`), started: () => { d.state = "running"; },
     });
-    try {
-      const runtime = await this.deps.select(role, `${this.title} · ${d.question}`, signal);
-      release = await semaphore.acquire(signal);
-      if (runtime) this.launches.push({ role, runtime, label: d.question });
-      d.state = 'running';
-      this.deps.telemetry?.state(key, 'running');
-      conversation = new Conversation({
-        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { runtime, observe: this.deps.telemetry?.sink(key), name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
-        finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
-      });
-      d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
-      d.state = "answered";
-    } catch (error) {
-      if (this.signal.aborted) return;
-      d.state = own.signal.aborted || (error instanceof Block && error.code === 'cancelled') ? 'cancelled' : 'failed';
-      d.error = errorText(own.signal.aborted ? own.signal.reason : error);
-    } finally {
-      this.deps.sessions?.delete(key);
-      this.deps.telemetry?.state(key, this.signal.aborted ? 'cancelled' : d.state);
-      release?.();
-      conversation?.dispose();
-    }
+    if (this.signal.aborted) return;
+    if ("value" in result) { d.answer = result.value; d.state = "answered"; }
+    else { d.state = result.cancelled ? "cancelled" : "failed"; d.error = result.error; }
     this.log(`← PQ ${d.state}: ${d.question}`);
     this.conversation?.deliver(pqMessage(d.question, d.answer, d.error, d.state === "cancelled"));
   }
@@ -517,10 +342,10 @@ export class Agent {
         try {
           return await new Promise<string>((resolve, reject) => {
             this.ask = { question, resolve };
-            timer = setTimeout(() => { this.unresolved = question; resolve(UNANSWERED); }, this.deps.limits.askMinutes * 60_000);
+            timer = setTimeout(() => resolve(UNANSWERED), this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            this.deps.notify({ type: "ask", ref: this.ref, text: `${this.headline} asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
+            this.deps.notify({ type: "ask", ref: this.ref, text: `${this.headline} asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to plan approval using provisional assumptions or alternatives. Never assume permission.` });
           });
         } finally {
           clearTimeout(timer);
@@ -531,19 +356,16 @@ export class Agent {
       });
   }
 
-  private async review(report: PlanReport | WorkReport) {
+  /** Record the submission (plan file or pinned commit), then one independent review when required. */
+  private async submit(report: Submission) {
     const signal = this.signal;
-    const { root, prompts } = this.deps;
     this.set("reviewing");
-    let identity: Revision['identity'];
+    let identity: Revision["identity"];
     if (this.kind.access === "read") {
-      const plan = report as PlanReport;
       const path = `.agents/plans/plan-${this.ref}.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report: plan, label: this.kind.workflow ? "Workflow result" : "Plan" });
-      await writeScoped(root, path, markdown, { create: !this.plan });
-      if (this.planRound !== undefined && this.plan?.path === path) this.deps.telemetry?.source(this.id, this.planRound, true);
-      this.planRound = this.round;
-      identity = { digest: createHash('sha256').update(markdown, 'utf8').digest('hex') };
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report, label: this.kind.skill ? "Workflow result" : "Plan" });
+      await writeScoped(this.deps.root, path, markdown, { create: !this.plan });
+      identity = { digest: createHash("sha256").update(markdown, "utf8").digest("hex") };
       this.plan = { path, text: markdown };
       this.submission = markdown;
       this.log(`plan saved to ${path}`);
@@ -551,104 +373,62 @@ export class Agent {
       this.candidate = await pin(this.work!, signal, `worq ${this.ref}: round ${this.round}`);
       identity = { sha: this.candidate };
       this.diffstat = await git(this.work!, signal, "diff", "--stat", this.project!.baseline, this.candidate) || "No changes from the baseline";
-      this.submission = workText(report as WorkReport);
+      this.submission = reportText(report);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
-    const workflow = Boolean(this.kind.workflow);
-    const skipped = workflow || (this.kind.access === "write" && !this.verify);
-    const configured = skipped ? [] : prompts.reviewers(this.kind.name);
-    const focused = this.kind.name === "plan" && this.mode === "fast"
-      ? configured.find(r => r.name === "subtraction") : undefined;
-    const roster = focused ? [focused] : configured;
-    this.reviewPolicy = workflow ? "none (workflow)" : focused ? "focused (subtraction)" : configured.length ? "kind roster" : "no configured reviewers";
-    const revision: Revision = { run: this.id, round: this.round, identity, status: 'reviewing', source: false, reviews: [] };
-    this.revision = revision;
+    if (!this.reviewed) return;
+    const revision: Revision = { run: this.id, round: this.round, identity, status: "reviewing" };
     this.deps.telemetry?.revision(revision);
-    const reports: Revision['reviews'] = [];
-    this.reviews = await Promise.all(roster.map(async (r, i) => {
-      let artifacts = 0;
-      const brief = focused ? `${r.prompt}\n\nYou are the only reviewer on this fast plan. First check that the smallest plan satisfies the original request and preserves relevant contracts; flag missing required outcomes as well as unnecessary scope. Look for a concrete case where the proposed checks pass but a requested outcome fails.` : r.prompt;
-      const result = await this.reviewer(r.name, brief, i, count => { artifacts = count; });
-      reports[i] = { name: label(r.name)!, verdict: result.verdict, findings: result.findings?.map(f => f.need === true) ?? [], artifacts };
-      this.deps.telemetry?.revision({ ...revision, reviews: reports.filter(Boolean) });
-      return result;
-    }));
-    signal.throwIfAborted();
-    this.batch = skipped ? "skipped" : !roster.length || this.reviews.some(r => r.verdict === "unknown") ? "incomplete" : "complete";
-    if (this.kind.access === "read") writeFileSync(join(this.dir!, "reviewed-plan.md"), this.submission!, { mode: 0o600, flag: "wx" });
-    const status = !roster.length ? (skipped ? 'skipped' : 'inconclusive') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
-    this.deps.telemetry?.revision({ ...revision, status, ready: true, source: true, reviews: reports }, true);
-
+    const review = await this.runReview();
+    this.reviews.push(review);
+    this.deps.telemetry?.revision({ ...revision, status: review.verdict, review: { findings: review.findings?.map((f) => f.need === true) ?? [], artifacts: review.artifacts?.length ?? 0 } }, true);
   }
-  private async reviewer(name: string, prompt: string, slot: number, artifacts: (count: number) => void): Promise<ReviewRecord> {
-    const { driver, prompts, limits, root, semaphore } = this.deps;
-    const key = `${this.id}:r${this.round}:${slot}`;
-    this.deps.telemetry?.add(key, this.ref, `reviewer ${label(name)}`, this.id, { round: this.round, slot: slot + 1 });
-    const own = new AbortController();
-    const signal = AbortSignal.any([this.signal, own.signal]);
-    const write = this.kind.access === "write";
-    const scratch = join(this.dir!, `review-${this.round}-${name}`);
-    let box: ReturnType<typeof processTools> | undefined;
-    let conversation: Conversation<typeof ReviewReport> | undefined;
-    let completed = false;
-    let cancelled = false;
-    let release: (() => void) | undefined;
-    this.deps.sessions?.set(key, {
-      key, ref: this.ref, role: `reviewer.${name}`, label: `reviewer ${name} · round ${this.round}`, consequence: "Cancels this review; its verdict is recorded as unknown.",
-      runtime: () => conversation?.runtime, pending: () => conversation?.pendingChange,
-      cancel: async () => { cancelled = true; this.deps.telemetry?.state(key, 'cancelling'); own.abort(new Block("cancelled", "Review cancelled by Main")); return `Review ${name} cancelled`; },
-      configure: (change) => { if (!conversation) throw notStarted(`Reviewer ${name}`); return conversation.configure(change); },
-    });
-    try {
-      this.deps.telemetry?.state(key, 'queued');
-      const runtime = await this.deps.select(`reviewer.${name}`, this.title, signal);
-      release = await semaphore.acquire(signal);
-      if (runtime) this.launches.push({ role: `reviewer.${name}`, runtime, label: `round ${this.round}` });
-      this.deps.telemetry?.state(key, 'running');
-      let cwd = root;
-      if (write) {
-        await mkdir(scratch, { mode: 0o700 });
-        cwd = await snapshot(root, scratch, this.candidate!, signal);
-        box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(this.dir!, "artifacts", `r${this.round}-${name}`), services: limits.services } });
-      }
-      conversation = new Conversation({
-        driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
-        spec: { runtime, observe: this.deps.telemetry?.sink(key), name: `reviewer.${name}`, cwd, tools: [...readTools(cwd), ...(box?.tools ?? [])], system: `${prompts.reviewer}\n\n${prompt}\n\n${prompts.guard}`, log: (line) => this.log(`  review ${name} ${line}`) },
-        finish: { name: "report", description: "Return your independent review.", schema: ReviewReport },
-      });
-      const payload = {
-        request: this.task, kind: this.kind.name, round: this.round,
-        submission: this.submission,
-        ...(this.attachments.length ? { plans: this.attachments } : {}),
-        ...(write ? { commit: this.candidate, diffstat: this.diffstat } : {}),
+  private async runReview(): Promise<ReviewRecord> {
+    const { prompts, limits, root } = this.deps;
+    const round = this.round;
+    const candidate = this.candidate!;
+    const dir = this.dir!;
+    let saved: string[] = [];
+    const workspace = this.kind.access === "write" ? async (signal: AbortSignal): Promise<Workspace> => {
+      const scratch = join(dir, `review-${round}`);
+      await mkdir(scratch, { mode: 0o700 });
+      const cwd = await snapshot(root, scratch, candidate, signal);
+      const box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(dir, "artifacts", `r${round}`), services: limits.services } });
+      return {
+        cwd, tools: [...readTools(cwd), ...box.tools],
+        check: async (s) => { saved = box.saved; return await intact(cwd, candidate, s) ? undefined : "Reviewer changed tracked files or the checked-out commit"; },
+        close: async () => { await box.close().catch(() => {}); await rm(scratch, { recursive: true, force: true }).catch(() => {}); },
       };
-      const out = await conversation.run(JSON.stringify(payload, null, 2));
-      if (write && !(await intact(cwd, this.candidate!, signal))) return { name, verdict: "unknown", error: "Reviewer changed tracked files or the checked-out commit" };
-      completed = true;
-      artifacts(box?.saved.length ?? 0);
-      return { name, ...out, verdict: out.verdict as Verdict, artifacts: [...(out.artifacts ?? []), ...(box?.saved ?? [])] };
-    } catch (error) {
-      if (this.signal.aborted) throw error;
-      return { name, verdict: "unknown", error: cancelled ? "Review cancelled by Main" : `Reviewer error: ${errorText(error)}` };
-    } finally {
-      this.deps.sessions?.delete(key);
-      this.deps.telemetry?.state(key, this.signal.aborted || cancelled ? 'cancelled' : completed ? 'done' : 'failed');
-      own.abort(new Block("ended", "Review ended"));
-      release?.();
-      conversation?.dispose();
-      await box?.close().catch(() => {});
-      if (write) await rm(scratch, { recursive: true, force: true }).catch(() => {});
-    }
+    } : undefined;
+    const result = await runSubagent(this.children, {
+      key: `${this.id}:r${round}`, parent: this.id, ref: this.ref, role: "review", row: "review", review: { round },
+      label: `review · round ${round}`, title: this.title, consequence: "Cancels this review; it is recorded as inconclusive.",
+      system: prompts.review, schema: ReviewReport, description: "Return your independent review.", turns: limits.reviewerTurns, minutes: limits.reviewerMinutes,
+      payload: JSON.stringify({
+        request: this.task, kind: this.kind.name, round, submission: this.submission,
+        ...(this.attachments.length ? { plans: this.attachments } : {}),
+        ...(this.kind.access === "write" ? { commit: candidate, diffstat: this.diffstat } : {}),
+      }, null, 2),
+      cwd: root, signal: this.signal, log: (line) => this.log(`  review ${line}`), workspace,
+    });
+    this.signal.throwIfAborted();
+    if ("error" in result) return { round, verdict: "inconclusive", error: result.cancelled ? "Review cancelled by Main" : `Review error: ${result.error}` };
+    return { round, ...result.value, verdict: result.value.verdict as Verdict, artifacts: [...(result.value.artifacts ?? []), ...saved] };
   }
 
   /** Display-only round notice; `worq_list` holds the full findings. */
   digest() {
-    const write = this.kind.access === "write";
-    const head = `${this.headline} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
-    const where = write ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    return [head, where, `Review batch: ${this.batch ?? "incomplete"}`, ...(this.reviewedDigest ? [`Reviewed digest: ${this.reviewedDigest}`] : []), ...(this.recoverySha ? [`Recovery SHA ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []), "Reviews:",
-      ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }),
-      `Full findings: worq_list(${this.ref}). This notice does not authorize further action.`,
+    const close = "worq_send resumes this session with corrections; worq_cancel closes it. This notice does not authorize further action.";
+    if (this.exhausted) return [
+      `${this.headline} round ${this.round} parked: ${this.exhausted}. Nothing was submitted or reviewed.`,
+      `Last response: ${one(this.conversation?.last || "none", 1500)}`,
+      ...(this.recoverySha ? [`Partial commit ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []),
+      `worq_send resumes with a fresh budget; worq_cancel closes it.`,
+    ].join("\n");
+    const where = this.kind.access === "write" ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
+    return [`${this.headline} round ${this.round} parked · ${this.reviewed ? reviewStatus(this.review) : "unreviewed"}`, where,
+      ...(this.reviewed ? reviewLines(this.review, { ...DIGEST, label: `worq_list(${this.ref})` }) : []),
+      `Full findings: worq_list(${this.ref}). ${close}`,
     ].join("\n");
   }
 }

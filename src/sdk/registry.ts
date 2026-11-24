@@ -89,7 +89,7 @@ export async function createDriver(host: HostServices, config: Config, resources
         return next;
       };
       return {
-        prompt: (text, options) => handle.prompt(text, options),
+        prompt: (text) => handle.prompt(text),
         steer: handle.steer && ((text) => handle.steer!(text)),
         get streaming() { return handle.streaming; },
         get runtime() { return current; },
@@ -101,7 +101,6 @@ export async function createDriver(host: HostServices, config: Config, resources
           current = { ...next, ...handle.selection };
           spec.emit({ type: "log", text: `runtime changed by Main: ${current.model ?? "default model"}, thinking ${current.thinking ?? "uncontrolled"}` });
         },
-        checkpoint: () => handle.checkpoint?.(),
         dispose: () => handle.dispose(),
       };
     },

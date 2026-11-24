@@ -16,9 +16,7 @@ export function ops(kinds: string[]) {
       task: Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver. At-sign mentions are literal." }),
       title: Type.String({ minLength: 1, maxLength: 80, description: "A 2–4 word title summarizing this work" }),
       attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names or repo-relative paths under .agents/plans/" })),
-      reason: Type.Optional(text(400)),
-      mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("thorough")])),
-      verify: Type.Optional(Type.Boolean({ description: "execute only; false skips the verifier" })),
+      verify: Type.Optional(Type.Boolean({ description: "Reviewed kinds only; false skips the independent review" })),
     }),
     list: obj({ ref: Type.Optional(ref) }),
     send: obj({ ref, text: text(6000) }),
@@ -38,10 +36,10 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown,
   const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
     case "spawn": {
-      const { kind, task, verify, mode, reason, title, attach } = args as Static<Ops["spawn"]>;
-      const agent = await worq.spawn(kind, task, { verify, mode, reason, title, attach }, signal);
+      const { kind, task, verify, title, attach } = args as Static<Ops["spawn"]>;
+      const agent = await worq.spawn(kind, task, { verify, title, attach }, signal);
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
-      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its review digest or questions arrive as Worq notifications.`, data: { ref: agent.ref } };
+      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and parked digest arrive as Worq notifications.`, data: { ref: agent.ref } };
     }
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }

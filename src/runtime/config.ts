@@ -14,11 +14,10 @@ const RuntimeSchema = obj({ sdk: Type.Optional(name), model: modelRef, thinking 
 const presets = ["plan", "execute", "review"] as const;
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
 const Limits = obj({
-  agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), rounds: int(1, 20), asks: int(0, 20),
+  agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), asks: int(0, 20),
   agentTurns: int(1, 400), subagentTurns: int(1, 100), reviewerTurns: int(1, 200),
   agentMinutes: int(1, 600), subagentMinutes: int(1, 120), reviewerMinutes: int(1, 240), askMinutes: int(1, 1440),
-  checkpointSeconds: int(1, 120), runTurns: int(1, 10000), continuationTurns: int(0, 10000),
-  services: int(0, 8),
+  idleMinutes: int(1, 1440), services: int(0, 8),
 });
 const ConfigSchema = obj({
   plan: Type.Optional(RuntimeSchema),
@@ -30,10 +29,10 @@ const ConfigSchema = obj({
   limits: Type.Optional(Limits),
 });
 export const DEFAULT_LIMITS = {
-  agents: 4, subagents: 6, parallel: 4, rounds: 3, asks: 3,
+  agents: 4, subagents: 6, parallel: 4, asks: 3,
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
   agentMinutes: 30, subagentMinutes: 5, reviewerMinutes: 10, askMinutes: 15,
-  checkpointSeconds: 15, runTurns: 1000, continuationTurns: 0, services: 2,
+  idleMinutes: 60, services: 2,
 } satisfies Required<Static<typeof Limits>>;
 export type Limits = typeof DEFAULT_LIMITS;
 
@@ -82,7 +81,7 @@ export function loadConfig(agentDir: string, sdks: string[] = Object.keys(SDKS))
     approveExtensions: config.approveExtensions ?? false,
     sdks: [...new Set([...resolved.values()].map((r) => r.sdk))],
     runtime(role) {
-      const key = role === "agent.plan" ? "plan" : role === "agent.execute" ? "execute" : (role === "reviewer" || role.startsWith("reviewer.")) ? "review" : "";
+      const key = role === "agent.plan" ? "plan" : role === "agent.execute" ? "execute" : role === "review" ? "review" : "";
       return { ...(resolved.get(key) ?? MAIN) };
     },
   };

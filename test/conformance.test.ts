@@ -11,7 +11,7 @@ import { piAdapter, thinkingLevels } from "../src/sdk/pi.ts";
 import { Conversation, NUDGE } from "../src/session.ts";
 import { fakeHarness, FULL_CAPS, MINIMAL_CAPS, type FakeOptions, type Script } from "./fake.ts";
 
-const finish = { name: "submit", description: "Submit.", schema: obj({ value: text(4000) }) };
+const finish = { description: "Submit.", schema: obj({ value: text(4000) }) };
 const tools = (): Tool[] => [
   { name: "echo", description: "Echo.", parameters: obj({ value: text(20) }), run: () => ({ text: "ok", image: { mimeType: "image/png", data: "aGk=" } }) },
   { name: "strict", description: "Strict.", parameters: obj({ n: Type.Integer() }), run: () => "ok" },
@@ -115,14 +115,14 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     assert.deepEqual(await guarded(c.run("race")), { value: "raced" }, `${name}: a budget abort racing a settle returns the submission`);
     assert.equal(aborts(), before + 1, `${name}: the racing abort stops the turn once`);
   }
-  // end of run — terminal: a spent budget never prompts again
+  // end of run — per invocation: a spent budget fails that run without another prompt; the next run gets a fresh one
   {
     const prompts = (options.prompts ??= []);
     const c = open(make(caps), { turns: 1 });
-    assert.deepEqual(await c.run("submit"), { value: "one" });
-    const after = prompts.length;
-    await assert.rejects(c.run("submit"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
-    assert.equal(prompts.length, after, `${name}: a spent budget issues no prompt`);
+    const before = prompts.length;
+    await assert.rejects(c.run("refuse"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
+    assert.deepEqual(prompts.slice(before), ["refuse"], `${name}: a spent budget issues no further prompt`);
+    assert.deepEqual(await c.run("submit"), { value: "one" }, `${name}: a later invocation has a fresh budget`);
   }
   // end of run — caller abort: its reason wins, one stop, no result
   {
@@ -333,18 +333,18 @@ test("registry: createDriver routes by runtime and prepares the shared environme
   const seen: SessionSpec[] = [];
   const sdks = { pi: recordingSdk(FULL_CAPS, seen, () => "medium"), test: recordingSdk(FULL_CAPS, seen) };
   const review: Runtime = { name: "review", sdk: "test", model: "m/a", path: "/review", via: "/review" };
-  const config = configFor((role) => role === "reviewer.intent" ? review : { ...MAIN }, ["test"]);
+  const config = configFor((role) => role === "review" ? review : { ...MAIN }, ["test"]);
   const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
   const driver = await createDriver({}, config, resources, sdks);
-  for (const role of ["agent.plan", "subagent", "reviewer.intent"]) {
+  for (const role of ["agent.plan", "subagent", "review"]) {
     const handle = await driver.open(roleSpec(role));
     const spec = seen.at(-1)!;
-    assert.equal(spec.runtime.sdk, role === "reviewer.intent" ? "test" : "pi", `${role} routes to its runtime's sdk`);
+    assert.equal(spec.runtime.sdk, role === "review" ? "test" : "pi", `${role} routes to its runtime's sdk`);
     assert.match(spec.system, /^S\n\nOperator instructions a\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
     assert.ok(!spec.system.includes("Run lint"), `${role}: skill bodies load on demand`);
     assert.equal(await spec.tools.find((t) => t.name === "skill")!.run({ name: "lint" }, new AbortController().signal), "Run lint");
     assert.equal(spec.extensions.length, 1, `${role}: same extensions`);
-    assert.equal(spec.thinking, role === "reviewer.intent" ? undefined : "medium", "use the selected SDK's host thinking level when available");
+    assert.equal(spec.thinking, role === "review" ? undefined : "medium", "use the selected SDK's host thinking level when available");
     handle.dispose();
   }
   const override = { ...review, model: 'm/b', thinking: 'high' };

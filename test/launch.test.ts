@@ -52,22 +52,22 @@ test('harness changes refresh the model and levels; cancellation never confirms'
   s.input('a'); assert.equal((await b).thinking, undefined);
 });
 
-test('worker and selected reviewer each pick once for the sealed batch', async t => {
+test('worker and its review each pick once per launch', async t => {
   const { dir, root, state } = await repo();
   const config = loadConfig(dir), seen: Spec[] = [], picked: string[] = [];
-  const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, reviewer: async turn => { await turn.tool('report', pass); } }, seen);
+  const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, review: async turn => { await turn.tool('submit', pass); } }, seen);
   driver.catalog = async () => new Map([['pi', ['p/b']]]);
   let ready!: () => void;
   const next = () => new Promise<void>(resolve => { ready = resolve; });
   const worq = new Worq({ driver, config, prompts: loadPrompts(), state, cwd: root, select: async req => {
     picked.push(req.label); return { ...req.initial, model: 'p/b', thinking: 'high' };
-  }, notify(event) { if (event.type === 'review-ready') setImmediate(ready); } });
+  }, notify(event) { if (event.type === 'parked') setImmediate(ready); } });
   t.after(async () => { await worq.shutdown(); await rm(dir, { recursive: true, force: true }); });
   const first = next();
-  const agent = await worq.spawn('plan', 'Plan the change', { title: 'Review change', mode: 'fast' });
+  const agent = await worq.spawn('plan', 'Plan the change', { title: 'Review change' });
   await first;
-  assert.throws(() => agent.send('revise'), /review-ready/);
-  assert.deepEqual(seen.map(s => s.name), ['agent.plan', 'reviewer.subtraction']);
+  assert.equal(agent.state, 'parked');
+  assert.deepEqual(seen.map(s => s.name), ['agent.plan', 'review']);
   assert.equal(picked.length, seen.length);
   assert.ok(seen.every(s => s.runtime?.model === 'p/b' && s.runtime.thinking === 'high'));
   assert.match(worq.list(agent.ref), /"model":"p\/b"/);
@@ -112,7 +112,7 @@ test('repository and clean-write checks precede runtime selection; dirty plannin
   await writeFile(`${root}/app.py`, 'dirty');
   const picked: string[] = [];
   function at(cwd: string) {
-    const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, reviewer: async turn => { await turn.tool('report', pass); } });
+    const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, review: async turn => { await turn.tool('submit', pass); } });
     driver.catalog = async () => new Map();
     return new Worq({ driver, config: loadConfig(dir), prompts: loadPrompts(), state, cwd, select: async req => { picked.push(req.label); return req.initial; }, notify() {} });
   }
@@ -121,8 +121,8 @@ test('repository and clean-write checks precede runtime selection; dirty plannin
   await assert.rejects(outside.spawn('plan', 'check', { title: 'Outside repo' }), /repository/i);
   await assert.rejects(inside.spawn('execute', 'check', { title: 'Dirty execute' }), /commit or stash/i);
   assert.deepEqual(picked, []);
-  const plan = await inside.spawn('plan', 'check', { title: 'Dirty plan', mode: 'fast' });
-  await plan.done;
-  assert.equal(plan.state, 'review-ready');
+  const plan = await inside.spawn('plan', 'check', { title: 'Dirty plan' });
+  for (let i = 0; i < 400 && plan.state !== 'parked'; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(plan.state, 'parked');
   assert.equal(picked.length, 2);
 });

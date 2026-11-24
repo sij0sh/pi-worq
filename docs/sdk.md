@@ -1,6 +1,6 @@
 # SDKs
 
-An **SDK adapter** runs one Worq session (agent, PQ subagent or reviewer) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Pi is the only one that ships.
+An **SDK adapter** runs one Worq session (agent, PQ subagent or review) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Pi is the only one that ships.
 
 Adding an SDK = one file under `src/sdk/` + one record in `src/sdk/registry.ts`. Nothing in `src/agent.ts`, `src/worq.ts`, `src/session.ts`, `src/runtime/`, the prompts or the four tools changes.
 
@@ -61,7 +61,7 @@ interface SessionSpec {
   signal: AbortSignal;            // aborts opening
 }
 interface Handle {
-  prompt(text, { toolFree? }): Promise<"completed" | "preflight-failed" | "failed" | "aborted">;
+  prompt(text): Promise<"completed" | "preflight-failed" | "failed" | "aborted">;
   steer?(text): Promise<void>;    // optional; absent or throwing → core queues
   readonly streaming: boolean;
   abort(): Promise<void>;

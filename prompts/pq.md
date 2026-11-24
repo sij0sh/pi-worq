@@ -6,7 +6,7 @@ Recursive question: **What remains unresolved before I can answer my assigned qu
 
 Read only what moves the answer. Stop as soon as the answer is supported; do not widen the question or design a solution.
 
-Answer with `answer`, keeping it under 150 words:
+Answer with `submit`, keeping it under 150 words:
 - `answer`: the direct answer, citing path:line where you can.
 - `basis`: observed (you saw it), documented (a doc says so) or assumed.
 - `unresolved`: what you could not establish.

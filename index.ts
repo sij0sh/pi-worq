@@ -22,35 +22,35 @@ import { isRef, Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
 const ENABLED = "worq-enabled";
-const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "checkpoint" || type === "failed" || type === "review-ready";
+const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "failed" || type === "parked";
 
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background Pi SDK agent of a kind. Requires a 2–4 word title and returns an exact readable name; independent reviewers run automatically on submit (verify:false skips execute review only).",
+    description: "Start a background SDK agent of a kind. Requires a 2–4 word title and returns an exact readable name; reviewed kinds get one independent review per submission (verify:false skips it).",
     guidelines: [
-      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title, the original request and independent review. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Use fast for bounded, reversible plans; keep the full roster when distinct lenses could change a consequential decision. Do not infer write permission from a bare request.",
+      "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request.",
     ],
   },
   worq_list: {
     op: "list",
     description: "List Worq agents (no ref) or show one agent in full: plan path, branch, PQs, reviews and recent activity.",
     guidelines: [
-      "Drive asks, checkpoints, review and authorized repair without polling. During planning answer from evidence or use conservative provisional assumptions or alternatives; surface unresolved preferences with the reviewed plan.",
+      "Drive asks and parked agents without polling. During planning answer from evidence or use conservative provisional assumptions or alternatives; surface unresolved preferences with the reviewed plan.",
       "Even for ‘plan and execute’, present the reviewed plan before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
-      "Review-ready is not a pass. Obtain affirmative verification of the exact candidate before reporting execution success, including execute only. Reverify after changes. Without verification report unverified and leave unmerged; Main merges manually only with explicit merge authority.",
+      "Parked is not a pass. Obtain affirmative verification of the exact candidate before reporting execution success, including execute only. Reverify after changes. Without verification report unverified and leave unmerged; Main merges manually only with explicit merge authority.",
     ],
   },
   worq_send: {
     op: "send",
-    description: "Send text to an agent: steers it while running, answers its open question while waiting.",
+    description: "Send text to an agent: steers it while running, answers its open question while waiting, resumes its session with a fresh budget while parked.",
     guidelines: [
-      "Review-ready is terminal. Main adjudicates the sealed findings on evidence. For required changes or incomplete review, default to a fresh plan with the prior artifact attached and fresh independent review. Only Main may authorize a one-shot material pivot after a complete plan batch: send /finalize followed by JSON with materialPivot:true, directionSettled:true, independentReviewRequired:false, reviewedDigest, decision, and unresolved (array). The separate result is unreviewed and requires explicit adoption for authorized execution.",
+      "A parked agent keeps its session (and worktree) until closed. Main alone decides what follows a submission and its review: accept and close; resume the same agent with targeted corrections (worq_send); spawn a fresh agent for a fundamentally different approach; or ask the user to settle a decision. Each resubmission gets one fresh independent review.",
     ],
   },
   worq_cancel: {
     op: "cancel",
-    description: "Close or cancel an agent (or all): stops it, its PQ subagents and reviewers, removes its worktree and keeps its branch.",
+    description: "Close a parked agent or cancel a running one (or all): stops it, its PQ subagents and review, removes its worktree and keeps its branch.",
     guidelines: [
       "Worq never merges. If the user authorized landing, verify the candidate before merging it by hand; close or cancel with worq_cancel.",
     ],
@@ -67,7 +67,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     try { workflows = loadWorkflows(agentDir(), prompts.kinds); }
     catch (error) { workflows = { dir: join(agentDir(), "workflows"), kinds: new Map(), problems: [{ path: join(agentDir(), "workflows"), message: errorText(error) }] }; }
     const catalog: ReadonlyMap<string, Kind> = new Map([...prompts.kinds, ...workflows.kinds]);
-    const spawnable = [...catalog.values()].filter((kind) => !kind.workflow?.userOnly);
+    const spawnable = [...catalog.values()].filter((kind) => !kind.userOnly);
     const table = ops(spawnable.map((kind) => kind.name));
     const kinds = spawnable.map((kind) => `${kind.name}: ${kind.description}`).join("; ");
     let warned = false;
@@ -182,7 +182,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         return;
       }
       const list = [...workflows.kinds.values()];
-      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access}${kind.workflow?.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
+      const labels = new Map(list.map((kind) => [`${kind.name} · ${kind.access}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
       const choice = await ctx.ui.select("Launch workflow", [...labels.keys()]);
       if (choice === undefined) return;
       const kind = labels.get(choice);
@@ -247,7 +247,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       },
     });
 
-    /** Dashboard controls for one live session (owner, PQ or reviewer). One dialog at a time. */
+    /** Dashboard controls for one live session (owner, PQ or review). One dialog at a time. */
     let acting = false;
     async function act(ctx: ExtensionContext, key: string, action: SessionAction) {
       if (closing || acting || ctx.mode !== 'tui' || !instance) return;

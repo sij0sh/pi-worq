@@ -15,7 +15,7 @@ import { Conversation, NUDGE } from "../src/session.ts";
 import { fakeDriver, pass, planSubmission, repo, setup, type Script } from "./fake.ts";
 
 const never = new AbortController().signal;
-const finish = { name: "done", description: "Finish.", schema: obj({ value: text(20) }) };
+const finish = { description: "Finish.", schema: obj({ value: text(20) }) };
 const conversation = (script: Parameters<typeof fakeDriver>[0][string], pending?: () => number) => new Conversation({
   driver: fakeDriver({ x: script }), signal: never, turns: 10, minutes: 1, finish, pending,
   spec: { name: "x", cwd: "/", system: "", tools: [], log() {} },
@@ -23,20 +23,20 @@ const conversation = (script: Parameters<typeof fakeDriver>[0][string], pending?
 
 test("conversation: one settlement nudge, rejected finish is explained, then fails", async () => {
   const texts: string[] = [];
-  const ok = conversation(async (turn) => { texts.push(turn.text); if (turn.text === NUDGE) await turn.tool("done", { value: "v" }); });
+  const ok = conversation(async (turn) => { texts.push(turn.text); if (turn.text === NUDGE) await turn.tool("submit", { value: "v" }); });
   assert.deepEqual(await ok.run("go"), { value: "v" });
   assert.deepEqual(texts, ["go", NUDGE]);
 
   const seen: string[] = [];
-  const bad = conversation(async (turn) => { seen.push(turn.text); await turn.tool("done", { value: "" }); });
-  await assert.rejects(bad.run("go"), /submission rejected: Invalid done arguments/);
-  assert.match(seen[1], /Your done call was rejected/);
+  const bad = conversation(async (turn) => { seen.push(turn.text); await turn.tool("submit", { value: "" }); });
+  await assert.rejects(bad.run("go"), /submission rejected: Invalid submit arguments/);
+  assert.match(seen[1], /Your submit call was rejected/);
 });
 
 test("conversation: waits for pending work and takes delivered messages in order", async () => {
   let open = 1;
   const texts: string[] = [];
-  const c = conversation(async (turn) => { texts.push(turn.text); if (turn.text === "answer") await turn.tool("done", { value: "ok" }); }, () => open);
+  const c = conversation(async (turn) => { texts.push(turn.text); if (turn.text === "answer") await turn.tool("submit", { value: "ok" }); }, () => open);
   const result = c.run("start");
   await new Promise((r) => setTimeout(r, 20));
   open = 0;
@@ -45,39 +45,43 @@ test("conversation: waits for pending work and takes delivered messages in order
   assert.deepEqual(texts, ["start", "answer"]);
 });
 
-test("conversation: turn limit aborts", async () => {
-  const c = new Conversation({ driver: fakeDriver({ x: () => {} }), signal: never, turns: 1, minutes: 1, finish,
+test("conversation: turn limit aborts one invocation; the next gets a fresh budget and tools are fenced between runs", async () => {
+  let late: (() => Promise<string>) | undefined;
+  const c = new Conversation({ driver: fakeDriver({ x: async (turn) => {
+    late ??= () => turn.tool("submit", { value: "late" });
+    if (turn.text === "again") await turn.tool("submit", { value: "ok" });
+  } }), signal: never, turns: 1, minutes: 1, finish,
     spec: { name: "x", cwd: "/", system: "", tools: [], log() {} } });
   await assert.rejects(c.run("go"), /turn limit/);
+  assert.match(await late!(), /Tool dispatch is closed/);
+  assert.deepEqual(await c.run("again"), { value: "ok" });
 });
 
 test("config: defaults, role overrides, invalid keys name the file", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "worq-config-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   assert.deepEqual(loadConfig(dir).limits, DEFAULT_LIMITS);
-  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ plan: { model: "a/m" }, review: { model: "b/r" }, limits: { rounds: 5 } }));
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ plan: { model: "a/m" }, review: { model: "b/r" }, limits: { idleMinutes: 5 } }));
   const config = loadConfig(dir);
-  assert.equal(config.limits.rounds, 5);
+  assert.equal(config.limits.idleMinutes, 5);
   assert.equal(config.limits.agents, DEFAULT_LIMITS.agents);
   assert.equal(config.runtime("agent.plan").model, "a/m");
-  assert.equal(config.runtime("reviewer.pair").model, "b/r");
-  assert.equal(config.runtime("reviewer.intent").model, "b/r");
-  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { rounds: 0 } }));
-  assert.throws(() => loadConfig(dir), /pi-worq\.json: \/limits\/rounds/);
+  assert.equal(config.runtime("review").model, "b/r");
+  await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ limits: { idleMinutes: 0 } }));
+  assert.throws(() => loadConfig(dir), /pi-worq\.json: \/limits\/idleMinutes/);
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ agents: { plan: {} }, scq: {} }));
   assert.throws(() => loadConfig(dir), /agents, scq are from the old Worq format/);
   await writeFile(join(dir, "pi-worq.json"), JSON.stringify({ land: "auto" }));
   assert.throws(() => loadConfig(dir), /pi-worq\.json/);
 });
 
-test("prompts: kinds and reviewer rosters are data", () => {
+test("prompts: kinds are profiles; one review prompt", () => {
   const prompts = loadPrompts();
   assert.deepEqual([...prompts.kinds.keys()].sort(), ["execute", "plan"]);
   assert.equal(prompts.kinds.get("plan")!.access, "read");
   assert.equal(prompts.kinds.get("execute")!.access, "write");
-  assert.ok([...prompts.kinds.values()].every((kind) => !kind.workflow));
-  assert.deepEqual(prompts.reviewers("plan").map((r) => r.name), ["decision", "defeater", "pair", "subtraction"]);
-  assert.deepEqual(prompts.reviewers("execute").map((r) => r.name), ["intent"]);
+  assert.ok([...prompts.kinds.values()].every((kind) => kind.review && !kind.userOnly && !kind.skill));
+  assert.match(prompts.review, /What consequential reason is there not to accept this result as-is\?/);
 });
 
 test("tools are hidden until /worq, restored on resume, and share one schema with the CLI", async (t) => {
@@ -85,7 +89,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const agentDir = join(dir, "agent");
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(agentDir);
-  await writeFile(join(agentDir, "pi-worq.json"), JSON.stringify({ limits: { agentTurns: 2, reviewerTurns: 2, runTurns: 5 } }));
+  await writeFile(join(agentDir, "pi-worq.json"), JSON.stringify({ limits: { agentTurns: 2, reviewerTurns: 2 } }));
   process.env.WORQ_STATE_DIR = state;
   const tools: { name: string; defaultActive?: boolean; parameters: unknown; execute: Function }[] = [];
   const handlers: Record<string, Function> = {};
@@ -108,15 +112,15 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
-  const fastReviews: string[] = [];
+  const resumedReviews: string[] = [];
   const scripts: Record<string, Script> = {
     "agent.plan": async turn => {
-      if (turn.text.startsWith("Main reviewed round 1")) {
-        assert.match(turn.text, /Remove the watcher/);
+      if (turn.text === "Main: Remove the watcher") {
         await turn.tool("submit", { ...planSubmission, summary: "Use one direct report, no background process." });
         return;
       }
-      if (!turn.text.startsWith("{") || JSON.parse(turn.text).task === "Hand it off") return;
+      if (!turn.text.startsWith("{")) return;
+      if (JSON.parse(turn.text).task === "Hand it off") { turn.steered.push("more"); return; }
       if (JSON.parse(turn.text).task === "Fail it") throw new Error("Fixture failure");
       if (JSON.parse(turn.text).task === "Plan it") {
         assert.match(await turn.tool("ask_main", { question: "Which greeting?" }), /Use HELLO/);
@@ -124,12 +128,10 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
       await turn.tool("submit", planSubmission);
     },
     "agent.execute": async turn => { await turn.tool("submit", { summary: "No changes" }); },
-    reviewer: async turn => {
-      if (JSON.parse(turn.text).request === "Simplify the report") {
-        assert.match(turn.system, /flag missing required outcomes as well as unnecessary scope/);
-        fastReviews.push(turn.spec.name);
-      }
-      await turn.tool("report", pass);
+    review: async turn => {
+      const payload = JSON.parse(turn.text);
+      if (payload.request === "Simplify the report") resumedReviews.push(payload.submission);
+      await turn.tool("submit", pass);
     },
   };
   createWorq({ driver: () => fakeDriver(scripts), agentDir: () => agentDir })(pi as never);
@@ -197,51 +199,50 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.ok(active.includes("worq_send") && !active.includes("worq_spawn"));
   await assert.rejects(spawn.execute("id", { kind: "plan", title: "Surface test", task: "blocked" }, undefined, undefined, ctx), /off/);
   await command!(`send ${ref} Use HELLO`, ctx);
-  const ready = await waitFor("review-ready");
+  const ready = await waitFor("parked");
   await inspect!(ref, inspectorCtx);
   assert.deepEqual(ready.options, { triggerTurn: true, deliverAs: "followUp" });
   const warnings = notices.filter(({ message }) => message.details.ref === ref && message.details.type === "warning");
   assert.ok(warnings.some(({ message }) => /one further turn remains/.test(message.content)));
-  assert.ok(warnings.some(({ message }) => /no additional turns can be granted/.test(message.content)));
   assert.ok(warnings.every(({ options }) => !options.triggerTurn && options.deliverAs === undefined));
-  assert.ok(!notices.some(({ message }) => message.details.ref === ref && message.details.type === "checkpoint"));
   const assistant = { role: "assistant" };
   const ask = { ...asked.message, role: "custom" };
-  const grant = { role: "custom", customType: "worq", details: { type: "checkpoint" } };
+  const parked = { ...ready.message, role: "custom" };
   const passive = warnings.map(({ message }) => ({ ...message, role: "custom" }));
-  assert.deepEqual(handlers.context({ messages: [assistant, ...passive, ask, grant] }).messages, [assistant, ask, grant]);
-  assert.equal(handlers.context({ messages: [assistant, ask, grant] }), undefined);
+  assert.deepEqual(handlers.context({ messages: [assistant, ...passive, ask, parked] }).messages, [assistant, ask, parked]);
+  assert.equal(handlers.context({ messages: [assistant, ask, parked] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
-  assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /already review-ready/);
+  assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /surface-test closed/);
   assert.ok(!active.some(name => name.startsWith("worq_")));
   await command!("", ctx);
   assert.ok(active.includes("worq_spawn"));
-  const fastRef = "surface-test-2";
-  const launched = await run(process.execPath, [cli, "spawn", "plan", "--title", "Surface test", "--attach", ref, "--mode", "fast", "--attach", `.agents/plans/plan-${ref}.md`, "Simplify the report"], { env });
+  const nextRef = "surface-test-2";
+  const launched = await run(process.execPath, [cli, "spawn", "plan", "--title", "Surface test", "--attach", ref, "--attach", `.agents/plans/plan-${ref}.md`, "Simplify the report"], { env });
   assert.match(launched.stdout, /Surface test \(surface-test-2\).*plan-surface-test\.md/);
   const waitForRound = async (round: number) => {
-    const ready = () => notices.some(({ message }) => message.details.ref === fastRef && message.details.type === "review-ready" && message.content.includes(`round ${round} review-ready`));
+    const ready = () => notices.some(({ message }) => message.details.ref === nextRef && message.details.type === "parked" && message.content.includes(`round ${round} parked`));
     for (let i = 0; i < 100 && !ready(); i++) await new Promise(r => setTimeout(r, 25));
-    assert.ok(ready(), `expected fast plan round ${round}`);
+    assert.ok(ready(), `expected plan round ${round}`);
   };
   await waitForRound(1);
-  assert.match((await run(process.execPath, [cli, "list", fastRef], { env })).stdout, /review: focused \(subtraction\)/);
-  await command!(`send ${fastRef} Remove the watcher`, ctx);
-  assert.deepEqual(fastReviews, ["reviewer.subtraction"]);
-  assert.match((await run(process.execPath, [cli, "list", fastRef], { env })).stdout, /review-ready · round 1/);
+  await command!(`send ${nextRef} Remove the watcher`, ctx);
+  await waitForRound(2);
+  assert.equal(resumedReviews.length, 2, "each submission gets one review");
+  assert.match(resumedReviews[1], /no background process/);
+  assert.match((await run(process.execPath, [cli, "list", nextRef], { env })).stdout, /parked · round 2/);
   assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, / · execute · /);
-  await command!(`cancel ${fastRef}`, ctx);
+  await command!(`cancel ${nextRef}`, ctx);
   const failedRun = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Fail it" }, undefined, undefined, ctx);
   for (let i = 0; i < 100 && !notices.some(n => n.message.details.type === "failed"); i++) await new Promise(r => setTimeout(r, 15));
   assert.ok(notices.some(n => n.message.details.type === "failed" && n.message.details.ref === failedRun.details.ref));
   assert.match(widget?.render(34).join("\n") ?? "", /Surface test failed Main/);
   assert.match(widget?.render(20)[0] ?? "", /0 live/);
-  const handed = await spawn.execute("id", { kind: "plan", title: "Hand off surface", task: "Hand it off" }, undefined, undefined, ctx);
-  const handoffNotices = () => notices.filter(n => n.message.details.type === "handed-off" && n.message.details.ref === handed.details.ref);
-  for (let i = 0; i < 100 && !handoffNotices().length; i++) await new Promise(r => setTimeout(r, 15));
-  assert.equal(handoffNotices().length, 1);
-  assert.deepEqual(handoffNotices()[0].options, { triggerTurn: false });
-  assert.match((await run(process.execPath, [cli, "list", handed.details.ref], { env })).stdout, /handed-off[\s\S]*Unreviewed handoff:/);
+  const spent = await spawn.execute("id", { kind: "plan", title: "Exhaust surface", task: "Hand it off" }, undefined, undefined, ctx);
+  const spentNotices = () => notices.filter(n => n.message.details.type === "parked" && n.message.details.ref === spent.details.ref);
+  for (let i = 0; i < 100 && !spentNotices().length; i++) await new Promise(r => setTimeout(r, 15));
+  assert.equal(spentNotices().length, 1);
+  assert.deepEqual(spentNotices()[0].options, { triggerTurn: true, deliverAs: "followUp" });
+  assert.match((await run(process.execPath, [cli, "list", spent.details.ref], { env })).stdout, /parked[\s\S]*Parked without submission: .*turn limit/);
   await handlers.session_shutdown({}, ctx);
   assert.equal(widget, undefined);
   delete process.env.WORQ_STATE_DIR;
@@ -300,8 +301,8 @@ test("the /worq workflow launcher selects a workflow, takes optional instruction
   const last = (pattern: RegExp) => alerts.map((alert) => alert.text).filter((text) => pattern.test(text)).at(-1);
   const launchedRef = () => /as ([a-z0-9-]+)\./.exec(last(/^Launched workflow /) ?? "")?.[1];
   const settle = async (ref: string) => {
-    for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "review-ready"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "review-ready"), `expected review-ready for ${ref}`);
+    for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "parked"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "parked"), `expected parked for ${ref}`);
   };
 
   // Every workflow is in the menu (user-only marked); invalid siblings are reported.
@@ -378,10 +379,9 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq } = setup(root, state, {});
   const table = ops(["plan", "execute"]);
-  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "kind", "mode", "reason", "task", "title", "verify"]);
+  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "kind", "task", "title", "verify"]);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", title: "Surface test", task: "x" }), /kind/);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: "no" }), /verify/);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: false }), /verify:false applies to execute only/);
   assert.equal(worq.size, 0, "a refused spawn leaves no agent");
   await assert.rejects(dispatch(worq, table, "send", { ref: "zz", text: "x" }), /ref/);
   await assert.rejects(dispatch(worq, table, "nope", {}), /Unknown operation/);

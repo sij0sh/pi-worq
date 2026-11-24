@@ -4,21 +4,15 @@ import type { Theme } from '@earendil-works/pi-coding-agent';
 import type { Outcome, Row, Telemetry } from './telemetry.ts';
 
 const age = (time: number) => elapsed(Date.now()-time);
-const active = (r: Row) => !['closed', 'handed-off', 'failed', 'cancelled', 'done', 'answered'].includes(r.state);
+const active = (r: Row) => !['closed', 'failed', 'cancelled', 'done'].includes(r.state);
 const headline = (r: Row) => `${r.question ?? (r.title ? `${r.title} (${r.ref})` : r.ref)} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
 const fit = (s: string, w: number) => w > 0 ? truncateToWidth(s, w, w >= 3 ? '…' : '') : '';
 const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' : active(r) ? 'accent' : 'muted';
 const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
 export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
-const compact = (r: Row) => `${r.title ?? r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
-const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}.${review.slot}`;
-function childIdentity(row: Row, width: number) {
-  if (!row.review) return `${row.role} ${row.state}`;
-  const id = reviewId(row.review);
-  const nameWidth = width - visibleWidth(`${id} ${row.state}`) - 1;
-  const name = nameWidth > 0 ? truncateToWidth(row.role.slice('reviewer '.length), nameWidth, '') : '';
-  return `${id}${name ? ` ${name}` : ''} ${row.state}`;
-}
+const compact = (r: Row) => `${r.title ?? r.ref} ${r.state}${r.actor ? ` ${r.actor}` : ''}`;
+const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}`;
+const childIdentity = (row: Row) => `${row.review ? `${reviewId(row.review)} review` : row.role} ${row.state}`;
 const identity = (r: Row, width: number) => width < 34 ? compact(r) : headline(r);
 export function outcome(o?: Outcome): string {
   if (!o) return 'outcome not recorded';
@@ -159,10 +153,8 @@ export class Inspector {
     return ['Session-only exact revision evidence', 'Full finding text not copied · merge not observed',
       ...(this.data.evidenceGap ? [`Evidence gap · ${this.data.evidenceGap} settled rounds evicted session-wide`] : []),
       ...(!live && !history.length ? ['Evidence not recorded'] : []), ...[...(live ? [live] : []), ...history].flatMap(r => [
-        `Round ${r.round} · ${r.ready ? 'review-ready · ' : ''}${r.status === 'pass' ? 'review roster pass' : r.status}`, 'sha' in r.identity ? `SHA ${r.identity.sha}` : `Digest ${r.identity.digest}`,
-        r.source ? `Matching run record: ${row.ref} · round ${r.round} (/worq list)` : 'Historical prose unavailable',
-        ...(r.rewritten ? ['Worq rewrote the plan location'] : []),
-        ...r.reviews.flatMap(v => [`${v.name}: ${v.verdict} · ${v.findings.length} findings · ${v.artifacts} saved artifacts`, ...v.findings.map((need, i) => `  #${i + 1}${need ? ' · requester needed' : ''}`)]),
+        `Round ${r.round} · review ${r.status}`, 'sha' in r.identity ? `SHA ${r.identity.sha}` : `Digest ${r.identity.digest}`,
+        ...(r.review ? [`${r.review.findings.length} findings · ${r.review.artifacts} saved artifacts`, ...r.review.findings.map((need, i) => `  #${i + 1}${need ? ' · requester needed' : ''}`)] : []),
       ])];
   }
   render(width: number): string[] {
@@ -201,7 +193,7 @@ export class Inspector {
     const roster = this.hitRows.map(r => {
       const prefix = `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}`;
       const budget = rosterWidth - visibleWidth(prefix);
-      const text = r.parent ? (r.question ?? childIdentity(r, budget)) : identity(r, budget);
+      const text = r.parent ? (r.question ?? childIdentity(r)) : identity(r, budget);
       const lane = activity && wide ? (lanes.get(r.key)?.join('') ?? '············') : '';
       const name = fit(prefix + text, rosterWidth - (lane ? 13 : 0));
       return { r, text: lane ? name + ' '.repeat(rosterWidth-12-visibleWidth(name)) + lane : name };

@@ -15,7 +15,7 @@ import { createDriver, type HostServices } from "../src/sdk/registry.ts";
 import { thinkingLevels } from "../src/sdk/pi.ts";
 import { Conversation } from "../src/session.ts";
 import { Telemetry } from "../src/telemetry.ts";
-import { FULL_CAPS, pass, planSubmission, repo, setup } from "./fake.ts";
+import { FULL_CAPS, planSubmission, repo, setup } from "./fake.ts";
 
 const finish = { name: "submit", description: "Submit.", schema: obj({ value: text(100) }) };
 async function until(check: () => boolean, deadline = 5000) {
@@ -176,24 +176,21 @@ test("controls: cancelling one PQ leaves its siblings and parent running; cancel
   assert.throws(() => worq.session(agent.ref), /no longer live/);
 });
 
-test("controls: cancelling one reviewer records an unknown verdict; the round still settles", async (t) => {
+test("controls: cancelling the review records it inconclusive; the agent still parks", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   let hung = 0;
   const { worq, next } = setup(root, state, {
     "agent.plan": async (turn) => { await turn.tool("submit", planSubmission); },
-    "reviewer.decision": async () => { hung++; await new Promise(() => {}); },
-    reviewer: async (turn) => { await turn.tool("report", pass); },
+    review: async () => { hung++; await new Promise(() => {}); },
   }, {}, new Telemetry());
   const agent = await worq.spawn("plan", "Plan it", { title: "Reviewer cancel" });
   await until(() => hung === 1);
-  const reviewer = [...worq.sessions.values()].find((s) => s.role === "reviewer.decision")!;
-  assert.match(reviewer.consequence, /unknown/);
-  await reviewer.cancel();
-  await next("review-ready", agent.ref);
-  const decision = agent.reviews.find((r) => r.name === "decision")!;
-  assert.equal(decision.verdict, "unknown");
-  assert.equal(decision.error, "Review cancelled by Main");
-  assert.ok(agent.reviews.filter((r) => r.name !== "decision").every((r) => r.verdict === "pass"), "siblings unaffected");
+  const review = [...worq.sessions.values()].find((s) => s.role === "review")!;
+  assert.match(review.consequence, /inconclusive/);
+  await review.cancel();
+  await next("parked", agent.ref);
+  assert.equal(agent.review?.verdict, "inconclusive");
+  assert.equal(agent.review?.error, "Review cancelled by Main");
   await worq.cancel(agent.ref);
 });

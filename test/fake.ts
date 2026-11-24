@@ -53,7 +53,7 @@ export const MINIMAL_CAPS: Capabilities = {
   turnUnit: "prompt",
 };
 
-/** Scripts keyed by spec.name (agent.plan, subagent, reviewer.intent …); the first matching prefix wins. */
+/** Scripts keyed by spec.name (agent.plan, subagent, review …); the first matching prefix wins. */
 export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], caps: Capabilities = FULL_CAPS, options: FakeOptions = {}): Driver {
   const open = async (spec: Spec): Promise<CoreHandle> => {
     seen.push(spec);
@@ -116,7 +116,6 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
         controller.abort();
         if (options.abort !== "dangle") { stopRequested = true; release?.(); }
       },
-      checkpoint: () => spec.name === "agent.plan" ? "fake-active-branch" : undefined,
       dispose() {},
     };
     return handle;
@@ -164,9 +163,6 @@ export function setup(root: string, state: string, scripts: Record<string, Scrip
 
 export const planSubmission = {
   summary: "Change the greeting to uppercase in app.py.",
-  criteria: ["Running app.py prints HELLO"],
-  decisions: [{ id: "D1", choice: "Edit the literal", basis: "observed app.py:1", alternative: "call .upper()", tradeoff: "none material", revisit: "if greeting becomes dynamic" }],
-  assumptions: [],
-  tree: "Root: what decides the approach? → greeting source (observed app.py:1) → literal",
+  report: "**Criteria:** running app.py prints HELLO\n\n**Decisions:** edit the literal (observed app.py:1); alternative .upper(), no material tradeoff",
 };
 export const pass = { verdict: "pass", summary: "No consequential findings", findings: [] };

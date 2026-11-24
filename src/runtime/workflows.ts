@@ -1,13 +1,13 @@
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { Block, errorText } from "../contracts.ts";
-import type { Kind } from "../prompts.ts";
+import { profile, type Kind } from "../prompts.ts";
 import { exists, loadSkill, outsideCheckout } from "./skills.ts";
 
 /**
  * Workflows are skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write). No reviewers.
+ * `access` (`read` explicit; absent = write), `review` (true = independent review; absent = false).
  */
 const NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export interface WorkflowProblem { path: string; message: string }
@@ -20,14 +20,9 @@ function load(root: string, path: string, name: string, builtins: ReadonlyMap<st
   const { skill, meta } = loadSkill(root, path);
   if (meta.name !== undefined && meta.name !== name) return `name "${meta.name}" must match the folder name "${name}"`;
   if (!meta.description?.trim()) return "description is required (shown by /worq workflow and worq_spawn)";
-  if (Object.hasOwn(meta, "reviewers")) return 'workflows run no reviewers; remove "reviewers"';
-  if (Object.hasOwn(meta, "invocation")) return 'use "disable-model-invocation: true" instead of "invocation"';
-  const disable = meta["disable-model-invocation"] ?? "false";
-  if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
-  const access = meta.access ?? "write";
-  if (access !== "read" && access !== "write") return "access must be read or write (absent = write)";
   if (!skill.body) return "SKILL.md body is blank";
-  return { name, access, prompt: skill.body, description: skill.description, workflow: { skill, userOnly: disable === "true" } };
+  try { return profile(name, meta, skill.body, { access: "write", review: false }, skill); }
+  catch (error) { return errorText(error); }
 }
 
 /** A broken workflow is reported and skipped; its siblings still load. A missing directory is empty. */

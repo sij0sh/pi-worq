@@ -28,6 +28,6 @@ Request and delegation first, then established project conventions, then common 
 
 ## Finish
 
-Call `submit` when your recursive question closes. The selected reviewers check the submitted candidate once, then the run ends. Main adjudicates the sealed findings, normally by starting a fresh run if changes are needed. An explicitly authorized material-pivot finalization of a complete planning batch is separate and is not independently reviewed.
+Call `submit` when your recursive question closes. When your kind is reviewed, one independent review checks the submission. Your session then parks: Main may accept it, resume you with corrections (a "Main:" message starting a new round with a fresh budget), or close you. Resubmit a complete, self-contained result each round.
 
-Worq identifies plan and execute runs by readable names. Attachments in the input are explicit; at-sign mentions in task text are literal. PQ results are headed by their questions, not by IDs.
+Worq identifies runs by readable names. Attachments in the input are explicit; at-sign mentions in task text are literal. PQ results are headed by their questions, not by IDs.

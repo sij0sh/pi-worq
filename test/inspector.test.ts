@@ -51,7 +51,7 @@ test('PQ gets a width-safe question preview and complete detail', () => {
   assert.doesNotMatch(panel.render(120).join('\n'), /private-owner|private-child/);
 });
 
-test('plan revisions bind exact reviewed bytes; keep legacy text out of the projection', async t => {
+test('plan revisions bind exact reviewed bytes per round; keep private text out of the projection', async t => {
   const { root, state, dir } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const data = new Telemetry();
@@ -60,28 +60,26 @@ test('plan revisions bind exact reviewed bytes; keep legacy text out of the proj
   let round = 0;
   const { worq, next } = setup(root, state, {
     'agent.plan': async turn => { await turn.tool('submit', { ...planSubmission, summary: `Report Secret ${++round}` }); },
-    reviewer: async turn => {
+    review: async turn => {
       const { submission } = JSON.parse(turn.text);
       captured.push(submission);
-      await turn.tool('report', { ...pass, summary: 'Reviewer Secret' });
+      await turn.tool('submit', { ...pass, summary: 'Reviewer Secret' });
     },
   }, {}, data);
   t.after(() => worq.shutdown());
   const agent = await worq.spawn('plan', task, { title: 'Inspect plans' });
-  await next('review-ready', agent.ref);
-  assert.throws(() => worq.send(agent.ref, 'Try a second round'), /review-ready/);
-  const fresh = await worq.spawn('plan', task, { title: 'Inspect plans again' });
-  await next('review-ready', fresh.ref);
-  assert.notEqual(agent.plan!.path, fresh.plan!.path);
+  await next('parked', agent.ref);
+  const first = await readFile(join(root, agent.plan!.path), 'utf8');
+  worq.send(agent.ref, 'Try a second round');
+  await next('parked', agent.ref, 2);
+  const second = await readFile(join(root, agent.plan!.path), 'utf8');
+  assert.notEqual(first, second);
   assert.equal(data.settled.length, 2);
-  for (const run of [agent, fresh]) {
-    const bytes = await readFile(join(root, run.plan!.path), 'utf8');
-    assert.ok(captured.includes(bytes));
-    assert.deepEqual(data.settled.find(r => r.run === run.id)?.identity, { digest: createHash('sha256').update(bytes).digest('hex') });
+  for (const [i, bytes] of [first, second].entries()) {
+    assert.equal(captured[i], bytes);
+    assert.deepEqual(data.settled[i].identity, { digest: createHash('sha256').update(bytes).digest('hex') });
+    assert.equal(data.settled[i].round, i + 1);
   }
-  assert.ok(!data.settled[0].rewritten);
-  assert.equal(data.settled[0].source, true);
-  assert.equal(data.settled[1].source, true);
   const safe = JSON.stringify({ revisions: data.settled, activity: data.activity, rows: [...data.rows] });
   assert.doesNotMatch(safe, /Printable Private Task Mango|printable-private-task-mango|Reviewer Secret|Report Secret|\.agents\/plans\//);
   assert.match(worq.list(agent.ref), /Printable Private Task Mango/);
@@ -92,7 +90,7 @@ test('bounded layouts and independent evidence retention through out-of-order to
   for (let i = 0; i < 22; i++) {
     const key = `run${i}`;
     data.add(key, i.toString(16).padStart(4, '0'), 'plan');
-    data.revision({ run: key, round: 1, identity: { digest: 'f'.repeat(64) }, status: 'pass', source: true, reviews: [] }, true);
+    data.revision({ run: key, round: 1, identity: { digest: 'f'.repeat(64) }, status: 'pass' }, true);
     if (i > 0) data.live.delete(key);
   }
   data.state('run0', 'waiting', 'ask');
@@ -198,7 +196,7 @@ test('20-column dock retains actor and status without counting terminal outcomes
   assert.equal(hasGlance(data), true);
   for (let i = 1; i < 99; i++) data.add(String(i), i.toString(16).padStart(4, '0'), 'execute');
   data.state('1', 'waiting', 'ask');
-  data.state('2', 'review-ready', 'adjudicate');
+  data.state('2', 'parked', 'adjudicate');
   const narrow = dock.render(20);
   assert.match(narrow.join(' '), /97 live/);
   assert.ok(narrow.every(line => visibleWidth(line) <= 20));
@@ -206,7 +204,7 @@ test('20-column dock retains actor and status without counting terminal outcomes
   assert.match(dock.render(20)[0], /96 live/);
   const panel = new Inspector(data, '0002', theme, () => 24, () => {}, () => {});
   panel.handleInput('\x1b');
-  assert.match(panel.render(20).join(' '), /0002 rev-rdy Main/);
+  assert.match(panel.render(20).join(' '), /0002 parked Main/);
   assert.equal(hasGlance(new Telemetry()), false);
 });
 
@@ -224,18 +222,17 @@ test('inspector groups interleaved children under owners and preserves selection
   panel.handleInput('\x1b[B');
   panel.handleInput('\x1b[B');
   data.add('a2', 'aaaa', 'PQ d2', 'a');
-  data.add('r11', 'aaaa', 'reviewer same-long-name', 'a', { round: 1, slot: 1 });
-  data.add('r12', 'aaaa', 'reviewer same-long-prefix', 'a', { round: 1, slot: 2 });
-  data.add('r21', 'aaaa', 'reviewer same-long-name', 'a', { round: 2, slot: 1 });
+  data.add('r1', 'aaaa', 'review', 'a', { round: 1 });
+  data.add('r2', 'aaaa', 'review', 'a', { round: 2 });
   for (const width of [20, 40, 80, 81, 120]) {
     const lines = panel.render(width);
     assert.ok(lines.every(line => visibleWidth(line) <= width), `bounded at ${width}`);
     const roster = lines.slice(2).map(line => line.split(' │ ')[0]!.trimEnd());
     assert.deepEqual(roster.filter(line => line.includes('↳')).map(line => line.trim()), [
       '↳ PQ d1 queued', '↳ PQ d2 queued',
-      ...['R1.1', 'R1.2', 'R2.1'].map(id => {
+      ...['R1', 'R2'].map(id => {
         const label = roster.find(line => line.includes(`↳ ${id} `))?.trim();
-        assert.match(label ?? '', /^↳ R\d+\.\d+ (?:same\S* )?queued$/);
+        assert.match(label ?? '', /^↳ R\d+ (?:review )?queued$/);
         return label;
       }),
       '↳ PQ d1 queued',

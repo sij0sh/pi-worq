@@ -10,14 +10,14 @@ export type Observation = { phase: "request" | "idle" | "closed" } | { setup: Se
   | { change: string | undefined } | { turn: true } | { cache: { read?: number; write?: number; input?: number; speed?: number } } | { start: string; name: string } | { end: string; outcome: Outcome };
 export const observe = <T>(sink: ((value: T) => void) | undefined, value: T) => { try { sink?.(value); } catch { /* display only */ } };
 export const label = (s: string | undefined) => s?.replace(/[^a-zA-Z0-9._+:/ -]/g, "?").slice(0, 96);
+/** One submission and its single independent review. */
 export interface Revision {
   run: string; round: number; identity: { digest: string } | { sha: string };
-  status: "reviewing" | "ready" | "skipped" | "inconclusive" | "pass" | "findings";
-  source: boolean; rewritten?: boolean; ready?: boolean;
-  reviews: { name: string; verdict: Verdict | "unknown"; findings: boolean[]; artifacts: number }[];
+  status: "reviewing" | Verdict;
+  review?: { findings: boolean[]; artifacts: number };
 }
 export interface Call { name: string; at: number; outcome?: Outcome }
-export interface ReviewIdentity { round: number; slot: number }
+export interface ReviewIdentity { round: number }
 export interface Row {
   key: string; ref: string; title?: string; role: string; workflow?: boolean; parent?: string; review?: ReviewIdentity; born: number; since: number;
   state: AgentState | "queued" | "answered" | "done" | "cancelling"; actor?: "Main"; blocker?: "ask" | "budget" | "adjudicate" | "failure";
@@ -101,12 +101,6 @@ export class Telemetry {
       this.settled.push(value);
       if (this.settled.length > 20) { this.settled.shift(); this.evidenceGap++; }
     }
-    this.changed();
-  }
-  source(run: string, round: number, rewritten = false) {
-    const current = this.live.get(run);
-    if (current?.round === round) this.live.set(run, { ...current, source: false, rewritten });
-    for (const [i, revision] of this.settled.entries()) if (revision.run === run && revision.round === round) this.settled[i] = { ...revision, source: false, rewritten };
     this.changed();
   }
 }
