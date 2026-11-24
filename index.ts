@@ -128,11 +128,11 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       starting ??= (async () => {
         const dir = agentDir();
         const config = loadConfig(dir);
-        const resources = options.driver ? EMPTY : await loadResources(dir, config.approveExtensions);
+        const resources = options.driver ? EMPTY : await loadResources(dir);
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config, extensions: resources.extensions.length, state: statePath(), cwd: ctx.cwd, notify,
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify,
           warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;

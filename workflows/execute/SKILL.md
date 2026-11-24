@@ -5,7 +5,6 @@ access: write
 review: true
 disable-model-invocation: false
 ---
-## Kind: execute
 
 Recursive question: **What consequential work remains before the requested outcome is achieved?**
 Completion: implementation and focused verification.

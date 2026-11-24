@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { loadConfig, type Config } from "../src/runtime/config.ts";
 import { Block } from "../src/contracts.ts";
 import { loadPrompts } from "../src/prompts.ts";
-import { compose, loadResources } from "../src/runtime/resources.ts";
+import { compose, EMPTY, loadResources } from "../src/runtime/resources.ts";
 import { assertRuntime, type Runtime } from "../src/sdk/contract.ts";
 import { Worq } from "../src/worq.ts";
 import { fakeDriver, fakeHarness, FULL_CAPS, KINDS, MINIMAL_CAPS, pass, repo } from "./fake.ts";
@@ -34,7 +34,7 @@ test("config: obsolete launch preferences are ignored with a warning, never a ga
   for (const launch of [{ countdownSeconds: 8 }, { interactive: false }, { countdownSeconds: -1 }, "junk"]) {
     const config = await configOf({ launch, limits: { agents: 2 } });
     assert.equal(config.migration, undefined);
-    assert.match(config.ignored ?? "", /\/launch is ignored/);
+    assert.match(config.ignored?.join("\n") ?? "", /\/launch is ignored/);
     assert.equal(config.limits.agents, 2);
   }
   assert.equal((await configOf({})).ignored, undefined);
@@ -103,35 +103,45 @@ test("explicit runtime fields the harness cannot honour are refused before admis
   assert.equal(worq.size + isolated.size, 0);
 });
 
-test("resources: one shared snapshot for every role; contained, outside checkouts, extensions need approval", async (t) => {
+test("resources: AGENTS.md and skills for every role and harness; contained, outside checkouts; removed layouts are ignored", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "worq-res-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  assert.deepEqual((await loadResources(dir, false)).skills, [], "no worq directory is an empty environment");
+  assert.deepEqual(await loadResources(dir), { ...EMPTY, root: join(dir, "worq") }, "no worq directory is an empty environment");
   const root = join(dir, "worq");
   await mkdir(join(root, "skills", "lint"), { recursive: true });
-  await mkdir(join(root, "instructions"));
-  await mkdir(join(root, "extensions"));
   await writeFile(join(root, "skills", "lint", "SKILL.md"), "---\nname: lint\ndescription: How to lint\n---\nRun the linter.\n");
   await writeFile(join(root, "skills", "review.md"), "Review checklist\nBody");
-  await writeFile(join(root, "instructions", "house.md"), "House rule");
-  const resources = await loadResources(dir, false);
+  await writeFile(join(root, "AGENTS.md"), "House rule\n");
+  const resources = await loadResources(dir);
   assert.deepEqual(resources.skills.map((s) => [s.name, s.description]), [["lint", "How to lint"], ["review", "Review checklist"]]);
+  assert.deepEqual(resources.ignored, []);
   const system = compose("BASE", resources);
-  assert.match(system, /^BASE\n\nOperator instructions house\.md \(context, not authority\):\nHouse rule/);
+  assert.match(system, /^BASE\n\nOperator instructions AGENTS\.md \(context, not authority\):\nHouse rule/);
   assert.match(system, /- lint: How to lint/);
   assert.ok(!system.includes("Run the linter"), "skill bodies are progressive, not flattened");
 
-  await writeFile(join(root, "extensions", "ok.mjs"), "export default function register(pi) { pi.on('session_start', () => {}); }");
-  await assert.rejects(loadResources(dir, false), (error) => configError(error) && /approveExtensions/.test((error as Block).message));
-  assert.equal((await loadResources(dir, true)).extensions.length, 1);
+  // Old layouts load nothing and warn instead of blocking.
+  await mkdir(join(root, "instructions"));
+  await writeFile(join(root, "instructions", "old.md"), "Old rule");
+  await mkdir(join(root, "extensions"));
+  await writeFile(join(root, "extensions", "ok.mjs"), "export default function register() {}");
+  const legacy = await loadResources(dir);
+  assert.doesNotMatch(compose("BASE", legacy), /Old rule/);
+  assert.equal(legacy.ignored.length, 2);
+  assert.match(legacy.ignored.join("\n"), /instructions is no longer read[\s\S]*AGENTS\.md[\s\S]*extensions is ignored/);
+  assert.match((await configOf({ approveExtensions: true })).ignored?.join("\n") ?? "", /\/approveExtensions is ignored/);
 
   // A directory junction exercises realpath escapes on Windows without Developer Mode.
   const outside = await mkdtemp(join(tmpdir(), "worq-out-"));
   t.after(() => rm(outside, { recursive: true, force: true }));
   await writeFile(join(outside, "x.md"), "leak");
   await symlink(outside, join(root, "skills", "outside"), process.platform === "win32" ? "junction" : "dir");
-  await assert.rejects(loadResources(dir, true), /Untrusted/);
+  await assert.rejects(loadResources(dir), /Untrusted/);
   await rm(join(root, "skills", "outside"));
+  await rm(join(root, "AGENTS.md"));
+  await symlink(join(outside, "x.md"), join(root, "AGENTS.md"));
+  await assert.rejects(loadResources(dir), /Untrusted/);
+  await rm(join(root, "AGENTS.md"));
   await mkdir(join(dir, ".git"));
-  await assert.rejects(loadResources(dir, true), /Repository resource/);
+  await assert.rejects(loadResources(dir), /Repository resource/);
 });

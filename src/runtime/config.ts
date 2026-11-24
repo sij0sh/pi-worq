@@ -12,11 +12,7 @@ const Limits = obj({
   agentMinutes: int(1, 600), subagentMinutes: int(1, 120), reviewerMinutes: int(1, 240), askMinutes: int(1, 1440),
   idleMinutes: int(1, 1440), services: int(0, 8),
 });
-const ConfigSchema = obj({
-  /** Approves executing the native extension files installed in the shared resource directory. */
-  approveExtensions: Type.Optional(Type.Boolean()),
-  limits: Type.Optional(Limits),
-});
+const ConfigSchema = obj({ limits: Type.Optional(Limits) });
 export const DEFAULT_LIMITS = {
   agents: 4, subagents: 6, parallel: 4, asks: 3,
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
@@ -30,11 +26,10 @@ export const MAIN: Runtime = { name: "main", sdk: "pi", path: "", via: "" };
 export interface Config {
   path: string;
   limits: Limits;
-  approveExtensions: boolean;
   /** Removed settings that must be migrated before any new launch. Management keeps working. */
   migration?: string;
-  /** Removed settings that are ignored; warned once on first launch use. */
-  ignored?: string;
+  /** Removed settings (and resource layouts) that are ignored; warned once on first launch use. */
+  ignored?: readonly string[];
 }
 
 /** Role presets removed in favour of Main's runtime plus explicit launch overrides. */
@@ -56,7 +51,7 @@ export function loadConfig(agentDir: string): Config {
   const data = json(raw, path);
   const record = data && typeof data === "object" && !Array.isArray(data) ? { ...(data as Record<string, unknown>) } : data;
   let migration: string | undefined;
-  let ignored: string | undefined;
+  const ignored: string[] = [];
   if (record && typeof record === "object") {
     const fields = record as Record<string, unknown>;
     const presets = PRESETS.filter((key) => key in fields).map((key) => `/${key}`);
@@ -65,15 +60,15 @@ export function loadConfig(agentDir: string): Config {
     if (found.length) migration = `${path}: ${found.join(", ")} ${found.length > 1 ? "are" : "is"} no longer supported, so new launches are refused until the file is fixed. `
       + "Agents run on the current Pi session's model and thinking unless a launch request sets sdk, model or thinking (worq_spawn, worq spawn --sdk/--model/--thinking, or the /worq runtime step). "
       + "PQ and review subagents inherit their agent's runtime. If you rely on a distinct reviewer runtime, keep the older Worq release until you accept that; otherwise remove the keys and reload Pi.";
-    if ("launch" in fields) ignored = `${path}: /launch is ignored (the launch countdown was removed; /worq always confirms explicitly). Remove it and reload Pi to silence this warning.`;
-    for (const key of [...PRESETS, ...LEGACY, "launch"]) delete fields[key];
+    if ("launch" in fields) ignored.push(`${path}: /launch is ignored (the launch countdown was removed; /worq always confirms explicitly). Remove it and reload Pi to silence this warning.`);
+    if ("approveExtensions" in fields) ignored.push(`${path}: /approveExtensions is ignored (native harness extensions were removed). Remove it and reload Pi to silence this warning.`);
+    for (const key of [...PRESETS, ...LEGACY, "launch", "approveExtensions"]) delete fields[key];
   }
   const config = parse(ConfigSchema, record, path);
   return {
     path,
     limits: { ...DEFAULT_LIMITS, ...config.limits },
-    approveExtensions: config.approveExtensions ?? false,
     ...(migration ? { migration } : {}),
-    ...(ignored ? { ignored } : {}),
+    ...(ignored.length ? { ignored } : {}),
   };
 }

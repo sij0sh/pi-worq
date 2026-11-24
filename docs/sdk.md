@@ -2,7 +2,7 @@
 
 An **SDK adapter** runs one Worq session (agent, PQ subagent or review) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Pi is the only one that ships.
 
-Adding an SDK = one folder: `<agentDir>/worq/adapters/<id>/adapter.mjs`. No Worq source changes. Folder name = id (lowercase, hyphenated; `pi` is reserved). Global only: never project-local, never a path from a launch request. Installing it is the trust opt-in: it runs in-process with Pi's privileges (not a sandbox). Native-extension approval stays separate.
+Adding an SDK = one folder: `<agentDir>/worq/adapters/<id>/adapter.mjs`. No Worq source changes. Folder name = id (lowercase, hyphenated; `pi` is reserved). Global only: never project-local, never a path from a launch request. Installing it is the trust opt-in: it runs in-process with Pi's privileges (not a sandbox).
 
 ```js
 // <agentDir>/worq/adapters/echo/adapter.mjs — bundle its own dependencies
@@ -21,8 +21,8 @@ src/sdk/contract.ts       contract types, assertRuntime
 src/sdk/registry.ts       Pi record + installed adapter discovery (lazy loaders) + createDriver
 src/sdk/pi.ts             Pi adapter (shipped)
 src/runtime/launch.ts     resolveRuntime (every launch route) + picker choices
-src/runtime/config.ts     limits, extension approval, migration findings
-src/runtime/resources.ts  shared instructions, skills, extensions snapshot
+src/runtime/config.ts     limits, migration findings
+src/runtime/resources.ts  shared AGENTS.md + skills snapshot
 src/session.ts            Conversation (budgets, nudges, queueing)
 ```
 
@@ -31,7 +31,7 @@ src/session.ts            Conversation (budgets, nudges, queueing)
 | Worq owns | Adapter owns |
 |---|---|
 | Runtime resolution (request → defaults) | Defaults, local preflight, native model resolution |
-| Shared resources, prompt composition, `skill` tool | Loading native extension bytes |
+| Shared resources, prompt composition, `skill` tool | Passing `spec.system` / `spec.tools` through unchanged |
 | Tool schema validation and dispatch fencing | Native tool registration |
 | Live runtime changes (when, to what, validation) | Safe request boundary and `configure` mechanics |
 | Budgets, turn charging | Emitting `turn` events |
@@ -46,7 +46,7 @@ export function discoverAdapters(agentDir): { records: Record<string, SDKRecord>
 export async function createDriver(host, resources, records): Promise<Driver>;
 ```
 
-`HostServices` carries only the shipped Pi adapter's host (`pi: { model, modelRegistry, thinkingLevel, agentDir }`); installed adapters get `{ id, dir, agentDir }`. `resolveRuntime` loads the requested adapter, fills defaults, judges capabilities and runs `validateRuntime` before Worq reserves a slot, ref or worktree; it never calls `models()`. Worq freezes the selection and passes it through the conversation; PQs and reviews inherit the owner's effective runtime. Per `open(spec)` the driver re-checks that runtime, composes the system prompt, appends the `skill` tool, attaches extensions, then calls the adapter.
+`HostServices` carries only the shipped Pi adapter's host (`pi: { model, modelRegistry, thinkingLevel, agentDir }`); installed adapters get `{ id, dir, agentDir }`. `resolveRuntime` loads the requested adapter, fills defaults, judges capabilities and runs `validateRuntime` before Worq reserves a slot, ref or worktree; it never calls `models()`. Worq freezes the selection and passes it through the conversation; PQs and reviews inherit the owner's effective runtime. Per `open(spec)` the driver re-checks that runtime, composes the system prompt, appends the `skill` tool, then calls the adapter.
 
 ## Contract
 
@@ -64,7 +64,6 @@ interface SessionSpec {
   runtime: Runtime; thinking?: string;
   system: string;                 // final, already composed
   tools: Tool[];                  // already validated + fenced by the core
-  extensions: ExtensionFile[];    // shared native extension bytes
   emit(event: SessionEvent): void;
   beforeRequest?(signal: AbortSignal): Promise<void>; // await once prior tools have settled
   signal: AbortSignal;            // aborts opening
@@ -100,27 +99,26 @@ type SessionEvent =
 
 ## Capabilities
 
-Pure data; `assertRuntime(runtime, caps, extensionCount)` judges the resolved runtime. Not a substitute for `validateRuntime`.
+Pure data; `assertRuntime(runtime, caps)` judges the resolved runtime. Not a substitute for `validateRuntime`.
 
 | Field | Meaning | Denial |
 |---|---|---|
 | `switchModel` | `Handle.configure` can change the model | Manual model switch when `false` → `capability` |
 | `thinking` | Levels the runtime's model accepts; `[]` = no level control | Explicit level outside the list → `capability` |
 | `context` | `replace` + no ambient instructions required | Anything else refuses the session |
-| `extensions` | Can load shared native extensions | Installed extensions + `false` → `capability` |
 | `turnUnit` | `request` (one `turn` per model request) or `prompt` | Informational; logged at open |
 
 ## Turn accounting
 
 `turn` events charge the same budgets, but units differ: Pi emits one per model request; a CLI adapter that only sees prompts emits one per `prompt()` and must report `turnUnit: "prompt"`. `limits.*Turns` defaults (80/16/40) are Pi-calibrated — lower them for prompt-unit SDKs. Unobservable measures (requests, tokens) are omitted, never reported as zero.
 
-## Extensions across SDKs
+## Shared resources
 
-Shared `extensions/` files are SDK-native (Pi API). A non-Pi adapter reports `extensions: false`, so a mixed-SDK config with extensions installed fails as `capability` rather than silently degrading. Portable functionality belongs in Worq-owned surfaces (tools, instructions, skills); a portable hook contract is future work.
+Every adapter receives the same harness-neutral environment, already folded into `spec.system` and `spec.tools`: `<agentDir>/worq/AGENTS.md` and the skill index plus `skill` tool. No native extensions: an adapter loads nothing executable into its sessions.
 
 ## Conformance
 
-`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, extension denial, unknown SDK) is asserted against `createDriver` with a recording adapter. `test/adapter.test.ts` installs a deterministic adapter folder and launches it through production discovery, `worq_spawn` and the CLI.
+`test/conformance.test.ts` exports `adapterConformance(name, make, options)`, Conversation-level, run for MINIMAL and FULL capability sets; ambient context must be rejected. Router behaviour (routing, environment preparation, unknown SDK) is asserted against `createDriver` with a recording adapter. `test/adapter.test.ts` installs a deterministic adapter folder and launches it through production discovery, `worq_spawn` and the CLI.
 
 The live Pi run opens a real session, dispatches a Worq tool and submits: `WORQ_CONFORMANCE_PI=1 WORQ_CONFORMANCE_MODEL=<provider>/<model> npm test`. Unset, it skips.
 
@@ -134,7 +132,7 @@ For a process-boundary SDK the minimum `ask_main`-preserving equivalent is a loo
 
 - `src/sdk/pi.ts` → `piAdapter(host)`.
 - Refs `<provider>/<model>`; malformed or not in Main's model registry → `model`, at preflight; no Main model and none requested → `model`.
-- Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and extension-registered providers match Main.
-- Capabilities: `switchModel: true`, thinking from the model, `extensions: true`, `turnUnit: "request"`, isolated context.
+- Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and providers match Main. No extensions are loaded.
+- Capabilities: `switchModel: true`, thinking from the model, `turnUnit: "request"`, isolated context.
 - `configure` uses `session.setModel` / `setThinkingLevel`. Pi clamps an incompatible level on a model-only switch; the adapter reports the effective level.
 - Live changes apply at once when idle, or before the next request, even inside the same prompt. The adapter awaits `beforeRequest` before resolving provider inputs, never interrupting a running tool. For adapters without that hook, the core applies queued changes when the prompt settles.

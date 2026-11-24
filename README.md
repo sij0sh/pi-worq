@@ -111,7 +111,7 @@ Adding an agent = one package folder. Adding a harness = one adapter folder (`do
 
 Each launch defaults to the current Pi session's model and thinking level; a launch request (`sdk`/`model`/`thinking`, CLI flags or the `/worq` runtime step) overrides it. PQs and reviews inherit their agent's runtime. The removed `plan`, `execute` and `review` presets block new launches (not management) until removed; `launch` is ignored with a warning. See `docs/configuration.md`.
 
-Skills, instructions and extensions are **not** per role: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
+`AGENTS.md` and skills are **not** per role or per harness: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
 
 ## CLI
 
@@ -144,6 +144,6 @@ For complex work, delegate independent questions whose answers could change the 
 
 Each invocation (spawn or resume) gets `agentTurns`/`agentMinutes`; PQs and reviews have their own. `worq list <ref>` shows review policy and each session's runtime. No message raises a per-session turn/time limit, service quota or concurrency limit.
 
-Shared resources live in `<agentDir>/worq/`: `instructions/*.md` (appended to every system prompt), `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool) and `extensions/*.{mjs,js,ts}` (native Pi extensions; require `"approveExtensions": true`). Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own; extensions run operator code in-process, not a sandbox. No candidate discovery is enabled.
+Shared resources live in `<agentDir>/worq/`: `AGENTS.md` (appended to every system prompt) and `skills/<name>/SKILL.md` or `skills/<name>.md` (indexed in the prompt, read on demand with the `skill` tool). Harness-neutral Markdown only; no native extensions. Read once per Worq instance, outside Git checkouts, no symlink escapes. They add context, never tools, budgets or permissions beyond the role's own. No candidate discovery is enabled.
 
 Agent names are exact lowercase slugs of their titles, with a numeric suffix on collision. Use the returned name for list, send, cancel and inspect. Plans are saved as `.agents/plans/plan-<name>.md`; revisions retain the same path. Existing plan files may be attached by their repo-relative path. At-sign mentions in tasks are always literal.

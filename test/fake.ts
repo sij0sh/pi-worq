@@ -44,14 +44,12 @@ export const FULL_CAPS: Capabilities = {
   switchModel: true,
   thinking: ["off", "minimal", "low", "medium", "high"],
   context: { system: "replace", ambientInstructions: false },
-  extensions: true,
   turnUnit: "request",
 };
 export const MINIMAL_CAPS: Capabilities = {
   switchModel: false,
   thinking: [],
   context: { system: "append", ambientInstructions: true },
-  extensions: false,
   turnUnit: "prompt",
 };
 
@@ -149,7 +147,7 @@ export function shippedKinds(): Map<string, Kind> {
   return loadCatalog(profile).kinds;
 }
 export const KINDS: ReadonlyMap<string, Kind> = shippedKinds();
-export const config = (limits: Partial<Limits> = {}): Config => ({ path: "test", limits: { ...DEFAULT_LIMITS, ...limits }, approveExtensions: false });
+export const config = (limits: Partial<Limits> = {}): Config => ({ path: "test", limits: { ...DEFAULT_LIMITS, ...limits } });
 
 export function setup(root: string, state: string, scripts: Record<string, Script>, limits: Partial<Limits> = {}, telemetry?: import('../src/telemetry.ts').Telemetry, kinds: ReadonlyMap<string, Kind> = KINDS) {
   const events: AgentEvent[] = [];

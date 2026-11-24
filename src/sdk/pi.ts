@@ -1,14 +1,10 @@
-import { rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
-  createAgentSession, createExtensionRuntime, defineTool, discoverAndLoadExtensions, SessionManager, SettingsManager,
+  createAgentSession, createExtensionRuntime, defineTool, SessionManager, SettingsManager,
   type ExtensionContext, type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { Block } from "../contracts.ts";
 import { label, type Outcome } from "../telemetry.ts";
-import { temporaryDirectory } from "../workspace.ts";
-import type { Capabilities, ExtensionFile, Handle, Runtime, SDKAdapter, SessionSpec, Tool } from "./contract.ts";
+import type { Capabilities, Handle, Runtime, SDKAdapter, SessionSpec, Tool } from "./contract.ts";
 
 /** Main's live selection and model registry, plus the agent dir for auth. */
 export type PiHost = Pick<ExtensionContext, "model" | "modelRegistry" | "thinkingLevel"> & { agentDir?: string };
@@ -26,7 +22,7 @@ export function thinkingLevels(model: Leveled | undefined): string[] {
   return [...CORE_LEVELS.filter((level) => map[level] !== null), ...EXTRA_LEVELS.filter((level) => map[level] != null)];
 }
 
-/** Only the prepared system prompt and tools (plus shared native extensions): no ambient discovery. */
+/** Only the prepared system prompt and tools: no ambient discovery, no extensions. */
 function loader(prompt: string): ResourceLoader {
   const runtime = createExtensionRuntime();
   return {
@@ -36,17 +32,6 @@ function loader(prompt: string): ResourceLoader {
     getSystemPrompt: () => prompt, getSystemPromptSource: () => undefined,
     getAppendSystemPrompt: () => [], getAppendSystemPromptSources: () => [], extendResources: () => {}, reload: async () => {},
   };
-}
-/** Load shared extension bytes as standalone modules; discovery is rooted at a private temp dir. */
-async function loadExtensions(target: ResourceLoader, files: readonly ExtensionFile[]) {
-  if (!files.length) return;
-  const dir = await temporaryDirectory(tmpdir(), "worq-ext-");
-  try {
-    const paths = await Promise.all(files.map(async (file, i) => { const path = join(dir, `${i}-${file.name}`); await writeFile(path, file.bytes); return path; }));
-    const result = await discoverAndLoadExtensions(paths, dir, dir);
-    if (result.errors.length || result.extensions.length !== paths.length) throw new Block("config", `Installed extensions could not load: ${result.errors.map((e) => e.error).join("; ") || "count mismatch"}`);
-    target.getExtensions = () => result;
-  } finally { await rm(dir, { recursive: true, force: true }); }
 }
 function sdkTool(tool: Tool, outcomes: Map<string, Outcome>) {
   return defineTool({
@@ -85,7 +70,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
     defaultThinking() { return host.thinkingLevel; },
     capabilities(runtime): Capabilities {
       return {
-        switchModel: true, thinking: thinkingLevels(primary(runtime)), extensions: true, turnUnit: "request",
+        switchModel: true, thinking: thinkingLevels(primary(runtime)), turnUnit: "request",
         context: { system: "replace", ambientInstructions: false },
       };
     },
@@ -105,7 +90,6 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
       const names = new Set(tools.map((tool) => tool.name));
       const report = (value: import("../telemetry.ts").Observation) => spec.emit({ type: "telemetry", value });
       const resources = loader(spec.system);
-      await loadExtensions(resources, spec.extensions);
       spec.signal.throwIfAborted();
       spec.emit({ type: "log", text: `Pi model ${model.provider}/${model.id}` });
       const { session } = await createAgentSession({

@@ -206,7 +206,6 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     } else {
       assert.doesNotThrow(() => assertRuntime(preset({ thinking: "high" }), iso), `${name}: a supported level is accepted`);
     }
-    if (!caps.extensions) assert.throws(() => assertRuntime(preset({}), iso, 1), /cannot load/, `${name}: installed extensions need an sdk that loads them`);
   }
 
   // context
@@ -331,17 +330,16 @@ test("registry: createDriver routes by runtime and prepares the shared environme
   const seen: SessionSpec[] = [];
   const sdks = { pi: recordingSdk(FULL_CAPS, seen, () => "medium"), test: recordingSdk(FULL_CAPS, seen) };
   const review: Runtime = { name: "launch", sdk: "test", model: "m/a", path: "", via: "launch request" };
-  const resources: Resources = { root: "/r", instructions: [{ name: "a.md", text: "Shared rule" }], skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], extensions: [{ name: "e.mjs", bytes: Buffer.from("") }] };
+  const resources: Resources = { root: "/r", agents: "Shared rule", skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], ignored: [] };
   const driver = await createDriver({}, resources, sdks);
   assert.deepEqual(driver.sdks?.(), ["pi", "test"]);
   for (const role of ["agent.plan", "subagent", "review"]) {
     const handle = await driver.open(role === "review" ? { ...roleSpec(role), runtime: review } : roleSpec(role));
     const spec = seen.at(-1)!;
     assert.equal(spec.runtime.sdk, role === "review" ? "test" : "pi", `${role} routes to its runtime's sdk`);
-    assert.match(spec.system, /^S\n\nOperator instructions a\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
+    assert.match(spec.system, /^S\n\nOperator instructions AGENTS\.md[\s\S]*Shared rule[\s\S]*- lint: How to lint/, `${role}: same instructions and skill index`);
     assert.ok(!spec.system.includes("Run lint"), `${role}: skill bodies load on demand`);
     assert.equal(await spec.tools.find((t) => t.name === "skill")!.run({ name: "lint" }, new AbortController().signal), "Run lint");
-    assert.equal(spec.extensions.length, 1, `${role}: same extensions`);
     assert.equal(spec.thinking, role === "review" ? undefined : "medium", "use the selected SDK's host thinking level when available");
     handle.dispose();
   }
@@ -352,8 +350,6 @@ test("registry: createDriver routes by runtime and prepares the shared environme
   (await driver.open({ ...roleSpec('agent.plan'), runtime: { ...MAIN, model: 'm/a' } })).dispose();
   assert.equal(seen.at(-1)?.thinking, undefined, "an admitted SDK default stays resolved");
 
-  const minimal = await createDriver({}, resources, { pi: recordingSdk({ ...FULL_CAPS, extensions: false }, []) });
-  await assert.rejects(minimal.open(roleSpec("agent.plan")), (error: unknown) => error instanceof Block && error.code === "capability" && /extension/.test(error.message));
   const unknown = await createDriver({}, EMPTY, sdks);
   await assert.rejects(unknown.load!("claude"), (error: unknown) => error instanceof Block && error.code === "sdk" && /Unknown sdk "claude" \(installed: pi, test\)/.test(error.message));
   await assert.rejects(unknown.open({ ...roleSpec("agent.plan"), runtime: { ...MAIN, sdk: "claude" } }), /Unknown sdk "claude"/);

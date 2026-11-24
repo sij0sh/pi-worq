@@ -5,7 +5,6 @@ access: read
 review: true
 disable-model-invocation: false
 ---
-## Kind: plan
 
 Recursive question: **What unresolved decision could materially change how we proceed?**
 Completion: consequential decisions resolved or surfaced.

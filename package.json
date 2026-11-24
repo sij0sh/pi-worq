@@ -1,6 +1,6 @@
 {
   "name": "pi-worq",
-  "version": "0.0.42",
+  "version": "0.0.43",
   "private": true,
   "type": "module",
   "description": "Plan and execute Pi SDK agents with probing-question subagents and independent review, managed from the main Pi session",

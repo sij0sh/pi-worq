@@ -4,16 +4,15 @@ One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), 
 
 Both are read once per Pi session, when the first Worq tool call creates the Worq instance. Edit, then start a new Pi session; running agents keep what they launched with.
 
-Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Runtime problems (unknown SDK, unknown model, unsupported thinking, context isolation, extensions) fail at launch, before any slot, ref or worktree.
+Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Runtime problems (unknown SDK, unknown model, unsupported thinking, context isolation) fail at launch, before any slot, ref or worktree.
 
 ```json
 {
-  "approveExtensions": false,
   "limits": { "agents": 4, "idleMinutes": 60 }
 }
 ```
 
-Top-level keys: `approveExtensions`, `limits`.
+Top-level key: `limits`.
 
 ## Runtime
 
@@ -35,26 +34,27 @@ PQ subagents and reviews inherit their agent's effective runtime at child launch
 | `plan`, `execute`, `review` (even `{}`) | launch request fields; reviews inherit | **every new launch refused** with the file, keys and these instructions. list/send/cancel/log/configure and cleanup keep working |
 | `default`, `runtimes`, `roles`, `model`, … (pre-preset formats) | same | same |
 | `launch` | removed (no countdown) | ignored; one warning per Pi session on first launch use |
+| `approveExtensions`, `worq/extensions/` | removed (harness-specific) | ignored; same warning |
+| `worq/instructions/*.md` | `worq/AGENTS.md` | not read; same warning |
 
 Relying on a distinct reviewer model? Keep the older release until you accept inherited reviewer runtime; Worq never translates or silently drops it. Fix the file, then reload Pi.
 
 ## Shared resources
 
-Installed once, identical for every role and every SDK. Never part of model selection.
+Installed once, identical for every role and every SDK (harness-neutral: plain Markdown only). Never part of model selection.
 
 ```
 <agentDir>/worq/
-├── instructions/*.md          appended to every system prompt
+├── AGENTS.md                  appended to every system prompt
 ├── skills/<name>/SKILL.md     indexed in the prompt; body read on demand via the `skill` tool
-├── skills/<name>.md
-└── extensions/*.{mjs,js,ts}   native SDK extensions (Pi only today)
+└── skills/<name>.md
 ```
 
 - Skill frontmatter `name` / `description` are used when present; else the directory/file name and first line. Only the index enters the prompt, so large collections cost little context.
-- Instructions and skills are `context, not authority`: they never widen tools, budgets or permissions.
-- Extensions run operator code in-process — **not a sandbox**. Installed extensions require `"approveExtensions": true`; every role's SDK must be able to load them, else `capability`. Do not install scripts that import or read candidate code.
+- AGENTS.md and skills are `context, not authority`: they never widen tools, budgets or permissions.
+- No native harness extensions: nothing executable is loaded into sessions.
 - Safety: the directory must not sit inside a Git checkout (`Repository resource`); entries are resolved with `realpath` and must stay inside it (`Untrusted resource`); regular files ≤ 256 KiB.
-- Ambient discovery stays off: no global Pi settings, AGENTS.md, packages or skills from Main or the candidate checkout are loaded.
+- Ambient discovery stays off: no global Pi settings, project AGENTS.md, packages or skills from Main or the candidate checkout are loaded.
 
 ## Subagents and review
 
@@ -116,8 +116,7 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 | `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; use an unreviewed package |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
-| `Extension approval required` | Files in `worq/extensions/` | Set `approveExtensions: true` or remove them |
-| `cannot load the … native extension(s)` | A role's SDK has no native extension support | Remove the extensions or keep that role on `pi` |
+| `… is ignored` / `… is no longer read` | Removed key or resource layout | Remove it (move instructions into `worq/AGENTS.md`) |
 | `Untrusted resource` / `Repository resource` | Escaping link, or `worq/` inside a checkout | Move the file / directory |
 | `at-capacity` | `limits.agents` reached | Close an agent or raise the cap |
 | `workflow-file` | The workflows directory cannot be read | Fix permissions; a missing directory is empty. Per-folder defects are warnings, not errors |

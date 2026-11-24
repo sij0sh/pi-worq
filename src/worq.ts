@@ -16,8 +16,6 @@ export interface WorqDeps {
   /** The installed catalog: every launchable package. */
   kinds: ReadonlyMap<string, Kind>;
   config: Config;
-  /** Installed native extension count; every role's SDK must be able to load them. */
-  extensions?: number;
   state: string;
   cwd: string;
   notify(event: AgentEvent): void;
@@ -83,16 +81,16 @@ export class Worq {
    */
   gate() {
     const { config } = this.deps;
-    if (config.ignored && !this.warned) { this.warned = true; this.deps.warn?.(config.ignored); }
+    if (config.ignored?.length && !this.warned) { this.warned = true; this.deps.warn?.(config.ignored.join("\n")); }
     if (config.migration) throw new Block("config", config.migration);
   }
   /** The runtime a launch with no explicit fields would use, for the /worq picker. */
   defaults(signal: AbortSignal = this.admissions.signal): Promise<Runtime> {
-    return resolveRuntime(this.deps.driver, this.deps.extensions ?? 0, {}, signal);
+    return resolveRuntime(this.deps.driver, {}, signal);
   }
   /** Picker information; never needed for a launch. */
   launchChoices(initial: Runtime): Promise<ModelChoice[]> {
-    return modelChoices(this.deps.driver, initial, this.deps.extensions ?? 0);
+    return modelChoices(this.deps.driver, initial);
   }
   /** Convenience for Main-authority launches. */
   spawn(kind: string, task: string | undefined, opts: Omit<LaunchRequest, "kind" | "task"> = {}, signal?: AbortSignal): Promise<Agent> {
@@ -120,7 +118,7 @@ export class Worq {
     const signal = callerSignal ? AbortSignal.any([callerSignal, this.admissions.signal]) : this.admissions.signal;
     signal.throwIfAborted();
     this.capacity();
-    const runtime = await resolveRuntime(this.deps.driver, this.deps.extensions ?? 0, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal);
+    const runtime = await resolveRuntime(this.deps.driver, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal);
     this.capacity();
     const pending = { label: `${title} · ${kind.name} · pending launch` };
     this.starting.add(pending);
@@ -208,7 +206,7 @@ export class Worq {
     const runtime = session.runtime() ?? { ...MAIN };
     await this.deps.driver.load?.(runtime.sdk);
     const current = { ...runtime, model: runtime.model ?? this.deps.driver.defaultModel?.(runtime.sdk) };
-    return modelChoices(this.deps.driver, current, this.deps.extensions ?? 0, current.sdk);
+    return modelChoices(this.deps.driver, current, current.sdk);
   }
   async configure(target: string, change: RuntimeChange): Promise<string> {
     const session = this.session(target);

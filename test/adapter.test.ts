@@ -27,7 +27,7 @@ export default {
       async models() { calls.models++; return ["e/listed"]; },
       defaultModel() { return "e/default"; },
       defaultThinking() { return "low"; },
-      capabilities() { return { switchModel: false, thinking: ["low", "high"], context: { system: "replace", ambientInstructions: false }, extensions: false, turnUnit: "prompt" }; },
+      capabilities() { return { switchModel: false, thinking: ["low", "high"], context: { system: "replace", ambientInstructions: false }, turnUnit: "prompt" }; },
       validateRuntime(runtime) {
         calls.validate.push(runtime.model);
         if (!/^e\\/[a-z-]+$/.test(runtime.model ?? "")) throw new Error("echo: unknown model " + runtime.model);
@@ -75,23 +75,23 @@ test("adapter: installed by folder, imported lazily on first explicit request, p
 
   const driver = await createDriver({}, EMPTY, records);
   const signal = new AbortController().signal;
-  assert.deepEqual(await resolveRuntime(driver, 0, { sdk: "echo" }, signal),
+  assert.deepEqual(await resolveRuntime(driver, { sdk: "echo" }, signal),
     { name: "launch", sdk: "echo", path: "", via: "launch request", model: "e/default", thinking: "low" }, "the adapter's own defaults, not Main's");
-  assert.equal((await resolveRuntime(driver, 0, { sdk: "echo", model: "e/unlisted", thinking: "high" }, signal)).model, "e/unlisted", "valid unlisted models work");
-  await assert.rejects(resolveRuntime(driver, 0, { sdk: "echo", model: "Bogus" }, signal), /unknown model Bogus/);
+  assert.equal((await resolveRuntime(driver, { sdk: "echo", model: "e/unlisted", thinking: "high" }, signal)).model, "e/unlisted", "valid unlisted models work");
+  await assert.rejects(resolveRuntime(driver, { sdk: "echo", model: "Bogus" }, signal), /unknown model Bogus/);
   const calls = (globalThis as unknown as Record<string, Calls>)[key];
   const validated = calls.validate.length;
-  await assert.rejects(resolveRuntime(driver, 0, { sdk: "echo", thinking: "max" }, signal), /max is not a echo thinking level/);
-  await assert.rejects(resolveRuntime(driver, 0, { sdk: "echo" }, AbortSignal.abort()), /abort/i);
+  await assert.rejects(resolveRuntime(driver, { sdk: "echo", thinking: "max" }, signal), /max is not a echo thinking level/);
+  await assert.rejects(resolveRuntime(driver, { sdk: "echo" }, AbortSignal.abort()), /abort/i);
   assert.equal(calls.validate.length, validated, "capability refusals and cancellation precede the adapter preflight");
   assert.equal(calls.models, 0, "no model enumeration for explicit requests");
   assert.equal(calls.open.length, 0);
 
   // A failed optional adapter is isolated: its launch fails clearly, the picker skips it, others stay usable.
-  await assert.rejects(resolveRuntime(driver, 0, { sdk: "broken" }, signal), /sdk "broken" could not load: broken import/);
+  await assert.rejects(resolveRuntime(driver, { sdk: "broken" }, signal), /sdk "broken" could not load: broken import/);
   const catalog = await driver.catalog!();
   assert.deepEqual([...catalog.keys()], ["echo"], "pi (no host here) and broken are skipped, not fatal");
-  await assert.rejects(resolveRuntime(driver, 0, { sdk: "nope" }, signal), /Unknown sdk "nope" \(installed: pi, broken, echo\)/);
+  await assert.rejects(resolveRuntime(driver, { sdk: "nope" }, signal), /Unknown sdk "nope" \(installed: pi, broken, echo\)/);
 });
 
 test("a new folder package and a new adapter launch through worq_spawn and the CLI with no orchestration edits", async (t) => {

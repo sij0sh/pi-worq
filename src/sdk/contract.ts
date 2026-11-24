@@ -37,8 +37,6 @@ export interface Capabilities {
   /** Levels the runtime's model accepts; [] means no level control at all. */
   thinking: readonly string[];
   context: { system: "replace" | "append"; ambientInstructions: boolean };
-  /** The SDK can load the shared native extension files (Pi only today). */
-  extensions: boolean;
   /** What one `turn` event counts: a model request, or a whole prompt when requests are invisible. */
   turnUnit: "request" | "prompt";
 }
@@ -71,14 +69,11 @@ export interface Spec {
   /** Aborts session opening; an adapter must not leave a live session behind it. */
   signal: AbortSignal;
 }
-/** Native extension file from the shared resource snapshot. */
-export interface ExtensionFile { name: string; bytes: Buffer }
 /** Fully resolved session request: what an adapter receives. */
 export interface SessionSpec extends Spec {
   runtime: Runtime;
   /** Selected thinking level; absent leaves it to the SDK. */
   thinking?: string;
-  extensions: readonly ExtensionFile[];
 }
 
 /** A live runtime change; harness (sdk) stays locked for the session's lifetime. */
@@ -148,12 +143,11 @@ export function supportedThinking(level: string | undefined, levels: readonly st
 
 const at = (runtime: Runtime, field: string) => runtime.path ? `${runtime.path}/${field}` : field;
 /** Judge a resolved runtime against what its SDK can do. Raises Block("capability") naming the config path. */
-export function assertRuntime(runtime: Runtime, caps: Capabilities, extensions = 0): void {
+export function assertRuntime(runtime: Runtime, caps: Capabilities): void {
   if (runtime.thinking !== undefined && !caps.thinking.includes(runtime.thinking)) {
     throw new Block("capability", caps.thinking.length
       ? `${at(runtime, "thinking")}: ${runtime.thinking} is not a ${runtime.sdk} thinking level (${caps.thinking.join(", ")})`
       : `${at(runtime, "thinking")}: ${runtime.sdk} has no thinking level control`);
   }
-  if (extensions && !caps.extensions) throw new Block("capability", `${at(runtime, "sdk")}: ${runtime.sdk} cannot load the ${extensions} installed native extension(s)`);
   if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${at(runtime, "sdk")}: ${runtime.sdk} cannot isolate context`);
 }

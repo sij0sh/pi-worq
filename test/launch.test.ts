@@ -55,14 +55,14 @@ test('resolveRuntime: explicit fields first, Main defaults otherwise; incompatib
   driver.defaultModel = () => model;
   driver.defaultThinking = () => thinking;
   const signal = new AbortController().signal;
-  assert.deepEqual(await resolveRuntime(driver, 0, {}, signal), { ...MAIN, model: 'p/main', thinking: 'high' });
+  assert.deepEqual(await resolveRuntime(driver, {}, signal), { ...MAIN, model: 'p/main', thinking: 'high' });
   model = 'p/new'; thinking = 'off';
-  assert.deepEqual(await resolveRuntime(driver, 0, {}, signal), { ...MAIN, model: 'p/new', thinking: 'off' });
+  assert.deepEqual(await resolveRuntime(driver, {}, signal), { ...MAIN, model: 'p/new', thinking: 'off' });
   thinking = 'unsupported';
-  assert.equal((await resolveRuntime(driver, 0, {}, signal)).thinking, undefined);
-  assert.deepEqual(await resolveRuntime(driver, 0, { model: 'p/override', thinking: 'medium' }, signal),
+  assert.equal((await resolveRuntime(driver, {}, signal)).thinking, undefined);
+  assert.deepEqual(await resolveRuntime(driver, { model: 'p/override', thinking: 'medium' }, signal),
     { name: 'launch', sdk: 'pi', path: '', via: 'launch request', model: 'p/override', thinking: 'medium' });
-  await assert.rejects(resolveRuntime(driver, 0, { thinking: 'unsupported' }, signal), /not a pi thinking level/, 'explicit values are never dropped');
+  await assert.rejects(resolveRuntime(driver, { thinking: 'unsupported' }, signal), /not a pi thinking level/, 'explicit values are never dropped');
 });
 
 test('runtime preflight precedes repository checks, and children inherit the owner runtime', async t => {

@@ -70,7 +70,7 @@ async function importAdapter(id: string, file: string, dir: string, agentDir: st
 
 /**
  * The core's single Driver. Imports each SDK lazily by id (once, in-flight loads shared), judges runtimes
- * against the SDK's capabilities and prepares the shared environment (instructions, skill index + `skill` tool, extensions).
+ * against the SDK's capabilities and prepares the shared environment (AGENTS.md, skill index + `skill` tool).
  */
 export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI }): Promise<Driver> {
   const loading = new Map<string, Promise<SDKAdapter>>();
@@ -124,7 +124,7 @@ export async function createDriver(host: HostServices, resources: Resources = EM
       const sdk = await load(preset.sdk);
       const runtime = spec.runtime ?? { ...preset, model: preset.model ?? sdk.defaultModel?.() };
       const caps = sdk.capabilities(runtime);
-      assertRuntime(runtime, caps, resources.extensions.length);
+      assertRuntime(runtime, caps);
       // A supplied selection was resolved at admission, even if it leaves thinking to the SDK.
       const thinking = runtime.thinking ?? (spec.runtime ? undefined : supportedThinking(sdk.defaultThinking?.(), caps.thinking));
       const { skills: own = [], ...rest } = spec;
@@ -135,7 +135,7 @@ export async function createDriver(host: HostServices, resources: Resources = EM
         ? { type: "telemetry", value: { setup: { ...event.value.setup, sdk: runtime.sdk, skills } } } : event);
       spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "Main's defaults"}` });
       const handle = await sdk.open({
-        ...rest, emit, runtime, thinking, extensions: resources.extensions,
+        ...rest, emit, runtime, thinking,
         system: compose(spec.system, resources, packages),
         tools: skill && !rest.tools.some((t) => t.name === skill.name) ? [...rest.tools, skill] : rest.tools,
       });
