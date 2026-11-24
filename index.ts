@@ -190,7 +190,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         say(ctx, `No agent packages installed. Add ${join(workflows.dir, "<name>", "SKILL.md")} with name and description frontmatter, then restart Pi.`);
         return;
       }
-      const labels = new Map([...catalog.values()].map((kind) => [`${kind.name} · ${kind.access}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
+      const kinds = [
+        catalog.get("plan"),
+        catalog.get("execute"),
+        ...[...catalog.values()].filter((kind) => kind.name !== "plan" && kind.name !== "execute"),
+      ].filter((kind) => kind !== undefined);
+      const labels = new Map(kinds.map((kind) => [`${kind.name} · ${kind.access}${kind.userOnly ? " · user-only" : ""} · ${kind.description}`, kind]));
       const choice = await ctx.ui.select("Launch SDK agent", [...labels.keys()]);
       const kind = choice === undefined ? undefined : labels.get(choice);
       if (!kind) return;

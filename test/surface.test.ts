@@ -309,11 +309,11 @@ test("/worq launches any package: select → optional instructions → explicit 
     assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "parked"), `expected parked for ${ref}`);
   };
 
-  // Every installed package is in the menu, shipped ones included; invalid siblings are reported.
+  // Plan and Execute come first, followed by custom packages alphabetically; invalid siblings are reported.
   await command!("", ctx);
   assert.match(last(/broken: description is required/) ?? "", /broken/);
-  assert.deepEqual(selects.at(-1)!.map((label) => label.split(" · ").slice(0, 2).join(" · ")), ["docs · read", "execute · write", "plan · read", "shared · read"]);
-  assert.match(selects.at(-1)![0], /docs · read · user-only · Write the docs/);
+  assert.deepEqual(selects.at(-1)!.map((label) => label.split(" · ").slice(0, 2).join(" · ")), ["plan · read", "execute · write", "docs · read", "shared · read"]);
+  assert.match(selects.at(-1)![2], /docs · read · user-only · Write the docs/);
   assert.match(overlays.at(-1)!, /Configure SDK agent · docs[\s\S]*Harness: ‹ pi ›[\s\S]*Enter launch · Esc cancel/);
   assert.doesNotMatch(overlays.at(-1)!, /\d+s ·/, "no countdown");
   assert.equal(launchedRef(), "docs-run");
