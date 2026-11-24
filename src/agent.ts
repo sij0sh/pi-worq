@@ -188,7 +188,7 @@ export class Agent {
     if (!this.dir) return;
     try {
       const file = join(this.dir, "record.json");
-      writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, ...this.view(), history: this.history }, null, 2) + "\n", { mode: 0o600 });
+      writeFileSync(`${file}.tmp`, `${JSON.stringify({ version: 1, ...this.view(), history: this.history }, null, 2)}\n`, { mode: 0o600 });
       renameSync(`${file}.tmp`, file);
     } catch { /* the record is forensic; the live view stays authoritative */ }
   }
@@ -311,10 +311,12 @@ export class Agent {
       if (handoff) {
         this.handoff = handoff.quiescent ? {} : { error: "SDK quiescence could not be confirmed" };
         if (this.work) {
-          try {
-            if (this.error || this.handoff.error) throw new Error([this.handoff.error, this.error].filter(Boolean).join("; "));
-            this.handoff.partial = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: unreviewed handoff`);
-          } catch (error) { this.handoff.error = errorText(error); }
+          const failure = [this.handoff.error, this.error].filter(Boolean).join("; ");
+          if (failure) this.handoff.error = failure;
+          else {
+            try { this.handoff.partial = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: unreviewed handoff`); }
+            catch (error) { this.handoff.error = errorText(error); }
+          }
         }
         const evidence = JSON.stringify({
           status: "handed-off", round: this.round, objective: this.task, trigger: handoff.trigger,
@@ -325,7 +327,7 @@ export class Agent {
         }, null, 2);
         const file = join(this.dir!, `handoff-${this.round}.json`);
         try {
-          writeFileSync(`${file}.tmp`, evidence + "\n", { mode: 0o600 });
+          writeFileSync(`${file}.tmp`, `${evidence}\n`, { mode: 0o600 });
           renameSync(`${file}.tmp`, file);
           this.handoff.path = file;
         } catch (error) {
@@ -379,7 +381,7 @@ export class Agent {
       });
   }
   private async pq(d: Delegation, cwd: string, role: string) {
-    const key = this.id + ':' + d.id;
+    const key = `${this.id}:${d.id}`;
     this.deps.telemetry?.add(key, this.ref, 'PQ', this.id, undefined, clean(d.question).replace(/\s+/g, " ").trim());
     this.deps.telemetry?.state(key, 'queued');
     const signal = this.signal;
@@ -484,12 +486,12 @@ export class Agent {
     const status = !roster.length ? (skipped ? 'skipped' : 'inconclusive') : reports.some(r => r.verdict === 'unknown') ? 'inconclusive' : reports.every(r => r.verdict === 'pass' && !r.findings.length) ? 'pass' : 'findings';
     this.deps.telemetry?.revision({ ...revision, status, ready: true, source: true, reviews: reports }, true);
     this.set("review-ready");
-    this.deps.notify({ type: "review-ready", ref: this.ref, text: this.digest() + `\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.${workflow ? `\nThis workflow stays live until /worq cancel ${this.ref}; it keeps one limits.agents slot.` : ""}` });
+    this.deps.notify({ type: "review-ready", ref: this.ref, text: `${this.digest()}\n${this.deps.limits.rounds - this.round} repair rounds remain. Route: ${this.mode ?? "default"}.${workflow ? `\nThis workflow stays live until /worq cancel ${this.ref}; it keeps one limits.agents slot.` : ""}` });
   }
   private async reviewer(name: string, prompt: string, slot: number, artifacts: (count: number) => void): Promise<ReviewRecord> {
     const { driver, prompts, limits, root, semaphore } = this.deps;
-    const key = this.id + ':r' + this.round + ':' + slot;
-    this.deps.telemetry?.add(key, this.ref, 'reviewer ' + label(name), this.id, { round: this.round, slot: slot + 1 });
+    const key = `${this.id}:r${this.round}:${slot}`;
+    this.deps.telemetry?.add(key, this.ref, `reviewer ${label(name)}`, this.id, { round: this.round, slot: slot + 1 });
     const own = new AbortController();
     const signal = AbortSignal.any([this.signal, own.signal]);
     const write = this.kind.access === "write";

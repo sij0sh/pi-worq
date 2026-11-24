@@ -32,7 +32,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     const control = (s: string) => theme.bold?.(s) ?? s;
     const more = folded() || rows.length <= visible.length ? '' : ` · +${rows.length-visible.length}`;
     const live = `${rows.filter(working).length} live${more}`;
-    const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${live} · WORQ`) : band(control(`${folded()?'[+]':'[−]'} [Inspect]`) + `  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
+    const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${live} · WORQ`) : band(`${control(`${folded()?'[+]':'[−]'} [Inspect]`)}  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
     if (folded()) return [header];
     // Keep Activity readable, but give extra space to titles and PQ questions.
     const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);

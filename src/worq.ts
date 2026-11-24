@@ -4,7 +4,7 @@ import type { Config } from "./runtime/config.ts";
 import type { Kind, Prompts } from "./prompts.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
 import { prepareLaunch, type SelectLaunch } from './runtime/launch.ts';
-import { type Driver } from "./sdk/contract.ts";
+import type { Driver } from "./sdk/contract.ts";
 import { reserveName, readPlan, repository } from "./workspace.ts";
 
 export interface WorqDeps {

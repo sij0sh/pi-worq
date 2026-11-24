@@ -34,7 +34,7 @@ function call(pid, op, args = {}) {
     const socket = connect(path);
     let buffer = "";
     socket.setEncoding("utf8");
-    socket.on("connect", () => socket.write(JSON.stringify({ op, args, token }) + "\n"));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ op, args, token })}\n`));
     socket.on("data", (chunk) => {
       buffer += chunk;
       const i = buffer.indexOf("\n");

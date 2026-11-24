@@ -1,6 +1,7 @@
 {
   "name": "pi-worq",
-  "version": "0.0.33",
+  "version": "0.0.34",
+  "private": true,
   "type": "module",
   "description": "Plan and execute Pi SDK agents with probing-question subagents and independent reviewers, managed from the main Pi session",
   "keywords": [
@@ -25,6 +26,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
+    "lint": "biome check .",
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "peerDependencies": {
@@ -37,6 +39,7 @@
     "@xterm/headless": "6.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.9",
     "@types/node": "^22.0.0",
     "typescript": "~5.9.0"
   }

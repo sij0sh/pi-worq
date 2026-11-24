@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # A Pi SDK bump crosses the src/sdk/ adapter contract, so those packages move together.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      pi-sdk:
+        patterns:
+          - "@earendil-works/*"
+          - "typebox"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

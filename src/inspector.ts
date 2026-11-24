@@ -17,7 +17,7 @@ function childIdentity(row: Row, width: number) {
   const id = reviewId(row.review);
   const nameWidth = width - visibleWidth(`${id} ${row.state}`) - 1;
   const name = nameWidth > 0 ? truncateToWidth(row.role.slice('reviewer '.length), nameWidth, '') : '';
-  return `${id}${name ? ' ' + name : ''} ${row.state}`;
+  return `${id}${name ? ` ${name}` : ''} ${row.state}`;
 }
 const identity = (r: Row, width: number) => width < 34 ? compact(r) : headline(r);
 export function outcome(o?: Outcome): string {
@@ -123,7 +123,7 @@ export class Inspector {
       const row = this.data.rows.get(e.key);
       if (!row || (this.ref && row.ref !== this.ref)) return [];
       const source = row.question ?? `${row.title ?? row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
-      return [`${source} · ${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''} · ${age(e.at)} ago`];
+      return [`${source} · ${e.text}${e.outcome ? ` · ${outcome(e.outcome)}` : ''} · ${age(e.at)} ago`];
     });
     if (!lines.length) lines.push('No activity observed.');
     if (this.data.activityGap) lines.push(`Activity gap · ${this.data.activityGap} older events evicted session-wide`);
@@ -135,7 +135,7 @@ export class Inspector {
       const c = row.cache;
       const [cache, speed, turns] = metrics(row);
       const children = [...this.data.rows.values()].filter(r => r.parent === row.key && r.question);
-      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of ' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
+      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? `child of ${row.ref}${row.review ? ` · ${reviewId(row.review)}` : ''}` : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
         ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
         row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
         ...(row.setup?.sdk ? [`Harness: ${row.setup.sdk}`] : []), `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,

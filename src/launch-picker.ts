@@ -44,7 +44,7 @@ export function launchPicker(ui: ExtensionContext['ui']): SelectLaunch {
             const visibleCount = Math.max(1, Math.min(6, tui.terminal.rows - 10));
             const start = Math.max(0, rows.indexOf(active) - visibleCount + 1);
             const lines = [theme.fg('accent', `Launch SDK agent · ${rows.length} pending`),
-              ...rows.slice(start, start + visibleCount).map(row => `${row === active ? '▸' : ' '} ${row.deadline === undefined ? 'paused' : Math.max(0, Math.ceil((row.deadline - Date.now()) / 1000)) + 's'} · ${clean(row.label).replace(/\s+/g, ' ')}`),
+              ...rows.slice(start, start + visibleCount).map(row => `${row === active ? '▸' : ' '} ${row.deadline === undefined ? 'paused' : `${Math.max(0, Math.ceil((row.deadline - Date.now()) / 1000))}s`} · ${clean(row.label).replace(/\s+/g, ' ')}`),
               `Preset: ${active.initial.name}`, ...[`Harness: ${r.sdk}`, `Model: ${r.model ?? 'SDK default'}`, `Thinking: ${r.thinking ?? 'SDK default'}`].map((s,i) => `${field === i ? '›' : ' '} ${clean(s).replace(/\s+/g, ' ')}`),
               '↑↓ field · ←→ change · Tab next agent', 'Enter launch now · A launch all · Esc cancel selected'];
             if (width < 4) return lines.map(line => truncateToWidth(line, width));

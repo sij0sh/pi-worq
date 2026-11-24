@@ -36,7 +36,7 @@ export async function observePty(executable: string, args: string[], actions: Ac
   const ended = child.done.then((result) => { throw new Block("pty-ended", `PTY exited before observation completed (${result.code}): ${result.stderr.slice(0, 600)}`); });
   void ended.catch(() => {});
   const pause = (ms: number) => Promise.race([sleep(ms, undefined, { signal }), ended]);
-  const send = (msg: object) => { child.input.write(JSON.stringify(msg) + "\n"); };
+  const send = (msg: object) => { child.input.write(`${JSON.stringify(msg)}\n`); };
   const screens: { step: number; screen: string }[] = [];
   try {
     const deadline = performance.now() + 3000;
@@ -61,13 +61,13 @@ export async function observePty(executable: string, args: string[], actions: Ac
       }
     }
     if (exit !== undefined) throw new Block("pty-ended", "Product exited before observation finished");
-    child.input.end(JSON.stringify({ type: "stop" }) + "\n");
+    child.input.end(`${JSON.stringify({ type: "stop" })}\n`);
     const result = await child.done;
     if (result.code !== 0 || pending || exit === undefined) throw new Block("pty-protocol", `PTY did not close cleanly: ${result.stderr.slice(0, 600)}`);
     return screens;
   } catch (error) {
     // Allow the bridge to reap its child before falling back to group termination.
-    if (!child.input.destroyed && !child.input.writableEnded) child.input.end(JSON.stringify({ type: "stop" }) + "\n");
+    if (!child.input.destroyed && !child.input.writableEnded) child.input.end(`${JSON.stringify({ type: "stop" })}\n`);
     await child.done.catch((cleanup: unknown) => { if (cleanup instanceof CleanupError) throw cleanup; });
     throw error;
   } finally { terminal.dispose(); }

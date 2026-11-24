@@ -80,9 +80,9 @@ export async function serve(state: string, handle: (op: string, args: unknown) =
           try {
             const request = JSON.parse(line) as { op: string; args?: unknown; token?: string };
             if (token && request.token !== token) { socket.destroy(); return; }
-            socket.write(JSON.stringify({ ok: true, ...(await handle(request.op, request.args)) }) + "\n");
+            socket.write(`${JSON.stringify({ ok: true, ...(await handle(request.op, request.args)) })}\n`);
           } catch (error) {
-            socket.write(JSON.stringify({ ok: false, error: errorText(error) }) + "\n");
+            socket.write(`${JSON.stringify({ ok: false, error: errorText(error) })}\n`);
           }
         })();
       }

@@ -132,8 +132,10 @@ One SDK ships today (Pi); a second is one adapter file under `src/sdk/` plus one
 ## Develop
 
 ```sh
-npm run check && npm test
+npm run check && npm run lint && npm test
 ```
+
+Runtime versions match `.mise.toml` (Node 22.19, CPython 3.12); `mise install` is optional if both are already on `PATH`. CI runs the same commands on `ubuntu-latest` plus `npm run check && npm test` on `windows-latest` (`.github/workflows/ci.yml`). `npm run lint` uses Biome's recommended rules with the formatter and import sorting off, so it reports problems without rewriting files.
 
 For complex work, delegate independent questions whose answers could change the decision. An unanswered permission request never authorizes the action. If the final progress commit fails, recover the retained worktree at the path in the agent log.
 

@@ -108,7 +108,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         sessionManager: SessionManager.inMemory(spec.cwd),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
       });
-      const setup = () => { try { report({ setup: { model: label(session.model && session.model.provider + "/" + session.model.id), thinking: label(session.thinkingLevel), skills: [] } }); } catch { /* display only */ } };
+      const setup = () => { try { report({ setup: { model: label(session.model && `${session.model.provider}/${session.model.id}`), thinking: label(session.thinkingLevel), skills: [] } }); } catch { /* display only */ } };
       const context = () => {
         try {
           const usage = session.getContextUsage();
