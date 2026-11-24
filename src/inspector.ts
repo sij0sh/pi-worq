@@ -5,12 +5,12 @@ import type { Outcome, Row, Telemetry } from './telemetry.ts';
 
 const age = (time: number) => elapsed(Date.now()-time);
 const active = (r: Row) => !['closed', 'handed-off', 'failed', 'cancelled', 'done', 'answered'].includes(r.state);
-const headline = (r: Row) => `@${r.ref} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
+const headline = (r: Row) => `${r.question ?? (r.title ? `${r.title} (${r.ref})` : r.ref)} ${r.state}${r.actor ? ` · ${r.actor}: ${r.blocker}` : ''} · ${r.role}`;
 const fit = (s: string, w: number) => w > 0 ? truncateToWidth(s, w, w >= 3 ? '…' : '') : '';
 const tone = (r: Row) => r.state === 'failed' ? 'error' : r.blocker ? 'warning' : active(r) ? 'accent' : 'muted';
 const displayable = (r: Row) => !r.parent && (active(r) || !!r.actor);
 export const hasGlance = (data: Telemetry) => [...data.rows.values()].some(displayable);
-const compact = (r: Row) => `@${r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
+const compact = (r: Row) => `${r.title ?? r.ref} ${r.state === 'review-ready' ? 'rev-rdy' : r.state}${r.actor ? ` ${r.actor}` : ''}`;
 const reviewId = (review: NonNullable<Row['review']>) => `R${review.round}.${review.slot}`;
 function childIdentity(row: Row, width: number) {
   if (!row.review) return `${row.role} ${row.state}`;
@@ -122,7 +122,7 @@ export class Inspector {
     const lines = this.data.activity.slice().reverse().flatMap(e => {
       const row = this.data.rows.get(e.key);
       if (!row || (this.ref && row.ref !== this.ref)) return [];
-      const source = `@${row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
+      const source = row.question ?? `${row.title ?? row.ref}${row.parent ? ` ${row.role}${row.review ? ` ${reviewId(row.review)}` : ''}` : ''}`;
       return [`${source} · ${e.text}${e.outcome ? ' · ' + outcome(e.outcome) : ''} · ${age(e.at)} ago`];
     });
     if (!lines.length) lines.push('No activity observed.');
@@ -135,7 +135,7 @@ export class Inspector {
       const c = row.cache;
       const [cache, speed, turns] = metrics(row);
       const children = [...this.data.rows.values()].filter(r => r.parent === row.key && r.question);
-      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of @' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
+      return [headline(row), `${cache} cache · ${speed} tok/s · ${turns} turns`, ...(row.question ? [`${row.parent ? '↳' : 'Task:'} ${row.question}`] : []), ...children.map(r => `↳ ${r.role} · ${r.state}: ${r.question}`), `Age ${age(row.born)} · state ${age(row.since)}`, `Lineage: ${row.parent ? 'child of ' + row.ref + (row.review ? ' · ' + reviewId(row.review) : '') : 'owner'}`, `Observed phase: ${row.phase ?? 'unavailable'}`,
         ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
         row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
         `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
@@ -150,7 +150,7 @@ export class Inspector {
       ...(this.data.evidenceGap ? [`Evidence gap · ${this.data.evidenceGap} settled rounds evicted session-wide`] : []),
       ...(!live && !history.length ? ['Evidence not recorded'] : []), ...[...(live ? [live] : []), ...history].flatMap(r => [
         `Round ${r.round} · ${r.ready ? 'review-ready · ' : ''}${r.status === 'pass' ? 'review roster pass' : r.status}`, 'sha' in r.identity ? `SHA ${r.identity.sha}` : `Digest ${r.identity.digest}`,
-        r.source ? `Matching legacy record: @${row.ref} · round ${r.round} (/worq list)` : 'Historical prose unavailable',
+        r.source ? `Matching run record: ${row.ref} · round ${r.round} (/worq list)` : 'Historical prose unavailable',
         ...(r.rewritten ? ['Worq rewrote the plan location'] : []),
         ...r.reviews.flatMap(v => [`${v.name}: ${v.verdict} · ${v.findings.length} findings · ${v.artifacts} saved artifacts`, ...v.findings.map((need, i) => `  #${i + 1}${need ? ' · requester needed' : ''}`)]),
       ])];
@@ -190,7 +190,7 @@ export class Inspector {
     const roster = this.hitRows.map(r => {
       const prefix = `${r === selected ? '›' : ' '} ${r.parent ? '↳ ' : ''}`;
       const budget = rosterWidth - visibleWidth(prefix);
-      const text = r.parent ? childIdentity(r, budget) : identity(r, budget);
+      const text = r.parent ? (r.question ?? childIdentity(r, budget)) : identity(r, budget);
       const lane = activity && wide ? (lanes.get(r.key)?.join('') ?? '············') : '';
       const name = fit(prefix + text, rosterWidth - (lane ? 13 : 0));
       return { r, text: lane ? name + ' '.repeat(rosterWidth-12-visibleWidth(name)) + lane : name };

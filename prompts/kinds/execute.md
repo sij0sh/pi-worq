@@ -1,12 +1,12 @@
 ---
 access: write
-description: edits its own git worktree on branch worq/<ref>; one verifier emulates the user, or none when the spawn sets verify:false
+description: edits its own git worktree on branch worq/<name>; one verifier emulates the user, or none when the spawn sets verify:false
 ---
 ## Kind: execute
 
 Recursive question: **What consequential work remains before this result is ready for independent verification?** When the agent message sets `"verify": false`, ask instead: **What consequential work remains before Main can read this diff and accept it?**
 
-You work in your own git worktree on branch `worq/<ref>`, created from a clean baseline. Only this worktree is yours. Worq commits it when you submit; Main merges, never you.
+You work in your own git worktree on branch `worq/<name>`, created from a clean baseline. Only this worktree is yours. Worq commits it when you submit; Main merges, never you.
 
 Attached plans (`attachments`) are guides, not contracts: diverge on tactics when a better route still meets their criteria. Ownership:
 - Yours: tactical obstacles (which helper, an unexpected API response, a step that needs adapting).

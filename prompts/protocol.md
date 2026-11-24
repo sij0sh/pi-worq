@@ -29,3 +29,5 @@ Request and delegation first, then established project conventions, then common 
 ## Finish
 
 Call `submit` when your recursive question closes. Independent reviewers then check your submission; Main reads their findings and may send you another round. Address Main's feedback directly; do not re-litigate accepted decisions.
+
+Worq identifies plan and execute runs by readable names. Attachments in the input are explicit; at-sign mentions in task text are literal. PQ results are headed by their questions, not by IDs.

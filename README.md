@@ -36,7 +36,7 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
 - **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/<ref>-<slug>.md`. `review-ready` means the review phase ended, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
-- **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, use `/worq execute <request> @<plan-ref>`. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
+- **Continue only when authorized:** `/worq send <ref> <text>` starts another round on a review-ready agent. To implement an existing plan, ask Main to execute with that plan in the explicit `attach` list. The candidate stays on `worq/<ref>`; verify it before merging by hand, then close with `/worq cancel <ref>`.
 
 ## Vocabulary
 
@@ -54,7 +54,7 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 | Tool | Params | Effect |
 |---|---|---|
-| `worq_spawn` | `kind`, `task`, `verify?`, `mode?` | start an agent; `@ref` in task attaches that agent's plan; `verify:false` (execute only) skips the verifier |
+| `worq_spawn` | `kind`, `title`, `task`, `attach?`, `verify?`, `mode?` | start an agent; give it a 2–4 word title; `attach` lists exact plan names or repo-relative plan paths; `verify:false` (execute only) skips the verifier |
 | `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
 | `worq_send` | `ref`, `text` | running → steer · waiting → answer · review-ready → next round |
 | `worq_cancel` | `ref` or `all` | close/cancel; kills subagents, reviewers, processes; removes worktree; keeps branch |
@@ -107,7 +107,7 @@ See `docs/configuration.md` for every key, inheritance, limits, pinned resources
 ## CLI
 
 ```sh
-worq sessions | list [ref] | log <ref> [-f] | spawn <kind> <task> | send <ref> <text> | cancel <ref|all>   [--pid N]
+worq sessions | list [ref] | log <ref> [-f] | spawn <kind> --title "Short title" [--attach <plan>]... <task> | send <ref> <text> | cancel <ref|all>   [--pid N]
 ```
 
 On Linux, the CLI uses a Unix socket. State defaults to `$XDG_STATE_HOME/pi-worq` or `~/.local/state/pi-worq`. On Windows it uses an authenticated local named pipe; discovery files live under `%LOCALAPPDATA%/pi-worq`. `WORQ_STATE_DIR` overrides either default. Keep it outside the repo and private to your user: Windows inherits directory ACLs, so do not use a shared state directory.
@@ -128,8 +128,10 @@ For complex work, delegate independent questions whose answers could change the 
 
 ### Routes, checkpoints and trusted Pi resources
 
-Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` for costly failures and independent, decision-changing questions (`worq spawn execute --mode fast "task"`). For plans, `fast` uses the existing subtraction reviewer to check requirements and unnecessary scope, falling back to the full kind roster if that reviewer is absent. Default and `thorough` plans use the full roster. Neither mode changes execute review, models, thinking, tools or caps. The optional spawn field `reason` records why Main chose the route. Omit mode for the default. `worq list <ref>` shows route, review policy, cumulative turns and role settings with JSON sources.
+Main can select `mode: "fast"` for a focused, reversible change or `"thorough"` for costly failures and independent, decision-changing questions (`worq spawn execute --title "Update report" --mode fast "task"`). For plans, `fast` uses the existing subtraction reviewer to check requirements and unnecessary scope, falling back to the full kind roster if that reviewer is absent. Default and `thorough` plans use the full roster. Neither mode changes execute review, models, thinking, tools or caps. The optional spawn field `reason` records why Main chose the route. Omit mode for the default. `worq list <ref>` shows route, review policy, cumulative turns and role settings with JSON sources.
 
 `limits.runTurns` (default 1000) covers the worker, retries, PQs and review roster across rounds. Per-session turn/time warnings and run warnings without grant headroom are display-only. If `limits.continuationTurns` (default 0) leaves room for a grant, near exhaustion an actionable checkpoint lets Main use `worq send REF '/continue N'`. Between requests a depleted run with headroom waits up to `limits.checkpointSeconds` (default 15) for approval. Streaming sessions cannot pause inside an SDK turn: approve before the hard stop. No grant raises a per-session turn/time limit, round cap, service quota or concurrency limit.
 
 In `pi-worq.json`, `models` entries may specify `skills`, `instructions` (e.g. AGENTS.md) and `extensions`. Each is an array of `{ "path": "relative/file", "sha256": "<64 lowercase hex digits>" }` under `<agentDir>/worq-resources/`, outside Git checkouts. Exact role lists replace corresponding family lists; `[]` removes the grant. No parent-role grants transfer. Configure `models["subagent.evidence"]` with its own model and skills, then delegate with `name: "evidence"`. Plain `delegate` selects `subagent`. `reviewer.intent` resolves independently. Skills and instructions contribute pinned text, not permissions. Executables require `approveExecutables: true` on the selected role and must be trusted standalone JavaScript modules: approval runs operator code in the Pi process, not a sandbox. Do not approve scripts that import candidate code. No candidate discovery is enabled.
+
+Agent names are exact lowercase slugs of their titles, with a numeric suffix on collision. Use the returned name for list, send, cancel and inspect. Plans are saved as `.agents/plans/plan-<name>.md`; revisions retain the same path. Existing plan files may be attached by their repo-relative path. At-sign mentions in tasks are always literal.

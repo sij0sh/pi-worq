@@ -7,7 +7,7 @@ import { Block, errorText, obj, PlanReport, PqAnswer, ReviewReport, text, WorkRe
 import type { Limits } from "./config.ts";
 import { git } from "./process.ts";
 import type { Kind, Prompts } from "./prompts.ts";
-import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, slug, workText, type ReviewRecord } from "./render.ts";
+import { clean, DIGEST, one, planMarkdown, pqMessage, reviewLines, reviewStatus, workText, type ReviewRecord } from "./render.ts";
 import { Conversation, WorkerHandoff, tool, type Driver, type Tool } from "./session.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
@@ -17,8 +17,8 @@ import { label, type Revision, type Telemetry } from './telemetry.ts';
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "review-ready" | "closed" | "cancelled" | "failed" | "handed-off";
 export const ENDED: AgentState[] = ["closed", "cancelled", "failed", "handed-off"];
 export interface AgentEvent { type: "review-ready" | "ask" | "checkpoint" | "warning" | "failed" | "handed-off"; ref: string; text: string }
-export interface Attachment { ref: string; path?: string; text: string }
-export interface Delegation { role?: string; id: string; question: string; why: string; state: "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
+export interface Attachment { path: string; text: string }
+export interface Delegation { role?: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
 
 /** Bounded concurrency shared by subagents and reviewers. */
@@ -64,6 +64,7 @@ export class Agent {
   readonly kind: Kind;
   readonly task: string;
   readonly attachments: Attachment[];
+  readonly title: string;
   readonly verify: boolean;
   readonly reason?: string;
   readonly mode?: "fast" | "thorough";
@@ -107,7 +108,7 @@ export class Agent {
   private warning = (message: string) => this.budgetNotice("warning", message);
   private budgetNotice(type: "warning" | "checkpoint", message: string) {
     this.log(message);
-    this.deps.notify({ type, ref: this.ref, text: `[worq ${this.ref}] ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
+    this.deps.notify({ type, ref: this.ref, text: `${this.headline} ${message}\nRound ${this.round}; ${this.openPqs} open PQs; last submission: ${one(this.submission ?? "none yet", 240)}\nRecent activity:\n${this.tail(5).map(h => h.line).join("\n")}` });
   }
   private readonly checkpoints = new Set<() => void>();
   private beforeAttempt = async (signal: AbortSignal) => {
@@ -150,9 +151,11 @@ export class Agent {
   private readonly deps: AgentDeps;
   private start!: () => void;
 
-  constructor(deps: AgentDeps, input: { ref: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; verify?: boolean; mode?: "fast" | "thorough"; reason?: string }) {
     this.deps = deps;
     this.ref = input.ref;
+    this.title = input.title ?? input.ref;
+    this.dir = input.dir;
     this.kind = input.kind;
     this.task = input.task;
     this.attachments = input.attachments;
@@ -163,10 +166,11 @@ export class Agent {
     const begun = new Promise<void>((resolve) => { this.start = resolve; });
     this.done = begun.then(() => this.run());
   }
+  get headline() { return `${this.title} (${this.ref}) · ${this.kind.name}`; }
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
-  get openPqs() { return this.delegations.filter((d) => d.state === "running").length; }
-  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!); this.start(); return this; }
+  get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
+  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title); this.start(); return this; }
 
   log(line: string) {
     this.history.push({ seq: ++this.seq, line: one(clean(line), 400) });
@@ -185,10 +189,10 @@ export class Agent {
   }
   view() {
     return {
-      ref: this.ref, id: this.id, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
+      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, round: this.round, task: this.task,
       budget: { spent: this.spent, allowance: this.deps.limits.runTurns + this.grant }, mode: this.mode, reason: this.reason,
       worktree: this.work, branch: this.branch, candidate: this.candidate, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
-      attachments: this.attachments.map((a) => a.ref), delegations: this.delegations.map(({ id, question, state, error }) => ({ id, question, state, error })),
+      attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
       handoff: this.handoff, reviews: this.reviews, started: this.started, finished: this.finished,
     };
   }
@@ -242,7 +246,7 @@ export class Agent {
     let box: ReturnType<typeof processTools> | undefined;
     try {
       signal.throwIfAborted();
-      this.dir = await agentDirectory(this.deps.state, this.id);
+      this.dir ??= await agentDirectory(this.deps.state, this.ref);
       if (this.kind.access === "write") {
         this.project = await baselineProject(root, signal);
         this.work = await worktree(this.project, this.dir, this.branch!, signal);
@@ -261,7 +265,7 @@ export class Agent {
         finish: {
           name: "submit", schema: write ? WorkReport : PlanReport,
           description: write ? "Submit your work for independent review." : "Submit your plan for independent review. Worq saves it to .agents/plans/.",
-          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "running").map((d) => d.id).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
+          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
         },
       });
       let message = JSON.stringify({ task: this.task, ...(this.mode ? { route: this.mode, reason: this.reason, guidance: this.mode === "fast" ? "Use the shortest focused check that demonstrates the result; escalate missing evidence to Main." : "Delegate independent decision-changing questions and verify high-cost failure cases." } : {}), kind: this.kind.name, ...(this.kind.access === "write" ? { verify: this.verify } : {}), ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
@@ -292,8 +296,8 @@ export class Agent {
       }
     } finally {
       this.controller.abort(new Block("ended", "Agent ended"));
-      const open = this.delegations.filter(d => d.state === "running").map(d => ({ id: d.id, question: d.question }));
-      for (const d of this.delegations) if (d.state === "running") d.state = "cancelled";
+      const open = this.delegations.filter(d => (d.state === "queued" || d.state === "running")).map(d => ({ id: d.id, question: d.question }));
+      for (const d of this.delegations) if ((d.state === "queued" || d.state === "running")) d.state = "cancelled";
       this.ask?.resolve(UNANSWERED);
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
@@ -346,30 +350,31 @@ export class Agent {
       this.log(`state ${this.state}`);
       this.publish();
       if (this.handoff) this.deps.notify({ type: "handed-off", ref: this.ref, text: [
-        `[worq ${this.ref}] handed-off (round ${this.round}); partial work is unreviewed.`,
+        `${this.headline} handed-off (round ${this.round}); partial work is unreviewed.`,
         this.handoff.path, this.candidate && `Prior candidate: ${this.candidate}`, this.plan && `Prior plan: ${this.plan.path}`, this.work && `Retained worktree: ${this.work} (Main owns cleanup).`,
         this.handoff.partial && `Unreviewed recovery commit: ${this.handoff.partial}`, this.handoff.error, this.handoff.inline,
       ].filter(Boolean).join("\n") });
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
-      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
+      if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
     }
   }
 
   private delegateTool(cwd: string): Tool {
     return tool("delegate",
-      "Delegate one probing question (PQ) to a fresh read-only subagent. Fire and forget: returns an id now; the answer arrives later as a [PQ dN] message. Use only for independent, bounded questions answerable by reading.",
+      "Delegate one probing question (PQ) to a fresh read-only subagent. Fire and forget: returns the question now; the answer arrives later as a [PQ] message headed by that question. Use only for independent, bounded questions answerable by reading.",
       obj({ question: text(800), why: text(400), name: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9-]{0,31}$" })) }), ({ question, why, name }) => {
         if (this.delegations.length >= this.deps.limits.subagents) throw new Block("pq-limit", `PQ limit (${this.deps.limits.subagents}) reached; investigate directly`);
-        const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "running" };
+        const d: Delegation = { role: name ? `subagent.${name}` : "subagent", id: `d${this.delegations.length + 1}`, question, why, state: "queued" };
         this.delegations.push(d);
-        this.log(`→ PQ ${d.id}: ${question}`);
+        this.log(`→ PQ: ${question}`);
         void this.pq(d, cwd, name ? `subagent.${name}` : "subagent");
-        return `Delegated ${d.id}. Keep working, or end your turn to wait; the answer arrives as a [PQ ${d.id}] message.`;
+        return `Delegated PQ: ${question}\nKeep working, or end your turn to wait for the [PQ] answer.`;
       });
   }
   private async pq(d: Delegation, cwd: string, role: string) {
     const key = this.id + ':' + d.id;
-    this.deps.telemetry?.add(key, this.ref, 'PQ ' + d.id, this.id, undefined, d.question);
+    this.deps.telemetry?.add(key, this.ref, 'PQ', this.id, undefined, clean(d.question).replace(/\s+/g, " ").trim());
+    this.deps.telemetry?.state(key, 'queued');
     const signal = this.signal;
     const { driver, prompts, limits, semaphore } = this.deps;
     let conversation: Conversation<typeof PqAnswer> | undefined;
@@ -377,10 +382,11 @@ export class Agent {
     try {
       this.deps.check(role);
       release = await semaphore.acquire(signal);
+      d.state = 'running';
       this.deps.telemetry?.state(key, 'running');
       conversation = new Conversation({
         driver, signal, beforeAttempt: this.beforeAttempt, chargeTurn: this.chargeTurn, warning: this.warning, turns: limits.subagentTurns, minutes: limits.subagentMinutes,
-        spec: { observe: this.deps.telemetry?.sink(key), profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`  ${d.id} ${line}`) },
+        spec: { observe: this.deps.telemetry?.sink(key), profile: "subagent", name: role, cwd, tools: readTools(cwd), system: `${prompts.pq}\n\n${prompts.guard}`, log: (line) => this.log(`PQ ${d.question}: ${line}`) },
         finish: { name: "answer", description: "Return your answer to the probing question.", schema: PqAnswer },
       });
       d.answer = await conversation.run(JSON.stringify({ question: d.question, why: d.why, context: this.task.slice(0, 2000) }, null, 2));
@@ -394,8 +400,8 @@ export class Agent {
       release?.();
       conversation?.dispose();
     }
-    this.log(`← PQ ${d.id} ${d.state}`);
-    this.conversation?.deliver(pqMessage(d.id, d.question, d.answer, d.error));
+    this.log(`← PQ ${d.state}: ${d.question}`);
+    this.conversation?.deliver(pqMessage(d.question, d.answer, d.error));
   }
   private askTool(): Tool {
     return tool("ask_main",
@@ -413,7 +419,7 @@ export class Agent {
             timer = setTimeout(() => { this.unresolved = question; resolve(UNANSWERED); }, this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-            this.deps.notify({ type: "ask", ref: this.ref, text: `[worq ${this.ref}] ${this.kind.name} agent asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
+            this.deps.notify({ type: "ask", ref: this.ref, text: `${this.headline} asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to reviewed-plan approval using provisional assumptions or alternatives. Never assume permission.` });
           });
         } finally {
           clearTimeout(timer);
@@ -431,9 +437,9 @@ export class Agent {
     let identity: Revision['identity'];
     if (this.kind.access === "read") {
       const plan = report as PlanReport;
-      const path = `.agents/plans/${this.ref}-${slug(this.task)}.md`;
-      const markdown = planMarkdown({ ref: this.ref, kind: this.kind.name, round: this.round, task: this.task, report: plan });
-      await writeScoped(root, path, markdown);
+      const path = `.agents/plans/plan-${this.ref}.md`;
+      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, round: this.round, task: this.task, report: plan });
+      await writeScoped(root, path, markdown, { create: !this.plan });
       if (this.planRound !== undefined && this.plan?.path === path) this.deps.telemetry?.source(this.id, this.planRound, true);
       this.planRound = this.round;
       identity = { digest: createHash('sha256').update(markdown, 'utf8').digest('hex') };
@@ -525,7 +531,7 @@ export class Agent {
   /** Display-only round notice; `worq_list` holds the full findings. */
   digest() {
     const write = this.kind.access === "write";
-    const head = `[worq ${this.ref}] ${this.kind.name} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
+    const head = `${this.headline} round ${this.round} review-ready · ${reviewStatus(this.reviews)}`;
     const where = write ? `Branch ${this.branch} @ ${this.candidate?.slice(0, 10)}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
     return [head, where, "Reviews:",
       ...reviewLines(this.reviews, { ...DIGEST, label: `worq_list(${this.ref})` }),

@@ -5,15 +5,17 @@ import { join } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
 import { Block, errorText, literals, obj, parse, text } from "./contracts.ts";
 import { controlExtension, controlPipe, windows } from "./platform.mjs";
-import type { Worq } from "./worq.ts";
+import { REF_PATTERN, type Worq } from "./worq.ts";
 
-const ref = Type.String({ pattern: "^@?[0-9a-fA-F]{4}$", description: "Agent ref from worq_spawn or worq_list" });
+const ref = Type.String({ pattern: REF_PATTERN, description: "Exact agent name from worq_spawn or worq_list" });
 /** One schema for the Pi tools, /worq subcommands and the worq CLI. */
 export function ops(kinds: string[]) {
   return {
     spawn: obj({
       kind: literals(kinds as [string, ...string[]]),
-      task: Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver. Include @<ref> to attach another agent's plan." }),
+      task: Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver. At-sign mentions are literal." }),
+      title: Type.String({ minLength: 1, maxLength: 80, description: "A 2–4 word title summarizing this work" }),
+      attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names or repo-relative paths under .agents/plans/" })),
       reason: Type.Optional(text(400)),
       mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("thorough")])),
       verify: Type.Optional(Type.Boolean({ description: "execute only; false skips the verifier" })),
@@ -34,10 +36,10 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown)
   const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
     case "spawn": {
-      const { kind, task, verify, mode, reason } = args as Static<Ops["spawn"]>;
-      const agent = await worq.spawn(kind, task, verify ?? true, mode, reason);
-      const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => `@${a.ref}`).join(", ")} attached` : "";
-      return { text: `Spawned ${kind} agent ${agent.ref}${attached}. It runs in the background; its review digest or questions arrive as [worq ${agent.ref}] messages.`, data: { ref: agent.ref } };
+      const { kind, task, verify, mode, reason, title, attach } = args as Static<Ops["spawn"]>;
+      const agent = await worq.spawn(kind, task, { verify, mode, reason, title, attach });
+      const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
+      return { text: `Spawned ${kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its review digest or questions arrive as Worq notifications.`, data: { ref: agent.ref } };
     }
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }

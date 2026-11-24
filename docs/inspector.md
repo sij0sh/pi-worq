@@ -13,3 +13,5 @@ Context is the child SDK's estimate, not Main's context. Cache totals cover fina
 Wide Activity views include aligned one-minute event lanes, one five-second bucket per cell. Each mark represents the last retained event in that bucket, not continuous utilization. Agents shows the selected role’s lineage, delegated questions and pinned skill names. All projections are session-local.
 
 Offline Linux native smoke: `WORQ_NATIVE_INSPECTOR=1 node --experimental-strip-types --test test/inspector-native.test.ts`. The fixture uses a short temporary state path and clean Pi configuration. Its dummy API key enables model selection only; it sends no model prompts.
+
+The dock and agent roster preview each probing question rather than numbering PQs. Select its row for the full question and status; identical questions still run and report independently.
