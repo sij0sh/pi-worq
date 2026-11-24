@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { agentDock } from "../src/dock.ts";
 import { loadPrompts } from "../src/prompts.ts";
+import { Telemetry } from "../src/telemetry.ts";
 import { skillTool } from "../src/runtime/resources.ts";
 import { loadWorkflows } from "../src/runtime/workflows.ts";
 import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
@@ -177,16 +179,21 @@ test("runWorkflow uses the workflow ref and either the written task or the user'
   const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
   const { prompts } = userPrompts(agentDirPath);
   const tasks: string[] = [];
+  const telemetry = new Telemetry();
   const { worq, next } = setup(root, state, {
     "agent.documentation": async (turn) => {
       tasks.push(JSON.parse(turn.text).task);
       await turn.tool("submit", planSubmission);
     },
-  }, {}, undefined, prompts);
+  }, {}, telemetry, prompts);
   const kind = prompts.kinds.get("documentation")!;
   const agent = await worq.runWorkflow(kind);
   assert.equal(agent.ref, "documentation-workflow");
   assert.equal(agent.title, "documentation");
+  const theme = { fg: (_: string, value: string) => value } as never;
+  const dock = agentDock(telemetry, theme, () => false, () => {}, () => {}, () => 24);
+  assert.match(dock.render(96)[2]!, /^ ● Workflow : documentation\s/);
+  assert.match(dock.render(34)[2]!, /^Workflow : documentation (?!documentation)/);
   assert.equal(agent.task, "Run the documentation workflow on this repository and submit its result.");
   await next("review-ready", agent.ref);
   await worq.cancel(agent.ref);

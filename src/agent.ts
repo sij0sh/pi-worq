@@ -173,7 +173,7 @@ export class Agent {
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
   get openPqs() { return this.delegations.filter((d) => (d.state === "queued" || d.state === "running")).length; }
-  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title); this.start(); return this; }
+  launch() { this.deps.telemetry?.add(this.id, this.ref, label(this.kind.name)!, undefined, undefined, undefined, this.title, Boolean(this.kind.workflow)); this.start(); return this; }
 
   log(line: string) {
     this.history.push({ seq: ++this.seq, line: one(clean(line), 400) });

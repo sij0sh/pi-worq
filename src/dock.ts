@@ -45,9 +45,11 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
       const age = elapsed((working(r) ? Date.now() : r.since) - r.born);
       const [cache,speed,turns] = metrics(r);
       if(w < 35 && r.question && r.parent) return cell(`↳ ${r.question}`,w);
-      const showKind = !r.parent && r.title != null && (r.role === 'plan' || r.role === 'execute');
-      const title = showKind ? `${r.role}: ${r.title}` : r.title;
-      if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : showKind ? r.state : `${r.role} ${r.state}`}`,w);
+      const prefix = !r.parent && r.title != null
+        ? r.workflow ? 'Workflow : ' : r.role === 'plan' || r.role === 'execute' ? `${r.role}: ` : ''
+        : '';
+      const title = prefix ? `${prefix}${r.title}` : r.title;
+      if(w < 35) return cell(`${title ?? r.ref} ${r.actor ? `${r.state} Main` : prefix ? r.state : `${r.role} ${r.state}`}`,w);
       const id = `${r.parent?' ↳':r.state==='failed'?' ×':r.actor?' ◆':' ●'} ${r.question ?? (r.parent ? r.role : title ?? `${r.role} ${r.ref}`)}`;
       const activity = r.blocker ? `${r.state} · Main` : r.current.values().next().value?.name ?? r.phase ?? r.state;
       const rest = table(['',activity,age,cache,speed,turns,contextUsage(r)]).slice(sizes[0]);
