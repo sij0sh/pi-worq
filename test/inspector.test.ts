@@ -303,3 +303,32 @@ test('paused Activity at 20 columns shows Jump to live without hiding navigation
   assert.equal(live[2], 'Live');
   assert.match(live[3], /^aaaa · start new/);
 });
+
+test('dock: MODEL opens the runtime picker, [×] cancels, the rest inspects; controls show pending changes', () => {
+  const data = new Telemetry();
+  data.add('owner', 'live-agent', 'plan', undefined, undefined, undefined, 'Live agent');
+  data.sink('owner')({ setup: { sdk: 'pi', model: 'p/model-a', thinking: 'low', skills: [] } });
+  const calls: string[] = [];
+  const dock = agentDock(data, theme, () => false, () => {}, (_ref, key) => calls.push(`inspect ${key}`), () => 24, (key, action) => calls.push(`${action} ${key}`));
+  const width = 120;
+  const [, labels, row] = dock.render(width);
+  assert.ok([labels, row].every(line => visibleWidth(line!) <= width));
+  assert.match(row!, /pi\/model-a\/low ▾/);
+  assert.match(row!, /\[×\]\s*$/);
+  const click = (x: number) => dock.handleMouse({ type: 'click', button: 'left', x, y: 2, width } as never);
+  click(row!.indexOf('pi/model-a'));
+  click(row!.lastIndexOf('[×]') + 1);
+  click(3);
+  assert.deepEqual(calls, ['runtime owner', 'cancel owner', 'inspect owner']);
+  data.sink('owner')({ change: '◷ model-a/low → model-a/high' });
+  assert.match(dock.render(width)[2]!, /◷ model-a\/low/);
+  data.state('owner', 'cancelling');
+  const cancelling = dock.render(width)[2]!;
+  assert.match(cancelling, /× cancelling/);
+  assert.doesNotMatch(cancelling, /\[×\]|▾/, 'no controls while cancelling');
+  calls.length = 0;
+  click(cancelling.length - 2);
+  assert.deepEqual(calls, ['inspect owner']);
+  data.sink('owner')({ setup: { sdk: 'pi', model: 'p/model-b', thinking: 'high', skills: [] } });
+  assert.equal(data.rows.get('owner')!.speed, undefined, 'model-specific estimates reset on a switch');
+});

@@ -44,7 +44,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     // Keep Activity readable, but give extra space to titles and PQ questions.
     const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);
     // MODEL sits against ACTIVITY and takes only what the longest visible label needs, so the slack stays with titles.
-    const longest = Math.max(0, ...visible.map(r => visibleWidth(modelLabel(r))));
+    const longest = Math.max(0, ...visible.map(r => visibleWidth(modelLabel(r)) + (act ? 2 : 0)));
     const modelWidth = Math.max(12, longest+1);
     const actions = act && w >= 74 ? 4 : 0;
     const showModel = w >= 74 && longest > 0 && w-40-actions-activityWidth-modelWidth >= 18;

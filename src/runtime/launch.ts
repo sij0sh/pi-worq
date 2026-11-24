@@ -18,7 +18,7 @@ export async function modelChoices(driver: Driver, role: string, current: Runtim
         const supported = driver.capabilities(role, candidate);
         assertRuntime(candidate, supported, extensions);
         choices.push({ sdk: name, model, levels: supported.thinking });
-      } catch { continue; }
+      } catch { /* not runnable for this role */ }
     }
   }
   return choices;

@@ -144,3 +144,19 @@ export async function runtimePicker(ui: ExtensionContext['ui'], request: Runtime
     },
   }), { overlay: true, overlayOptions: { width: '70%', anchor: 'center' } });
 }
+
+/** Yes/No as an overlay, so it stacks above the inspector and keeps focus. Defaults to No. */
+export function confirmOverlay(ui: ExtensionContext['ui'], title: string, message: string): Promise<boolean> {
+  let yes = false;
+  return ui.custom<boolean>((tui, theme, _keys, done) => ({
+    invalidate() {},
+    render: (width) => boxed(theme, width, [theme.fg('warning', clean(title)), clean(message),
+      `${yes ? '›' : ' '} Yes   ${yes ? ' ' : '›'} No`, theme.fg('muted', 'Y yes · N/Esc no · ←→ choose · Enter confirm')]),
+    handleInput(data) {
+      if (data.toLowerCase() === 'y') return done(true);
+      if (data.toLowerCase() === 'n' || matchesKey(data, 'escape')) return done(false);
+      if (matchesKey(data, 'enter')) return done(yes);
+      if (matchesKey(data, 'left') || matchesKey(data, 'right') || matchesKey(data, 'tab')) { yes = !yes; tui.requestRender(); }
+    },
+  }), { overlay: true, overlayOptions: { width: '60%', anchor: 'center' } });
+}

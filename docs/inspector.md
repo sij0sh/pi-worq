@@ -2,6 +2,13 @@
 
 The agent dock sits below the editor. Expand or collapse it with `[−]` / `[+]` or `/worq-dock`. It groups active children under their owner, caps the visible rows and reports hidden rows as `+N` in its header. In fullscreen mode click Inspect for the live timeline, or a row for that role’s details. Live blockers come first; failed owners needing Main remain visible even with no live owners. `/worq-inspect [ref]` opens the read-only inspector even when Worq tools are off. `/worq list [ref]` remains the legacy detailed surface, including outside TUI mode.
 
+## Session controls
+
+Live rows (owners, PQs, reviewers) are controllable. In wide docks click MODEL (`▾`) to change model/thinking, or `[×]` to cancel; anywhere else on the row still inspects. In the inspector's Agents view press **M** (runtime) or **X** (cancel) on the selected role.
+
+- Model/thinking: same harness only (locked). Session, history, budgets and turns are kept. Applies immediately when idle, otherwise at the next safe boundary (current prompt settles); ACTIVITY shows `◷ old → new`, then `↻ switching`. Speed/cache/context estimates reset. A manual model change supersedes the preset fallback. CLI: `worq configure <ref> [--model p/id] [--thinking level]`, `/worq configure <ref> <model|-> [thinking]` (owners only).
+- Cancel (confirmed): owner → whole family (review-ready = normal close, branch kept); PQ → that question only, parent gets `[PQ cancelled]`; reviewer → verdict `unknown`, round still settles. Row shows `× cancelling` until termination.
+
 The inspector opens on live Activity, newest event first, labeled with its owner ref and child role when applicable. Passing a ref limits the timeline and roster to that family. Scroll down to older activity to pause; press **J** (Jump to live) to resume. New events never move the selected role used by Agents and Evidence.
 
 Tab changes views. Enter switches between detail scrolling and role selection with the arrows; Escape returns to the roster, then closes. Wide terminals show both panes; narrow terminals start on the detail pane so the latest event is visible without opening the roster.

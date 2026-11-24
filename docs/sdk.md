@@ -22,7 +22,7 @@ src/session.ts            Conversation (budgets, nudges, fallback policy, queuei
 | Runtime resolution (role → preset) | Native model resolution |
 | Shared resources, prompt composition, `skill` tool | Loading native extension bytes |
 | Tool schema validation and dispatch fencing | Native tool registration |
-| Fallback policy (when, to what, once) | `switchModel` mechanics |
+| Fallback policy and live runtime changes (when, to what, validation) | `configure` mechanics |
 | Budgets, turn charging | Emitting `turn` events |
 | Workflow and completion | Session execution |
 | Event → log/telemetry formatting | Native event translation |
@@ -63,7 +63,7 @@ interface Handle {
   steer?(text): Promise<void>;    // optional; absent or throwing → core queues
   readonly streaming: boolean;
   abort(): Promise<void>;
-  switchModel?(ref: string): Promise<void>;
+  configure?(change: { model?; thinking? }): Promise<void>;  // keeps history; harness stays locked
   dispose(): void;
 }
 type SessionEvent =
@@ -91,7 +91,7 @@ Pure data; `assertRuntime(runtime, caps, extensionCount)` judges and names the p
 
 | Field | Meaning | Denial |
 |---|---|---|
-| `switchModel` | `Handle.switchModel` works | `fallbackModel` set → `capability` |
+| `switchModel` | `Handle.configure` can change the model | `fallbackModel` set → `capability` |
 | `thinking` | Levels the runtime's model accepts; `[]` = no level control | Configured level outside the list → `capability` |
 | `context` | `replace` + no ambient instructions required | Anything else refuses the session |
 | `extensions` | Can load shared native extensions | Installed extensions + `false` → `capability` |
@@ -124,3 +124,5 @@ For a process-boundary SDK the minimum `ask_main`-preserving equivalent is a loo
 - Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and extension-registered providers match Main.
 - Capabilities: `switchModel: true`, thinking from the model, `extensions: true`, `turnUnit: "request"`, isolated context.
 - A fallback model that cannot take the level is clamped by Pi with one log line.
+- `configure` uses `session.setModel` / `setThinkingLevel`; the level is mutable, so a later fallback keeps Main's latest choice.
+- Live changes: `Conversation.configure` applies at once when idle, else queues (merged) until the running prompt settles; never interrupts a tool. A manual model change cancels the preset fallback.

@@ -1,4 +1,4 @@
-import { elapsed, metrics, shade } from './dock.ts';
+import { activityOf, elapsed, metrics, shade, type SessionAction } from './dock.ts';
 import { type TuiMouseEvent, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 import type { Outcome, Row, Telemetry } from './telemetry.ts';
@@ -53,7 +53,9 @@ export class Inspector {
   private readonly height: () => number;
   private readonly redraw: () => void;
   private readonly close: () => void;
-  constructor(data: Telemetry, ref: string | undefined, theme: Theme, height: () => number, redraw: () => void, close: () => void, key?: string) {
+  private readonly act?: (key: string, action: SessionAction) => void;
+  constructor(data: Telemetry, ref: string | undefined, theme: Theme, height: () => number, redraw: () => void, close: () => void, key?: string, act?: (key: string, action: SessionAction) => void) {
+    this.act = act;
     if (key) { this.key = key; this.tab = 0; }
     this.data = data;
     this.ref = ref;
@@ -80,6 +82,12 @@ export class Inspector {
     if (matchesKey(input, 'escape')) { if (!this.focusDetail) return this.close(); this.focusDetail = false; }
     else if (matchesKey(input, 'tab') || matchesKey(input, 'shift+tab')) { this.tab = (this.tab + (matchesKey(input, 'tab') ? 1 : 2)) % tabs.length; this.offset = 0; }
     else if (matchesKey(input, 'enter')) { this.focusDetail = !this.focusDetail; this.offset = 0; }
+    else if (this.act && this.tab === 0 && (matchesKey(input, 'x') || matchesKey(input, 'm'))) {
+      // Keyboard path for narrow terminals: cancel or reconfigure the selected session.
+      const row = this.key ? this.data.rows.get(this.key) : undefined;
+      if (row && active(row) && row.state !== 'cancelling') this.act(row.key, matchesKey(input, 'x') ? 'cancel' : 'runtime');
+      return;
+    }
     else if (this.tab === ACTIVITY && (matchesKey(input, 'j') || matchesKey(input, 'shift+j'))) {
       this.pausedActivity = undefined;
       this.activityPage.offset = 0;
@@ -139,6 +147,8 @@ export class Inspector {
         ...[...row.current.values()].map(c => `Current: ${c.name} · ${age(c.at)}`),
         row.last ? `Last: ${row.last.name} · ${outcome(row.last.outcome)}` : 'Last tool: not recorded',
         ...(row.setup?.sdk ? [`Harness: ${row.setup.sdk}`] : []), `Model: ${row.setup?.model ?? 'unavailable'}`, `Thinking: ${row.setup?.thinking ?? 'unavailable'}`,
+        ...(row.change || row.state === 'cancelling' ? [`Control: ${activityOf(row)}`] : []),
+        ...(this.act && active(row) && row.state !== 'cancelling' ? ['M change model/thinking · X cancel'] : []),
         `Injected pinned skills: ${row.setup ? row.setup.skills.join(', ') || 'none' : 'unavailable'}`,
         `Child context estimate: ${row.context?.percent == null ? 'unavailable' : `${row.context.percent.toFixed(1)}%${row.phase === 'closed' || Date.now() - row.context.at > 60_000 ? ' (stale)' : ''}`}`,
         `SDK-normalized cache · child session, finalized responses (${c.responses})`, `Read: ${c.reads ? c.read : 'unavailable'} · ${c.reads}/${c.responses} with SDK field`, 'Provider coverage unverified; zero may be an SDK default.', `Write: ${c.writes ? c.write : 'unavailable'} · ${c.writes}/${c.responses} with SDK field`];
@@ -173,8 +183,9 @@ export class Inspector {
       ? (width >= 23 ? 'Paused · J Jump to live' : 'J · Jump to live')
       : 'Live';
     const arrows = `↑↓ ${this.focusDetail ? 'scroll' : 'select'}`;
-    const hint = fit(width < 24 ? `${arrows} ↵ Tab Esc` : width < 56 ? `${arrows} · ↵ · Tab · Esc`
-      : `${arrows} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close`, width);
+    const controls = this.act && this.tab === 0 ? ' · M runtime · X cancel' : '';
+    const hint = fit(width < 24 ? `${arrows} ↵ Tab Esc` : width < 56 ? `${arrows} · ↵ · Tab · Esc${controls ? ' · M · X' : ''}`
+      : `${arrows} · Enter ${this.focusDetail ? 'roster' : 'detail'} · Tab views · Esc back/close${controls}`, width);
     const start = Math.max(0, index - height + 1);
     const left = Math.min(40, Math.floor(width * .4));
     const rosterWidth = wide ? left : width;

@@ -438,7 +438,7 @@ export class Agent {
       conversation?.dispose();
     }
     this.log(`← PQ ${d.state}: ${d.question}`);
-    this.conversation?.deliver(pqMessage(d.question, d.answer, d.error));
+    this.conversation?.deliver(pqMessage(d.question, d.answer, d.error, d.state === "cancelled"));
   }
   private askTool(): Tool {
     return tool("ask_main",

@@ -6,7 +6,8 @@ import { Telemetry } from './src/telemetry.ts';
 import { Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type { AgentEvent } from "./src/agent.ts";
-import { launchPicker } from './src/launch-picker.ts';
+import { confirmOverlay, launchPicker, runtimePicker } from './src/launch-picker.ts';
+import type { SessionAction } from './src/dock.ts';
 import { loadConfig } from "./src/runtime/config.ts";
 import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
@@ -103,7 +104,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       ui.ui.setWidget?.('worq', live ? (tui, theme) => {
         redrawWidget = () => tui.requestRender();
         const clock = setInterval(redrawWidget, 1000).unref();
-        const dock = agentDock(telemetry, theme, () => folded, toggle, (ref, key) => { if (ui) void inspect(ref ?? '', ui, key); }, () => tui.terminal?.rows ?? 24);
+        const dock = agentDock(telemetry, theme, () => folded, toggle, (ref, key) => { if (ui) void inspect(ref ?? '', ui, key); }, () => tui.terminal?.rows ?? 24, (key, action) => { if (ui) void act(ui, key, action); });
         return Object.assign(dock, { dispose() { clearInterval(clock); } });
       } : undefined, { placement: 'belowEditor' });
     };
@@ -205,7 +206,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
 
     pi.registerCommand("worq", {
-      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq workflow · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>",
+      description: "Enable tools or ask Main: /worq [plan|execute] <request> · /worq workflow · /worq off · /worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all> · /worq configure <ref> <model|-> [thinking]",
       async handler(args, ctx) {
         if (closing) return;
         const value = args.trim();
@@ -220,6 +221,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           if (word === "workflow") {
             if (value !== "workflow") { say(ctx, "Usage: /worq workflow", "error"); return; }
             await launchWorkflow(ctx);
+            return;
+          }
+          if (word === "configure") {
+            const [model, thinking] = rest;
+            if (!ref || !model) { say(ctx, "Usage: /worq configure <ref> <provider/model|-> [thinking]", "error"); return; }
+            say(ctx, (await run(ctx, "configure", { ref, ...(model !== "-" ? { model } : {}), ...(thinking ? { thinking } : {}) })).text);
             return;
           }
           if (word === "list" || word === "send" || word === "cancel") {
@@ -240,6 +247,29 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       },
     });
 
+    /** Dashboard controls for one live session (owner, PQ or reviewer). One dialog at a time. */
+    let acting = false;
+    async function act(ctx: ExtensionContext, key: string, action: SessionAction) {
+      if (closing || acting || ctx.mode !== 'tui' || !instance) return;
+      acting = true;
+      try {
+        const session = instance.session(key);
+        if (action === 'cancel') {
+          if (!await confirmOverlay(ctx.ui, `Cancel ${session.label}?`, session.consequence)) return;
+          say(ctx, await instance.sessions.get(key)?.cancel() ?? 'Session already ended');
+          status();
+          return;
+        }
+        const choices = await instance.choices(key);
+        const runtime = session.runtime() ?? { name: 'main', sdk: choices[0]?.sdk ?? 'pi', path: '', via: '' };
+        // choices[0] is the current runtime with Main's model resolved.
+        const change = await runtimePicker(ctx.ui, { label: session.label, current: { ...runtime, model: runtime.model ?? choices[0]?.model }, choices, pending: session.pending() });
+        if (!change) return;
+        say(ctx, await instance.configure(key, change));
+      } catch (error) { say(ctx, errorText(error), 'error'); }
+      finally { acting = false; }
+    }
+
     pi.registerCommand('worq-dock', { description: 'Collapse or expand the agent dock', handler: async () => toggle() });
     async function inspect(args: string, ctx: ExtensionContext, key?: string) {
         if (closing || closeInspector) return;
@@ -251,7 +281,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
           await ctx.ui.custom<void>((tui, theme, _keys, done) => {
             redrawInspector = () => tui.requestRender();
             closeInspector = () => { closeInspector = undefined; redrawInspector = undefined; done(undefined); };
-            return new Inspector(telemetry, ref || undefined, theme, () => tui.terminal.rows, redrawInspector, closeInspector, key);
+            return new Inspector(telemetry, ref || undefined, theme, () => tui.terminal.rows, redrawInspector, closeInspector, key, (k, action) => void act(ctx, k, action));
           }, { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', anchor: 'center' } });
         } finally { closeInspector = undefined; redrawInspector = undefined; }
     }

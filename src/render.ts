@@ -22,8 +22,8 @@ export function workText(report: WorkReport) {
   return [report.summary, report.changes?.length && `Changes:\n${bullets(report.changes)}`, report.checksRun?.length && `Checks run:\n${bullets(report.checksRun)}`,
     report.assumptions?.length && `Assumptions:\n${bullets(report.assumptions)}`, report.concerns?.length && `Concerns:\n${bullets(report.concerns)}`].filter(Boolean).join("\n\n");
 }
-export function pqMessage(question: string, answer?: PqAnswer, error?: string) {
-  if (!answer) return `[PQ failed] ${question}\n${error ?? "no answer"}\nInvestigate it yourself or proceed without it.`;
+export function pqMessage(question: string, answer?: PqAnswer, error?: string, cancelled = false) {
+  if (!answer) return `[PQ ${cancelled ? "cancelled" : "failed"}] ${question}\n${error ?? "no answer"}\nInvestigate it yourself or proceed without it.`;
   return [`[PQ] ${question}`, `Answer (${answer.basis}): ${answer.answer}`,
     answer.unresolved?.length && `Unresolved:\n${bullets(answer.unresolved)}`, answer.newQuestions?.length && `New questions:\n${bullets(answer.newQuestions)}`,
     "Integrate: what did this resolve, contradict, or newly make material?"].filter(Boolean).join("\n");

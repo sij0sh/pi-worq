@@ -121,6 +121,7 @@ export class Conversation<T extends TSchema> {
    */
   async configure(change: RuntimeChange): Promise<"applied" | "queued"> {
     if (this.closed) throw new Block("ended", `${this.options.spec.name} has ended`);
+    if (this.handle && !this.handle.configure) throw new Block("capability", `${this.options.spec.name}: this harness cannot change a live session`);
     this.handle?.check?.(change);
     this.change = { ...this.change, ...change };
     if (!this.handle || this.handle.streaming) {
