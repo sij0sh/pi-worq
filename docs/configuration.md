@@ -85,7 +85,7 @@ Every value is optional; absent keys use these defaults.
 | Key | Default | Applies to |
 |---|---|---|
 | `agents` | 4 | Active (non-parked) non-inline agents; spawn or resume fails as `at-capacity` |
-| `scouts` | 12 | Active inline read-only agents (e.g. `scout`); concurrent execution remains bounded by `parallel` |
+| `inlineAgents` | 12 | Active inline read-only agents (e.g. `scout`); concurrent execution remains bounded by `parallel` |
 | `subagents` | 6 | PQs per agent (`pq-limit`) |
 | `parallel` | 4 | Concurrent subagents (PQs and reviews) |
 | `asks` | 3 | `ask_main` calls per session |

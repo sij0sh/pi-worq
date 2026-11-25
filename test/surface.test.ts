@@ -79,7 +79,7 @@ test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role
   assert.equal(KINDS.get("plan")!.output, "plan");
   assert.equal(KINDS.get("plan")!.explore, "map");
   assert.equal(KINDS.get("execute")!.access, "write");
-  assert.equal(KINDS.get("execute")!.explore, "none");
+  assert.equal(KINDS.get("execute")!.explore, "map");
   assert.equal(KINDS.get("scout")!.access, "read");
   assert.equal(KINDS.get("scout")!.output, "inline");
   assert.equal(KINDS.get("scout")!.explore, "auto");

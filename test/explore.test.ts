@@ -238,14 +238,14 @@ test("workflow loader: validates explore frontmatter (auto | map | none)", async
     const line = explore !== undefined ? `explore: ${explore}\n` : "";
     await writeFile(join(dir, "workflows", name, "SKILL.md"), `---\nname: ${name}\ndescription: Desc\naccess: read\n${line}---\nBody.\n`);
   };
-  await writePkg("default-off");
+  await writePkg("default-map");
   await writePkg("auto-pkg", "auto");
   await writePkg("map-pkg", "map");
   await writePkg("none-pkg", "none");
   await writePkg("bad-pkg", "full");
 
   const { kinds, problems } = loadWorkflows(dir);
-  assert.equal(kinds.get("default-off")!.explore, "none");
+  assert.equal(kinds.get("default-map")!.explore, "map");
   assert.equal(kinds.get("auto-pkg")!.explore, "auto");
   assert.equal(kinds.get("map-pkg")!.explore, "map");
   assert.equal(kinds.get("none-pkg")!.explore, "none");
@@ -253,7 +253,25 @@ test("workflow loader: validates explore frontmatter (auto | map | none)", async
   assert.match(problems[0]?.message ?? "", /explore must be auto, map or none/);
 });
 
-test("Worq: cross-swarm prefix caching, repo-state invalidation, and execute opt-out", async (t) => {
+test("workflow loader: write kinds default to map and reject explore: auto", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "worq-wf-explore-write-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const writePkg = async (name: string, explore?: string) => {
+    await mkdir(join(dir, "workflows", name), { recursive: true });
+    const line = explore !== undefined ? `explore: ${explore}\n` : "";
+    await writeFile(join(dir, "workflows", name, "SKILL.md"), `---\nname: ${name}\ndescription: Desc\naccess: write\n${line}---\nBody.\n`);
+  };
+  await writePkg("write-default");
+  await writePkg("write-none", "none");
+  await writePkg("write-auto", "auto");
+  const { kinds, problems } = loadWorkflows(dir);
+  assert.equal(kinds.get("write-default")!.explore, "map");
+  assert.equal(kinds.get("write-none")!.explore, "none");
+  assert.equal(kinds.has("write-auto"), false);
+  assert.match(problems.map((p) => p.message).join("\n"), /explore: auto is only valid when access is read/);
+});
+
+test("Worq: cross-swarm prefix caching, repo-state invalidation, and execute map default", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
 
@@ -299,11 +317,15 @@ test("Worq: cross-swarm prefix caching, repo-state invalidation, and execute opt
   assert.match(systems.get("plan")!, /## Repository Snapshot \(Tier 2: Symbol Map\)/);
   await worq.cancel(plan.ref);
 
-  // Execute defaults to explore: none -> unaffected.
+  // Execute inherits the explore: map default and reuses plan's cached baseline snapshot.
   const exec = await worq.spawn("execute", "Edit greeting", { title: "Edit greeting" });
   await next("parked", exec.ref);
-  assert.equal(exec.explore, undefined);
-  assert.doesNotMatch(systems.get("execute")!, /## Repository Snapshot/);
+  assert.equal(exec.explore?.tier, 2);
+  assert.strictEqual(exec.explore, plan.explore, "execute reuses plan's snapshot on the same baseline");
+  assert.match(systems.get("execute")!, /## Repository Snapshot \(Tier 2: Symbol Map\)/);
+  // Shared prefix: AUTHORITY + snapshot are byte-identical across kinds; skill body follows.
+  const shared = `${systems.get("plan")!.split(plan.explore!.text)[0]}${plan.explore!.text}`;
+  assert.ok(systems.get("execute")!.startsWith(shared), "plan and execute share the AUTHORITY + snapshot prefix");
   await worq.cancel(exec.ref);
 
   // Dirty edit (and a second edit to the same dirty file!) invalidates the snapshot cache.

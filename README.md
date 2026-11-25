@@ -100,7 +100,7 @@ Select it with `worq_spawn { kind, sdk: "claude-code", model? }`, `worq spawn <k
 ```json
 {
   "limits": {
-    "agents": 4, "scouts": 12, "subagents": 6, "parallel": 4, "asks": 3, "idleMinutes": 60,
+    "agents": 4, "inlineAgents": 12, "subagents": 6, "parallel": 4, "asks": 3, "idleMinutes": 60,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
     "agentMinutes": 30, "subagentMinutes": 5, "reviewerMinutes": 10, "askMinutes": 15,
     "services": 2

@@ -2,7 +2,6 @@
 name: plan
 description: read-only; settles consequential decisions and saves a plan to .agents/plans/
 access: read
-explore: map
 disable-model-invocation: false
 ---
 

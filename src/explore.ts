@@ -462,7 +462,7 @@ function formatAuxSummary(aux: readonly StatFile[], maxBytes: number): string {
 function buildTier1(sources: readonly ReadSourceFile[], aux: readonly StatFile[], stats: ExploreStats, maxBytes: number): string | undefined {
   const header = [
     "## Repository Snapshot (Tier 1: Inline Source)",
-    `Static snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}, ${stats.sourceLines} LoC)${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"} listed below` : ""}. All source files are inlined with 1-based line numbers—cite path:line directly when answered; call read_file only for non-inlined files.`,
+    `Baseline snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}, ${stats.sourceLines} LoC)${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"} listed below` : ""}. All source files are inlined with 1-based line numbers—cite path:line directly when answered; call read_file only for non-inlined files.`,
   ].join("\n");
 
   const sourceManifest = sources.length
@@ -510,7 +510,7 @@ function buildTier2(
 ): string {
   const header = [
     "## Repository Snapshot (Tier 2: Symbol Map)",
-    `Static snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}, ${stats.sourceLines} LoC)${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"}` : ""}. Jump directly to read_file(path, offset) or targeted search using the line numbers below.`,
+    `Baseline snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}, ${stats.sourceLines} LoC)${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"}` : ""}. Jump directly to read_file(path, offset) or targeted search using the line numbers below.`,
   ].join("\n");
 
   const manifestBlock = manifests.length
@@ -574,7 +574,7 @@ function buildTier3(
   const maxBytes = limits.tier3PayloadBytes;
   const header = [
     "## Repository Snapshot (Tier 3: Structural Skeleton)",
-    `Static snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}${stats.sourceLines ? `, ${stats.sourceLines} LoC` : ""})${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"}` : ""}. Use search and list_files inside the relevant module below.`,
+    `Baseline snapshot: ${stats.sourceFiles} source file${stats.sourceFiles === 1 ? "" : "s"} (${formatSize(stats.sourceBytes)}${stats.sourceLines ? `, ${stats.sourceLines} LoC` : ""})${aux.length ? `; ${aux.length} test/doc/fixture file${aux.length === 1 ? "" : "s"}` : ""}. Use search and list_files inside the relevant module below.`,
   ].join("\n");
 
   const manifestBlock = manifests.length

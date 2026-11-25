@@ -303,8 +303,8 @@ export class Worq {
     const inline = kind.access === "read" && kind.output === "inline";
     if (inline) {
       const liveInline = this.all().filter((a) => a.active && a.lightweight).length + [...this.starting].filter((s) => s.inline).length;
-      const max = this.deps.config.limits.scouts;
-      if (liveInline >= max) throw new Block("at-capacity", `${liveInline} inline agents are active (limits.scouts ${max}); wait or cancel one first`);
+      const max = this.deps.config.limits.inlineAgents;
+      if (liveInline >= max) throw new Block("at-capacity", `${liveInline} inline agents are active (limits.inlineAgents ${max}); wait or cancel one first`);
       return;
     }
     const live = this.all().filter((a) => a.active && !a.lightweight).length + [...this.starting].filter((s) => !s.inline).length;

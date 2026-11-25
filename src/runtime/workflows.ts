@@ -55,8 +55,9 @@ function load(root: string, path: string, name: string): Kind | string {
   if (access === "write" && meta.output !== undefined) return "output is only valid when access is read";
   const output = (meta.output ?? "plan") as OutputMode;
   if (output !== "plan" && output !== "inline") return "output must be plan or inline";
-  const explore = (meta.explore ?? "none") as ExploreMode;
+  const explore = (meta.explore ?? "map") as ExploreMode;
   if (explore !== "auto" && explore !== "map" && explore !== "none") return "explore must be auto, map or none";
+  if (access === "write" && explore === "auto") return "explore: auto is only valid when access is read (use map or none)";
   const disable = meta["disable-model-invocation"] ?? "false";
   if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
   const turns = optionalInt(meta, "max-turns", 1, 400);

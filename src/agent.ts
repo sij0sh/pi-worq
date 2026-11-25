@@ -279,7 +279,7 @@ export class Agent {
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs,
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}\n\n${this.kind.skill.body}${scopeHint}${exploreBlock}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}${exploreBlock}\n\n${this.kind.skill.body}${scopeHint}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
           description: `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : " Worq saves it to .agents/plans/."}`,

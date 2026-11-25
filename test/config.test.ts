@@ -39,6 +39,18 @@ test("config: obsolete launch preferences are ignored with a warning, never a ga
   assert.equal((await configOf({})).ignored, undefined);
 });
 
+test("config: limits.scouts is renamed limits.inlineAgents with a soft deprecation", async () => {
+  const legacy = await configOf({ limits: { scouts: 5, agents: 2 } });
+  assert.equal(legacy.limits.inlineAgents, 5);
+  assert.equal(legacy.limits.agents, 2);
+  assert.equal(legacy.migration, undefined);
+  assert.match(legacy.ignored?.join("\n") ?? "", /\/limits\/scouts is renamed \/limits\/inlineAgents \(value applied\)/);
+  const both = await configOf({ limits: { scouts: 5, inlineAgents: 7 } });
+  assert.equal(both.limits.inlineAgents, 7);
+  assert.match(both.ignored?.join("\n") ?? "", /ignored; \/limits\/inlineAgents is set/);
+  assert.equal((await configOf({ limits: { inlineAgents: 3 } })).limits.inlineAgents, 3);
+});
+
 /** A caller may branch on the code alone. */
 test("config: every refusal carries a stable code", async () => {
   const dir = await mkdtemp(join(tmpdir(), "worq-codes-"));

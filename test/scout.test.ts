@@ -120,10 +120,10 @@ test("scout: separate capacity pool and semaphore queueing with clean cancel whi
       }
     },
     review: async (turn) => { await turn.tool("submit", pass); },
-  }, { agents: 1, parallel: 2, scouts: 6 }, telemetry);
+  }, { agents: 1, parallel: 2, inlineAgents: 6 }, telemetry);
 
   const exec = await worq.spawn("execute", "Heavy worker", { title: "Heavy worker" });
-  // Second heavy agent hits limits.agents: 1, while 4 scouts use limits.scouts: 6.
+  // Second heavy agent hits limits.agents: 1, while 4 scouts use limits.inlineAgents: 6.
   await assert.rejects(worq.spawn("plan", "Second heavy", { title: "Second heavy" }), /limits\.agents 1/);
 
   const scouts = await Promise.all([
