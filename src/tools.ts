@@ -126,7 +126,7 @@ export function writeTools(cwd: string, scope?: WriteScope): Tool[] {
  * Process-running tools (commands, services, terminals) with owned cleanup.
  * `verify` adds services, terminal observation and artifact saving for execute reviewers.
  */
-export function processTools(cwd: string, runtime: string, options: { verify?: { artifacts: string; services: number }; signal: AbortSignal }) {
+export function processTools(cwd: string, runtime: string, options: { projectRoot?: string; verify?: { artifacts: string; services: number }; signal: AbortSignal }) {
   const running = new Set<Promise<unknown>>();
   let cleanupError: CleanupError | undefined;
   const track = <T>(pending: Promise<T>) => {
@@ -136,7 +136,7 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
   };
   const sig = (signal: AbortSignal) => AbortSignal.any([options.signal, signal]);
   let env: Promise<Runtime> | undefined;
-  const environment = () => env ??= runtimeEnv(runtime);
+  const environment = () => env ??= runtimeEnv(runtime, [cwd, ...(options.projectRoot ? [options.projectRoot] : [])]);
   const tools: Tool[] = [
     tool("run_command", "Run a trusted local command in this checkout; no shell parsing. Returns exit code and output tails.",
       obj({ ...command, stdin: Type.Optional(Type.String({ maxLength: 8192 })) }), async ({ executable, args, stdin }, signal, report) => {

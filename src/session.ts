@@ -223,6 +223,7 @@ export class Conversation<T extends TSchema> {
         this.rejected = undefined;
         return { text: "Submitted.", terminate: true };
       } catch (error) {
+        if (error instanceof Block && error.code === "cleanup-unconfirmed") this.invalidate(error);
         this.rejected = errorText(error);
         throw error;
       }

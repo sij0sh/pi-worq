@@ -179,6 +179,7 @@ export class Agent {
       renameSync(`${file}.tmp`, file);
     } catch { /* the record is forensic; the live view stays authoritative */ }
   }
+  private validatedGates: GateResult[] = [];
   reviewedSha?: string;
   reviewedDigest?: string;
   get reviewDelta() {
@@ -272,7 +273,7 @@ export class Agent {
         ...(maxAsks > 0 ? [this.askTool(maxAsks)] : []),
       ];
       if (write) {
-        box = processTools(cwd, join(this.dir, "runtime"), { signal });
+        box = processTools(cwd, join(this.dir, "runtime"), { signal, projectRoot: root });
         tools.push(...writeTools(cwd, this.scope), ...box.tools);
       }
       const scopeHint = this.scope
@@ -295,11 +296,12 @@ export class Agent {
               await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
             }
             if (write && effectiveGates.length && this.work && box) {
-              this.gateResults = await runGates(this.work, await box.env(), effectiveGates, validateSignal, (line) => this.log(line));
+              const results = await runGates(this.work, await box.env(), effectiveGates, validateSignal, (line) => this.log(line));
               // Re-check scope after gates in case a test command dropped untracked files outside writePaths.
               if (this.scope && this.project) {
                 await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
               }
+              this.validatedGates = results;
             }
           },
         },
@@ -365,7 +367,7 @@ export class Agent {
       this.ask?.resolve(UNANSWERED);
       this.conversation?.dispose();
       await box?.close().catch((error) => { this.error ??= errorText(error); });
-      if (this.work && this.project) {
+      if (this.work && this.project && this.fatal?.code !== "cleanup-unconfirmed") {
         // Never remove the only copy of interrupted work.
         try {
           const recovered = await pin(this.work, AbortSignal.timeout(30_000), `worq ${this.ref}: ${this.state}`);
@@ -491,6 +493,7 @@ export class Agent {
     } else {
       this.candidate = await pin(this.work!, signal, `worq ${this.ref}: ${this.final ? "final" : "submission"}`);
       identity = { sha: this.candidate };
+      this.gateResults = this.validatedGates;
       this.diffstat = await git(this.work!, signal, "diff", "--stat", this.project!.baseline, this.candidate) || "No changes from the baseline";
       this.submission = reportText(report);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
@@ -514,7 +517,7 @@ export class Agent {
       const scratch = join(dir, "review");
       await mkdir(scratch, { mode: 0o700 });
       const cwd = await snapshot(root, scratch, candidate, signal);
-      const box = processTools(cwd, join(scratch, "runtime"), { signal, verify: { artifacts: join(dir, "artifacts"), services: limits.services } });
+      const box = processTools(cwd, join(scratch, "runtime"), { signal, projectRoot: root, verify: { artifacts: join(dir, "artifacts"), services: limits.services } });
       return {
         cwd, tools: [...readTools(cwd), ...box.tools],
         check: async (s) => { saved = box.saved; return await intact(cwd, candidate, s) ? undefined : "Reviewer changed tracked files or the checked-out commit"; },

@@ -63,6 +63,12 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 - `/worq`: package and access → optional instructions (Ctrl+V or right-click pastes the clipboard) → runtime. Esc at any step changes nothing.
 - `verify:false` is refused.
 
+## Pre-submit gates
+
+Commands and gates inherit Worq's trusted PATH prefix plus existing absolute host bin directories outside the checkouts and `.git`. `VIRTUAL_ENV` is forwarded if set; HOME and temp remain isolated. Internal Git uses its separate strict environment. Use an explicit executable path for checkout-local commands (on Windows the launcher supports `.exe`, not batch shims).
+
+All configured executables are checked before any gate launches. Package gates precede launch gates. By default gates run in declaration order. Set `"independent": true` on adjacent gates only when they are read-only and safe to overlap (no shared state, cache or port contention and no dependency on each other's output). This is an operator assertion, not a sandbox: unmarked gates remain ordering barriers, and a failure stops and drains the batch before returning.
+
 ## Lifecycle
 
 - **One review.** With `REVIEW.md`, the first submission gets one independent review, then the agent parks (session and worktree kept, slot released).

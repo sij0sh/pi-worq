@@ -1,7 +1,7 @@
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, stat, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Block } from "./contracts.ts";
 import { cleanEnv, git } from "./process.ts";
 import { windows } from "./platform.mjs";
@@ -209,16 +209,34 @@ export async function snapshot(root: string, parent: string, commit: string, sig
 export async function intact(stage: string, commit: string, signal: AbortSignal) {
   return await git(stage, signal, "rev-parse", "HEAD") === commit && !await git(stage, signal, "status", "--porcelain=v1", "--untracked-files=no");
 }
+async function toolPath(checkouts: readonly string[]) {
+  const canonical = (path: string) => realpath(path).catch(() => resolve(path));
+  const roots = await Promise.all(checkouts.map(canonical));
+  const key = (path: string) => windows ? path.toLowerCase() : path;
+  const trusted = (cleanEnv.PATH ?? "").split(delimiter).filter(Boolean);
+  const seen = new Set(await Promise.all(trusted.map(async (entry) => key(await canonical(entry)))));
+  const paths = [...new Map(trusted.map((entry) => [key(entry), entry])).values()];
+  for (const raw of (process.env.PATH ?? "").split(delimiter)) {
+    const entry = windows ? raw.replace(/^"|"$/g, "") : raw;
+    if (!isAbsolute(entry)) continue;
+    const actual = await realpath(entry).catch(() => undefined);
+    if (!actual || seen.has(key(actual)) || !(await stat(actual).catch(() => undefined))?.isDirectory()) continue;
+    if ([resolve(entry), actual].some((path) => path.split(sep).some((part) => part.toLowerCase() === ".git") || roots.some((root) => inside(root, path)))) continue;
+    seen.add(key(actual));
+    paths.push(actual);
+  }
+  return paths.join(delimiter);
+}
 export interface Runtime { env: NodeJS.ProcessEnv; tmp: string }
 /**
  * Environment for agent commands. TMPDIR is a short 0700 directory under the system temporary
  * directory, because unix socket paths are limited to ~108 bytes, so it is not covered by the
  * state directory's privacy guarantee. The caller removes `tmp` when the box closes.
  */
-export async function runtimeEnv(parent: string): Promise<Runtime> {
+export async function runtimeEnv(parent: string, checkouts: readonly string[]): Promise<Runtime> {
   const tmp = await temporaryDirectory(tmpdir(), "worq-");
   if (!windows) await chmod(tmp, 0o700);
-  const env = { ...cleanEnv, HOME: join(parent, "home"), XDG_CONFIG_HOME: join(parent, "config"), XDG_STATE_HOME: join(parent, "state"),
+  const env = { ...cleanEnv, PATH: await toolPath(checkouts), ...(process.env.VIRTUAL_ENV ? { VIRTUAL_ENV: process.env.VIRTUAL_ENV } : {}), HOME: join(parent, "home"), XDG_CONFIG_HOME: join(parent, "config"), XDG_STATE_HOME: join(parent, "state"),
     XDG_CACHE_HOME: join(parent, "cache"), XDG_DATA_HOME: join(parent, "data"), TMPDIR: tmp, TERM: "xterm-256color",
     ...(windows ? { USERPROFILE: join(parent, "home"), APPDATA: join(parent, "config"), LOCALAPPDATA: join(parent, "data"), TEMP: tmp, TMP: tmp } : {}) };
   await Promise.all([env.HOME, env.XDG_CONFIG_HOME, env.XDG_STATE_HOME, env.XDG_CACHE_HOME, env.XDG_DATA_HOME]
