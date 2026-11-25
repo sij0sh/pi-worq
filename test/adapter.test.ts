@@ -182,17 +182,23 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
   const sessionManager = SessionManager.inMemory(root);
   let force = false;
+  let restrictSpawn: "hide" | "deselect" | undefined = "hide";
+  const visibleBeforeRestriction: boolean[] = [];
   let setTools!: (tools: string[]) => void;
   const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
-    systemPromptOverride: () => "Fixture Main custom preamble.", extensionFactories: [pi => {
+    systemPromptOverride: () => "Fixture Main custom preamble.", extensionFactories: [createWorq({ agentDir: () => agentDir }), pi => {
       setTools = tools => pi.setActiveTools(tools);
-      pi.on("before_agent_start", event => {
-        if (force) event.systemPromptOptions.forceSystemPrompt = "Exact forced Main prompt.";
+      pi.on("before_agent_start", ({ systemPromptOptions: options }) => {
+        if (force) options.forceSystemPrompt = "Exact forced Main prompt.";
+        if (!restrictSpawn) return;
+        visibleBeforeRestriction.push(options.selectedTools.includes("worq_spawn") && !options.hiddenTools.includes("worq_spawn"));
+        if (restrictSpawn === "hide") options.selectedTools = ["worq_spawn", "cloak"];
+        else pi.setActiveTools([]);
       });
       pi.registerTool({ name: "cloak", label: "Cloak", description: "Hide the spawn declaration", defaultActive: false,
         parameters: Type.Object({}), prepareLoadout: () => ({ hiddenDeclarations: ["worq_spawn"] }),
         async execute() { throw new Error("fixture only hides tools"); } });
-    }, createWorq({ agentDir: () => agentDir })],
+    }],
   });
   await resourceLoader.reload();
   // The snapshot is already loaded; editing the source must not affect subsequent prompts.
@@ -238,15 +244,21 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   shutdown.push(async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); });
   await session.bindExtensions({ mode: "print" });
 
-  setTools([]);
-  await session.prompt("No active spawn tool");
-  assert.ok(!prompts.at(-1)?.tools.includes("worq_spawn"));
-  assert.doesNotMatch(prompts.at(-1)?.text ?? "", /Difficult diagnosis/);
-  setTools(["worq_spawn", "cloak"]);
-  assert.ok(session.getActiveToolNames().includes("worq_spawn"), "the spawn tool is selected but its declaration is hidden");
-  await session.prompt("Hidden spawn tool");
-  assert.ok(!prompts.at(-1)?.tools.includes("worq_spawn"));
-  assert.doesNotMatch(prompts.at(-1)?.text ?? "", /Difficult diagnosis/);
+  const assertRestricted = async (restriction: "hide" | "deselect") => {
+    setTools(["worq_spawn"]);
+    restrictSpawn = restriction;
+    await session.prompt(`A later start hook will ${restriction} spawn`);
+    const request = prompts.at(-1);
+    assert.ok(request);
+    assert.equal(visibleBeforeRestriction.at(-1), true, "spawn was visible until the later start hook");
+    assert.equal(request.tools.includes("worq_spawn"), false);
+    assert.doesNotMatch(request.text, /worq_spawn_guidance|Difficult diagnosis/);
+  };
+  // First provider call of this fresh session: the tool becomes hidden only after Worq's handler.
+  await assertRestricted("hide");
+  assert.equal(prompts.length, 1);
+  await assertRestricted("deselect");
+  restrictSpawn = undefined;
   setTools(["worq_spawn"]);
   await session.prompt("Do not delegate this request");
   const visible = prompts.at(-1);
@@ -257,6 +269,9 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   assert.match(visible.text, /"sdk":"echo","model":"e\/analysis","thinking":"high","use when":"Difficult diagnosis"/);
   assert.match(visible.text, /Unavailable fixture choice/, "well-formed entries are not preflighted");
   assert.doesNotMatch(visible.text, /Unlisted prompt prose|Deleted table/);
+  await assertRestricted("hide"); // A formerly visible shortlist must not survive in replayed history.
+  restrictSpawn = undefined;
+  setTools(["worq_spawn"]);
   force = true;
   await session.prompt("Exact unmodified prompt");
   assert.equal(prompts.at(-1)?.text, "Exact forced Main prompt.");

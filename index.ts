@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getCurrentTools } from "@earendil-works/pi-ai";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type NormalizedBuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
 import { agentDock } from './src/dock.ts';
 import { hasGlance, Inspector } from './src/inspector.ts';
 import { Telemetry } from './src/telemetry.ts';
@@ -282,12 +283,23 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });
 
-    pi.on("before_agent_start", ({ systemPromptOptions: prompt }) => {
-      if (spawnGuidance.section && prompt.forceSystemPrompt === undefined &&
-          prompt.selectedTools.includes("worq_spawn") && !prompt.hiddenTools.includes("worq_spawn")) {
-        prompt.sections.worq_spawn_guidance = spawnGuidance.section;
-      }
-    });
+    const guidance = spawnGuidance.section;
+    if (guidance) {
+      let runPrompt: NormalizedBuildSystemPromptOptions | undefined;
+      pi.on("before_agent_start", ({ systemPromptOptions }) => {
+        // Keep the shared options: Pi finalizes the selection and hidden declarations after all start hooks.
+        runPrompt = systemPromptOptions;
+      });
+      pi.on("context_with_system", ({ messages }) => {
+        // Pi projects hidden tool declarations out *after* this hook, so check the run's hidden list too.
+        if (!runPrompt || runPrompt.forceSystemPrompt !== undefined || runPrompt.hiddenTools.includes("worq_spawn") ||
+            !getCurrentTools(messages).some(tool => tool.name === "worq_spawn")) return;
+        const [head, ...tail] = messages;
+        if (head?.role !== "system") return;
+        const sections = { ...head.sections, worq_spawn_guidance: `<worq_spawn_guidance>\n${guidance}\n</worq_spawn_guidance>` };
+        return { messages: [{ ...head, sections }, ...tail] };
+      });
+    }
     pi.on("session_tree", () => {
       if (closing || !managementActive) return;
       // Pi has restored the branch's loadout, which may predate the current agents.
