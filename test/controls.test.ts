@@ -140,6 +140,53 @@ test("Pi applies a queued model and thinking switch after tools, within the same
   } finally { release?.(); c.dispose(); }
 });
 
+test("Pi overlaps read-only calls and serializes mixed batches", { timeout: 10_000 }, async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "worq-read-batch-"));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const runtime = await ModelRuntime.create({ refreshOnCreate: false, authPath: join(cwd, "auth.json"), modelsPath: join(cwd, "models.json") });
+  const model = runtime.getAllModels().filter(m => isModelType(m, "chat")).find(m => m.provider === "openai")!;
+  await runtime.setRuntimeApiKey("openai", "test-transport-only");
+  const modelRegistry = { runtime, find: () => model } as unknown as NonNullable<HostServices["pi"]>["modelRegistry"];
+  const driver = await createDriver({ pi: { model, modelRegistry, thinkingLevel: "off", agentDir: cwd } });
+  const releases: (() => void)[] = [];
+  const toolOrder: string[] = [];
+  const read = tool("read_probe", "Read without mutation.", obj({ value: text(100) }), ({ value }) => {
+    toolOrder.push(value);
+    return new Promise<string>(resolve => releases.push(() => resolve(value)));
+  }, { parallel: true });
+  const write = tool("write_probe", "Mutate state.", obj({}), () => { toolOrder.push("write"); return "written"; });
+  const batches = [["read_probe", "read_probe"], ["read_probe", "write_probe", "read_probe"], ["submit"]];
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  let request = 0;
+  runtime.streamSimple = (model) => {
+    const stream = createAssistantMessageEventStream();
+    const names = batches[request++];
+    stream.push({ type: "done", reason: "toolUse", message: {
+      role: "assistant", api: model.api, provider: model.provider, model: model.id, usage, timestamp: Date.now(), stopReason: "toolUse",
+      content: names.map((name, i) => ({ type: "toolCall", id: `${request}_${i}`, name,
+        arguments: { ...(name === "write_probe" ? {} : { value: name === "submit" ? "done" : `${request}_${i}` }) } })),
+    } });
+    return stream;
+  };
+  const c = new Conversation({ driver, finish, signal: new AbortController().signal, turns: 6, minutes: 1,
+    spec: { name: "agent.plan", cwd, system: "S", tools: [read, write], log() {} } });
+  const done = c.run("go");
+  void done.catch(() => {});
+  try {
+    await until(() => releases.length === 2);
+    assert.deepEqual(toolOrder, ["1_0", "1_1"]);
+    releases[1]();
+    releases[0]();
+    await until(() => releases.length === 3);
+    assert.deepEqual(toolOrder, ["1_0", "1_1", "2_0"]);
+    releases[2]();
+    await until(() => releases.length === 4);
+    assert.deepEqual(toolOrder, ["1_0", "1_1", "2_0", "write", "2_2"]);
+    releases[3]();
+    assert.deepEqual(await done, { value: "done" });
+  } finally { for (const release of releases) release(); c.dispose(); }
+});
+
 test("controls: cancelling one PQ leaves its siblings and parent running; cancelling the owner stops the family", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));

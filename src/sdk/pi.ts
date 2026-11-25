@@ -35,7 +35,7 @@ function loader(prompt: string): ResourceLoader {
 }
 function sdkTool(tool: Tool, outcomes: Map<string, Outcome>) {
   return defineTool({
-    name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters, executionMode: "sequential",
+    name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters, executionMode: tool.parallel ? "parallel" : "sequential",
     async execute(id, params, signal) {
       const live = signal ?? new AbortController().signal;
       if (live.aborted) outcomes.set(id, { kind: "cancelled" });

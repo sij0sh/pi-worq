@@ -12,10 +12,12 @@ export interface Tool<T extends TSchema = TSchema> {
   name: string;
   description: string;
   parameters: T;
+  /** Opt in only for independent, read-only operations. */
+  parallel?: boolean;
   /** Params arrive already validated against `parameters` (the core wraps every tool). */
   run(params: Static<T>, signal: AbortSignal, report?: (outcome: Outcome) => void): Promise<ToolOutput> | ToolOutput;
 }
-export const tool = <T extends TSchema>(name: string, description: string, parameters: T, run: Tool<T>["run"]): Tool => ({ name, description, parameters, run } as Tool);
+export const tool = <T extends TSchema>(name: string, description: string, parameters: T, run: Tool<T>["run"], options?: Pick<Tool, "parallel">): Tool => ({ name, description, parameters, run, ...options } as Tool);
 
 /** One runtime selection for a session. */
 export interface Runtime {

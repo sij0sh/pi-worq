@@ -73,5 +73,5 @@ export function skillTool(skills: readonly Skill[]): Tool | undefined {
   }, { additionalProperties: false }), ({ name, path }) => {
     const skill = skills.find((s) => s.name === name)!;
     return path ? readSkillFile(skill, path) : skill.body;
-  });
+  }, { parallel: true });
 }

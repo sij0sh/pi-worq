@@ -42,8 +42,8 @@ test("dependencies: a checkout sees the repo's node_modules and stays clean unde
   assert.ok((await lstat(join(checkout, "node_modules"))).isDirectory(), "a real directory, so `node_modules/` matches");
   assert.ok((await lstat(join(checkout, "node_modules", "pkg"))).isSymbolicLink());
   assert.equal(execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: checkout }).toString(), "");
-  // The link is not a way around the read-path guard: it resolves through the known dependency entry only.
+  // Commands can use linked dependencies, but direct read tools may not follow them outside the checkout.
   const out = await readTools(checkout).find((tool) => tool.name === "search")!.run({ pattern: "needle" } as never, AbortSignal.timeout(30_000));
-  assert.match(out as string, /node_modules\/pkg\/index\.js:1:export const needle = 1;/);
+  assert.match(out as string, /^No matches.*\n\(skipped 1 symlinks\)$/);
   await assert.rejects(scoped(checkout, "node_modules/pkg/index.js"), /Symbolic link/);
 });

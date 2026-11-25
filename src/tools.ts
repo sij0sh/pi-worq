@@ -14,10 +14,7 @@ import { readSmall, runtimeEnv, scoped, writeScoped, type Runtime } from "./work
 const path = text(1024);
 const SEARCH = { hits: 200, bytes: 64_000, files: 4_000, file: 2 * 1024 * 1024 };
 
-/**
- * Bounded content search: `read_file` shows 160 lines per call, so locating a symbol otherwise costs
- * a dozen calls. Symlinks are refused, except the dependency links a checkout is given.
- */
+/** Bounded content search within the checkout; never traverse discovered symlinks. */
 function searchTool(cwd: string): Tool {
   return tool("search", "Search a file or directory for a regular expression; returns path:line:text, bounded",
     obj({ pattern: text(200), path: Type.Optional(path) }), async ({ pattern, path: at = "." }, _signal, report) => {
@@ -27,7 +24,7 @@ function searchTool(cwd: string): Tool {
       // Match the walk's resolved paths so Windows short names cannot leak into the output.
       const base = await realpath(cwd).catch(() => cwd);
       const lines: string[] = [];
-      let bytes = 0, files = 0, capped = false;
+      let bytes = 0, files = 0, skipped = 0, capped = false;
       const read = async (file: string) => {
         const info = await stat(file).catch(() => undefined);
         if (!info?.isFile() || info.size > SEARCH.file) return;
@@ -43,31 +40,24 @@ function searchTool(cwd: string): Tool {
           bytes += line.length + 1;
         }
       };
-      const walk = async (dir: string, modules: boolean): Promise<void> => {
+      const walk = async (dir: string): Promise<void> => {
         for (const entry of await readdir(dir, { withFileTypes: true })) {
           if (files >= SEARCH.files || capped) return;
           if (entry.name.toLowerCase() === ".git") continue;
           const full = join(dir, entry.name);
-          if (entry.isSymbolicLink()) {
-            if (!modules) continue;
-            const real = await realpath(full).catch(() => undefined);
-            const info = real ? await stat(real).catch(() => undefined) : undefined;
-            if (real && info?.isDirectory()) await walk(real, false);
-            else if (real && info?.isFile()) await read(real);
-            continue;
-          }
-          if (entry.isDirectory()) await walk(full, entry.name === "node_modules");
+          if (entry.isSymbolicLink()) { skipped++; continue; }
+          if (entry.isDirectory()) await walk(full);
           else await read(full);
         }
       };
       const info = await stat(start);
-      // Do not grant the dependency-link exception to an explicitly selected starting directory.
-      if (info.isDirectory()) await walk(start, false);
+      if (info.isDirectory()) await walk(start);
       else if (info.isFile()) await read(start);
-      report?.({ kind: 'search', count: lines.length, capped: capped || files >= SEARCH.files });
-      if (!lines.length) return `No matches in ${files} files${capped ? " (search stopped at a cap)" : ""}`;
-      return lines.join("\n") + (capped ? `\n(${files} files scanned; results capped)` : "");
-    });
+      capped ||= files >= SEARCH.files;
+      report?.({ kind: 'search', count: lines.length, capped });
+      return [lines.join("\n") || `No matches in ${files} files`,
+        capped && `(${files} files scanned; results capped)`, skipped && `(skipped ${skipped} symlinks)`].filter(Boolean).join("\n");
+    }, { parallel: true });
 }
 
 /** Read-only repository tools. Every profile gets these. */
@@ -77,14 +67,31 @@ export function readTools(cwd: string): Tool[] {
       const entries = await readdir(await scoped(cwd, path, { root: true }), { withFileTypes: true });
       return entries.filter((e) => e.name.toLowerCase() !== ".git" && !e.isSymbolicLink()).sort((a, b) => a.name.localeCompare(b.name)).slice(0, 250)
         .map((e) => e.name + (e.isDirectory() ? "/" : "")).join("\n") || "(empty)";
-    }),
-    tool("read_file", "Read a text file with a 1-based offset and an optional line limit (1–160, default 160)", obj({
-      path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 160 })),
-    }), async ({ path, offset = 1, limit = 160 }) => {
-      const raw = await readSmall(await scoped(cwd, path), 256 * 1024);
+    }, { parallel: true }),
+    tool("read_file", "Read a text file with a 1-based offset and an optional line limit (1–300, default 250)", obj({
+      path, offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })),
+    }), async ({ path, offset = 1, limit = 250 }) => {
+      const raw = await readSmall(await scoped(cwd, path), 2 * 1024 * 1024);
       if (raw.includes("\0")) throw new Block("binary", "Binary files are not exposed");
-      return raw.split(/\r?\n/).slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`).join("\n").slice(0, 20_000);
-    }),
+      const rows = raw ? raw.split(/\r?\n/) : [];
+      if (raw.endsWith("\n")) rows.pop();
+      const cap = 28_000;
+      const window = rows.slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`);
+      if (!window.length) return `[no lines at offset ${offset}; ${rows.length} total]`;
+      const footer = (end: number, cut = false) => `\n[showing lines ${offset}–${end} of ${rows.length}${cut ? "; character cap reached" : ""}]`;
+      const end = offset + window.length - 1;
+      const full = window.join("\n") + (offset > 1 || end < rows.length ? footer(end) : "");
+      if (full.length <= cap) return full;
+      let used = 0;
+      for (const [i, line] of window.entries()) {
+        used += line.length + (i ? 1 : 0);
+        if (used + footer(offset + i, true).length <= cap) continue;
+        if (i) return window.slice(0, i).join("\n") + footer(offset + i - 1, true);
+        const part = `\n[showing part of line ${offset} of ${rows.length}; character cap reached]`;
+        return line.slice(0, cap - part.length) + part;
+      }
+      return full;
+    }, { parallel: true }),
     searchTool(cwd),
   ];
 }
@@ -107,8 +114,20 @@ export function writeTools(cwd: string, scope?: WriteScope): Tool[] {
         old = crlf(old);
         replacement = crlf(replacement);
       }
-      const at = before.indexOf(old);
-      if (at === -1 || before.indexOf(old, at + 1) !== -1) throw new Block("edit-match", "Old text must match exactly once");
+      const at = old ? before.indexOf(old) : -1;
+      if (at === -1) throw new Block("edit-match", `Old text not found in ${path}; re-read the target lines and check exact whitespace/indentation.`);
+      let next = before.indexOf(old, at + 1);
+      if (next !== -1) {
+        const hints = [at];
+        let count = 1;
+        while (next !== -1) {
+          count++;
+          if (hints.length < 5) hints.push(next);
+          next = before.indexOf(old, next + 1);
+        }
+        const lines = hints.map((index) => before.slice(0, index).split("\n").length);
+        throw new Block("edit-match", `Old text matched ${count} times in ${path} (lines ${lines.join(", ")}); include surrounding lines to make it unique.`);
+      }
       await writeScoped(cwd, path, before.slice(0, at) + replacement + before.slice(at + old.length));
       return `Edited ${path}`;
     }),

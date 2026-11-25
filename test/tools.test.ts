@@ -43,8 +43,10 @@ test("search: one bounded call finds matches and refuses .git, binaries and stra
   await mkdir(join(root, "node_modules"));
   await writeFile(join(root, "node_modules", "local.txt"), "needle");
   await symlink(join(dir, "outside"), join(root, "node_modules", "dep"), process.platform === "win32" ? "junction" : "dir");
-  assert.match(await search("."), /secret\.ts:1:needle/);
-  assert.equal(await search("node_modules"), "node_modules/local.txt:1:needle");
+  await symlink(join(root, "src"), join(root, "node_modules", "internal"), process.platform === "win32" ? "junction" : "dir");
+  assert.doesNotMatch(await search("."), /secret/);
+  assert.equal(await search("node_modules"), "node_modules/local.txt:1:needle\n(skipped 2 symlinks)");
+  assert.match(await call(tools, "search", { pattern: "not-here", path: "node_modules" }), /^No matches.*\n\(skipped 2 symlinks\)$/);
   await assert.rejects(search("node_modules/dep/secret.ts"), /Symbolic link is not allowed/);
 });
 
@@ -73,16 +75,22 @@ test("read_file: limit composes with offset and preserves default and safety cap
   const root = await mkdtemp(join(tmpdir(), "worq-read-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const tools = readTools(root);
-  await writeFile(join(root, "rows.txt"), Array.from({ length: 200 }, (_, i) => `row ${i + 1}`).join("\n"));
-  assert.equal(await call(tools, "read_file", { path: "rows.txt", offset: 4, limit: 2 }), "4: row 4\n5: row 5");
-  assert.equal(await call(tools, "read_file", { path: "rows.txt", offset: 200, limit: 2 }), "200: row 200");
-  const rows = (await call(tools, "read_file", { path: "rows.txt", offset: 4 })).split("\n");
-  assert.equal(rows.length, 160);
-  assert.equal(rows.at(-1), "163: row 163");
-  await writeFile(join(root, "wide.txt"), "x".repeat(21_000));
-  assert.equal((await call(tools, "read_file", { path: "wide.txt", limit: 1 })).length, 20_000);
-  await writeFile(join(root, "large.txt"), "x".repeat(256 * 1024 + 1));
-  await assert.rejects(call(tools, "read_file", { path: "large.txt", limit: 1 }), /Expected a regular file/);
+  assert.ok(tools.every(tool => tool.parallel === true));
+  assert.ok(writeTools(root).every(tool => !tool.parallel));
+  await writeFile(join(root, "rows.txt"), [...Array.from({ length: 399 }, (_, i) => `row ${i + 1}`), "x".repeat(300_000)].join("\n"));
+  const read = (params: object) => call(tools, "read_file", { path: "rows.txt", ...params });
+  assert.equal(await read({ offset: 4, limit: 2 }), "4: row 4\n5: row 5\n[showing lines 4–5 of 400]");
+  const rows = (await read({ offset: 4 })).split("\n");
+  assert.equal(rows.length, 251);
+  assert.equal(rows.at(-1), "[showing lines 4–253 of 400]");
+  assert.match(await read({ limit: 300 }), /\[showing lines 1–300 of 400\]$/);
+  const wide = await read({ offset: 400 });
+  assert.equal(wide.length, 28_000);
+  assert.match(wide, /part of line 400 of 400; character cap reached/);
+  assert.match(await read({ offset: 399 }), /showing lines 399–399 of 400; character cap reached/);
+  assert.match(await read({ offset: 401 }), /no lines at offset 401; 400 total/);
+  await writeFile(join(root, "large.txt"), "x".repeat(2 * 1024 * 1024 + 1));
+  await assert.rejects(call(tools, "read_file", { path: "large.txt", limit: 1 }), /2097152 bytes/);
   await writeFile(join(root, "binary.txt"), "first\n\0");
   await assert.rejects(call(tools, "read_file", { path: "binary.txt", limit: 1 }), /Binary files/);
 });
@@ -119,7 +127,18 @@ test("CRLF text reads and edits without rewriting line endings", async (t) => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "text.txt");
   await writeFile(file, "first\r\nsecond\r\nlast\r\n");
-  assert.equal(await call(readTools(root), "read_file", { path: "text.txt", limit: 2 }), "1: first\n2: second");
+  assert.equal(await call(readTools(root), "read_file", { path: "text.txt", limit: 2 }), "1: first\n2: second\n[showing lines 1–2 of 3]");
   await call(writeTools(root), "edit_file", { path: "text.txt", old: "first\nsecond", replacement: "one\ntwo" });
   assert.equal(await readFile(file, "utf8"), "one\r\ntwo\r\nlast\r\n");
+});
+
+test("exact edit diagnostics distinguish no match from all matches, with at most five line hints", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "worq-edits-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const content = "a\r\n  b\r\n".repeat(7);
+  await writeFile(join(root, "text.txt"), content);
+  const edit = (old: string) => call(writeTools(root), "edit_file", { path: "text.txt", old, replacement: "other" });
+  await assert.rejects(edit("a\nb"), /Old text not found in text.txt; re-read.*whitespace/);
+  await assert.rejects(edit("a\n  b"), /Old text matched 7 times in text.txt \(lines 1, 3, 5, 7, 9\); include surrounding lines/);
+  assert.equal(await readFile(join(root, "text.txt"), "utf8"), content);
 });
