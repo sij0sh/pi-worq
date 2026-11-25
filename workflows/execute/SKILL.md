@@ -5,8 +5,7 @@ access: write
 disable-model-invocation: false
 ---
 
-Recursive question: **What consequential work remains before the requested outcome is achieved?**
-Completion: implementation and focused verification.
+Implement the requested outcome and verify it directly.
 
 You work in your own git worktree on branch `worq/<name>`, created from a clean baseline. Only this worktree is yours. Worq commits it when you submit; Main merges, never you.
 

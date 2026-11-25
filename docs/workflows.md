@@ -1,12 +1,14 @@
 # Agent packages
 
-Every agent kind is an operator-installed **skill package**: own SDK session, `delegate`/`ask_main`, worktree isolation (write), telemetry, `worq_list`/`worq_send`/`worq_cancel`. Same format and loader (`src/runtime/skills.ts`) as shared skills under `<agentDir>/worq/skills/`. Adding one needs no Worq code.
+Every agent kind is an operator-installed **skill package**: own SDK session, `ask_main`, worktree isolation (write), telemetry, `worq_list`/`worq_send`/`worq_cancel`. Same format and loader (`src/runtime/skills.ts`) as shared skills under `<agentDir>/worq/skills/`. Adding one needs no Worq code.
 
 ## Install
 
 ```
 <agentDir>/workflows/<name>/
   SKILL.md          frontmatter + body (the kind prompt)
+  PQ.md             optional: enables delegate; child instructions
+  REVIEW.md         optional: mandatory first-submission review instructions
   references/…      optional supporting files
   scripts/…
   assets/…
@@ -27,6 +29,8 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 - Unwritable profile: warning; copy `workflows/<name>/` by hand. Controls keep working.
 - No built-in fallback: with no packages, `/worq` says so and `worq_spawn` lists none.
 
+**Before upgrading:** Installed packages are not updated. Without `REVIEW.md` their submissions now finish **not independently reviewed**; without `PQ.md` they lose delegation. Back up `<agentDir>/workflows`, diff each installed package against the extension’s shipped `workflows/`, then copy the desired stock files or merge the instructions into your customized packages. Install review instructions for every custom workflow requiring independent review. Reload Pi.
+
 ## Frontmatter
 
 | Key | Required | Meaning |
@@ -36,7 +40,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `disable-model-invocation` | no | `true`: user-only (`/worq`); refused from `worq_spawn`, socket and CLI. `false`/absent: also launchable by Main and the CLI. |
 | `access` | no | `read`: no worktree or write/process tools, result saved as a plan file. Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
 
-Unknown keys are ignored, including a legacy `review`: every agent gets exactly one review. The body has no required sections; the agent also receives the Worq protocol and `submit` tool.
+Unknown keys are ignored, including a legacy `review`. The body has no required sections; the agent also receives the `submit` tool.
 
 ## Supporting files
 
@@ -55,8 +59,9 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 
 ## Lifecycle
 
-- **One review.** The first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
+- **One review.** With `REVIEW.md`, the first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
 - Main accepts with `worq_cancel`, or sends filtered feedback once with `worq_send`. The agent revises, submits its final result without another review, and ends as `done` (worktree removed, branch/plan kept).
+- Without `REVIEW.md`, the recorded submission ends as `done`, not independently reviewed.
 - Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
 - Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.
@@ -71,7 +76,6 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 | `description is required` | Add `description`. |
 | `disable-model-invocation must be true or false` | Fix the value. |
 | `access must be read or write` | Fix the value. |
-| `review must be true or false` | Fix the value. |
 | `SKILL.md body is blank` | Add instructions. |
 | `move to <dir>/<name>/SKILL.md` | Convert the old flat file. |
 | `symlinked workflows are not followed` | Copy the folder. |

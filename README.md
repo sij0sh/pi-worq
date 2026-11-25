@@ -35,7 +35,7 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
 - **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/plan-<ref>.md`. `parked` means the submission and its one review are done, not that the result passed. The notice wakes Main. Use the CLI `worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
-- **One review, one feedback pass:** every agent's first submission gets exactly one independent review, then it parks (session and worktree kept). Main accepts and closes it (`worq_cancel`), or sends filtered feedback once (`worq_send`): the agent makes one final revision, submits without another review and ends as `done` (branch/plan kept, worktree removed). Main may instead spawn a fresh agent for a different approach, or ask the user. To execute an existing plan, attach it explicitly. Only Main may merge, with explicit authority and exact-SHA verification.
+- **One review, one feedback pass:** the first submission from a workflow with REVIEW.md gets exactly one independent review, then it parks (session and worktree kept). Main accepts and closes it (`worq_cancel`), or sends filtered feedback once (`worq_send`): the agent makes one final revision, submits without another review and ends as `done` (branch/plan kept, worktree removed). Main may instead spawn a fresh agent for a different approach, or ask the user. To execute an existing plan, attach it explicitly. Only Main may merge, with explicit authority and exact-SHA verification.
 
 ## Agent packages
 
@@ -44,7 +44,7 @@ Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/
 - `disable-model-invocation: true` → user-only: launched by `/worq` alone, refused from `worq_spawn` and the CLI.
 - absent/`false` → also a `worq_spawn` kind (and control socket/CLI).
 - `access: read` → no worktree, no write/process tools; result saved to `.agents/plans/plan-<ref>.md`. Absent → write: own clean-baseline worktree, pins `worq/<ref>`, never merges.
-- Every agent gets exactly one independent review of its first submission; no opt-out (`review` keys and `verify:false` are ignored/refused).
+- Package-root `REVIEW.md` requires independent review; without it submissions finish not independently reviewed. `PQ.md` enables delegation (shipped Plan only). Before upgrading existing profiles, see the manual migration in docs/workflows.md.
 - Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
 
 See `docs/workflows.md`.
@@ -58,8 +58,8 @@ See `docs/workflows.md`.
 | Kind | installed package `<agentDir>/workflows/<name>/SKILL.md`; frontmatter `access`, `disable-model-invocation`; the body is the workflow. `plan` and `execute` ship as packages |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
-| Review | one subagent per agent, on its first submission (`prompts/review.md`); read tools, plus process tools on a clone of the exact commit for write kinds |
-| Lifecycle | run → submit → review → parked → Main accepts (close) or sends feedback once → final revision → `done` |
+| Review | one subagent on first submission when the workflow has `REVIEW.md`; read tools, plus process tools on a clone of the exact commit for write kinds |
+| Lifecycle | without `REVIEW.md`: submit → `done`; otherwise run → submit → review → parked → Main accepts (close) or sends feedback once → final revision → `done` |
 
 ## Tools
 
@@ -70,7 +70,7 @@ See `docs/workflows.md`.
 | `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked after review → feedback for the one final revision (no further review; ends as `done`) · parked out of budget → resume with a fresh budget |
 | `worq_cancel` | `ref` or `all` | parked → close · live → cancel; kills subagents, review, processes; removes worktree; keeps branch |
 
-States: `starting · running · waiting · reviewing · parked · done · closed · cancelled · failed`. `done` = final revision submitted after review, not re-reviewed: verify the exact candidate before reporting success or merging.
+States: `starting · running · waiting · reviewing · parked · done · closed · cancelled · failed`. `done` = final revision after review or first submission without review: verify the exact candidate before reporting success or merging.
 
 Parked agents hold no slot; resuming needs one. Idle parked agents close after `limits.idleMinutes`. Budget exhaustion parks the agent unreviewed with its last response and a pinned partial commit; Main may resume it with a fresh budget (same phase, never an extra review).
 Verdicts: `pass · findings · inconclusive` (crash/timeout/invalid → inconclusive, never pass).
@@ -82,7 +82,7 @@ Verdicts: `pass · findings · inconclusive` (crash/timeout/invalid → inconclu
 | Spawned by | Main (`worq_spawn`), CLI, or you (`/worq`) | Agent (`delegate`) | Worq, on `submit` |
 | Runtime | launch request, else Main's | owner's effective runtime | owner's effective runtime |
 | Writes | `access: write`: own worktree · `access: read`: none (Worq saves the result) | none | none (fresh clone of the pinned commit) |
-| Delegate / ask Main | yes / yes | no / no | no / no |
+| Delegate / ask Main | with `PQ.md` / yes | no / no | no / no |
 | Finish tool | `submit` | `submit` | `submit` |
 
 Read tools: `search` accepts a relative file or directory path; `read_file` accepts a 1-based `offset` and a `limit` of 1–160 lines. For factual lookups, a short `submit` summary with source citations is enough.

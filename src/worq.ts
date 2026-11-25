@@ -1,7 +1,7 @@
 import { Agent, type AgentEvent, type Attachment } from "./agent.ts";
 import { Block } from "./contracts.ts";
 import { MAIN, type Config } from "./runtime/config.ts";
-import type { Kind, Prompts } from "./prompts.ts";
+import type { Kind } from "./runtime/workflows.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
 import { modelChoices, resolveRuntime, type ModelChoice, type RuntimeRequest } from './runtime/launch.ts';
 import type { Driver, Runtime, RuntimeChange } from "./sdk/contract.ts";
@@ -12,7 +12,6 @@ import { baselineProject, reserveName, readPlan, repository } from "./workspace.
 export interface WorqDeps {
   telemetry?: import('./telemetry.ts').Telemetry;
   driver: Driver;
-  prompts: Prompts;
   /** The installed catalog: every launchable package. */
   kinds: ReadonlyMap<string, Kind>;
   config: Config;
@@ -28,8 +27,6 @@ export interface LaunchRequest extends RuntimeRequest {
   task?: string;
   title?: string;
   attach?: string[];
-  /** Legacy wire field. true is redundant (every agent is reviewed once); false is refused. */
-  verify?: boolean;
 }
 export interface LaunchOptions {
   /** Only the confirmed /worq route has user authority; tool and socket requests are "main". */
@@ -101,13 +98,12 @@ export class Worq {
    * pending slot, ref or worktree. Then capacity + pending slot, repository/baseline/attachments, ref, start.
    */
   async launch(request: LaunchRequest, { caller, signal: callerSignal, beforeStart }: LaunchOptions): Promise<Agent> {
-    const { prompts, config } = this.deps;
+    const { config } = this.deps;
     this.gate();
     const kind = this.kinds.get(request.kind);
     const spawnable = [...this.kinds.values()].filter((k) => !k.userOnly).map((k) => k.name);
     if (!kind) throw new Block("kind", `Unknown kind ${request.kind}; installed: ${spawnable.join(" | ") || "none"}`);
     if (kind.userOnly && caller !== "user") throw new Block("invocation", `${kind.name} is user-only (disable-model-invocation); launch it with /worq`);
-    if (request.verify === false) throw new Block("verify", "verify:false is no longer supported: every agent gets exactly one independent review. Omit verify.");
     const direction = (request.task ?? "").trim();
     if (direction.length > MAX_TASK) throw new Block("invalid-payload", `Task exceeds ${MAX_TASK} characters`);
     const task = direction || `Run the ${kind.name} workflow on this repository and submit its result.`;
@@ -129,7 +125,7 @@ export class Worq {
       signal.throwIfAborted();
       const { ref, dir } = await reserveName(root, this.deps.state, base);
       signal.throwIfAborted();
-      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, prompts, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, sessions: this.sessions },
+      const agent = new Agent({ runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root, semaphore: this.semaphore, notify: this.deps.notify, sessions: this.sessions },
         { ref, title, dir, kind, task, attachments });
       this.agents.set(ref, agent);
       beforeStart?.();
@@ -163,7 +159,7 @@ export class Worq {
     if (!agents.length && !pending.length) return "No Worq agents in this session.";
     return pending.concat(agents.map((a) => {
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
-      const verdicts = a.review ? ` · review ${a.review.verdict}` : "";
+      const verdicts = a.review ? ` · review ${a.review.verdict}` : a.state === "done" ? " · not independently reviewed" : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
       return `${a.headline} · ${a.state}${a.final && !a.ended ? " · final revision" : ""}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
     })).join("\n");
@@ -172,7 +168,7 @@ export class Worq {
     return [
       `${a.headline} · ${a.state}`,
       `Task: ${a.task}`,
-      `Phase: ${a.state === "done" ? "final revision submitted (not re-reviewed)" : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
+      `Phase: ${a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "not independently reviewed") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,

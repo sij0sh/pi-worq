@@ -33,11 +33,14 @@ export function contained(root: string, path: string) {
   return real;
 }
 /** A regular file within the size bound, read as text. */
-export function readBounded(path: string) {
+export function readBounded(path: string, strictText = false) {
   const stat = lstatSync(path);
   if (!stat.isFile()) throw new Block("config", `Not a regular resource file: ${path}`);
   if (stat.size > MAX_BYTES) throw new Block("config", `Resource too large (${stat.size} bytes > ${MAX_BYTES}): ${path}`);
-  return readFileSync(path, "utf8");
+  const bytes = readFileSync(path);
+  if (!strictText) return bytes.toString("utf8");
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Block("binary", `Invalid UTF-8: ${path}`); }
 }
 /** Operator resources must not live in a checkout an agent can write or a diff can plant. */
 export function outsideCheckout(root: string) {

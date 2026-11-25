@@ -4,10 +4,10 @@ export const one = (text: string, max = 240) => { const flat = text.replace(/\s+
 export const clean = (text: string) => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${item}`).join("\n") : "- None";
 
-export function planMarkdown(input: { ref: string; title?: string; kind: string; final?: boolean; task: string; report: Submission; label?: string }) {
+export function planMarkdown(input: { ref: string; title?: string; kind: string; final?: boolean; reviewRequired?: boolean; task: string; report: Submission; label?: string }) {
   const { ref, kind, task, report } = input;
   return [
-    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · ${input.final ? "final revision after review" : "reviewed submission"} · ${new Date().toISOString().slice(0, 10)}`, "",
+    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · ${input.final ? "final revision after review" : input.reviewRequired === false ? "not independently reviewed" : "submission for independent review"} · ${new Date().toISOString().slice(0, 10)}`, "",
     "## Request", "", task, "", "## Summary", "", report.summary, ...(report.report ? ["", report.report] : []), "",
   ].join("\n");
 }

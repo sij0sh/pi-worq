@@ -13,8 +13,7 @@ import { EMPTY, loadResources } from "./src/runtime/resources.ts";
 import { dispatch, ops, serve, type Op } from "./src/control.ts";
 import { errorText } from "./src/contracts.ts";
 import { createDriver, discoverAdapters } from "./src/sdk/registry.ts";
-import { loadPrompts, type Kind } from "./src/prompts.ts";
-import { loadCatalog } from "./src/runtime/workflows.ts";
+import { loadCatalog, type Kind } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
 import type { Driver } from "./src/sdk/contract.ts";
 import { statePath } from "./src/workspace.ts";
@@ -26,7 +25,7 @@ const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || t
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. Every agent gets exactly one independent review of its first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
+    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. REVIEW.md requires one independent review of the first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
     ],
@@ -35,8 +34,8 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     op: "list",
     description: "List Worq agents (no ref) or show one agent in full: plan path, branch, PQs, reviews and recent activity.",
     guidelines: [
-      "Drive asks and parked agents without polling. During planning answer from evidence or use conservative provisional assumptions or alternatives; surface unresolved preferences with the reviewed plan.",
-      "Even for ‘plan and execute’, present the reviewed plan before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
+      "Drive asks and parked agents without polling. Surface unresolved user choices with the plan.",
+      "Even for ‘plan and execute’, present the plan and its review status before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
       "Parked is not a pass. Obtain affirmative verification of the exact candidate before reporting execution success, including execute only. Reverify after changes. Without verification report unverified and leave unmerged; Main merges manually only with explicit merge authority.",
     ],
   },
@@ -59,7 +58,6 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
 /** Test seam: replace the Pi SDK driver. */
 export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string; telemetry?: Telemetry } = {}) {
   return function worq(pi: ExtensionAPI) {
-    const prompts = loadPrompts();
     const agentDir = () => options.agentDir?.() ?? getAgentDir();
     // One catalog, read once per extension load (shipped packages are provisioned first): worq_spawn's description is fixed at registration.
     const workflows = loadCatalog(agentDir());
@@ -129,7 +127,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host, main: () => ({ model: host.model && `${host.model.provider}/${host.model.id}`, thinking: host.thinkingLevel }) }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify,
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify,
           warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;

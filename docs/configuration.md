@@ -66,7 +66,7 @@ Subagents are read-only sessions answering one probing question. The delegating 
 
 The name labels the child; it runs on its agent's runtime. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
 
-Every agent gets exactly one review subagent (`prompts/review.md`), on its first submission and on the agent's runtime. Main's feedback then opens one final, unreviewed revision; the agent ends as `done`. `verify:false` is refused. `worq list <ref>` prints each session's resolved runtime.
+A workflow with `REVIEW.md` gets exactly one review subagent, on its first submission and on the agent's runtime. Main's feedback then opens one final, unreviewed revision; the agent ends as `done`. `verify:false` is refused. `worq list <ref>` prints each session's resolved runtime.
 
 ## Workflows
 
@@ -120,7 +120,6 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 | `Claude has no verified thinking-level control` | The pinned SDK does not report effort on stdio | Omit `thinking` for Claude |
 | `Claude cannot verify a live thinking-level change` | The pinned SDK has no effort read-back | Start a new session without thinking |
 | `runtime-invalidated` | A live model update was partial or unverifiable | The handle is fenced; restart the agent |
-| `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; every agent is reviewed once |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |
 | `… is ignored` / `… is no longer read` | Removed key or resource layout | Remove it (move instructions into `worq/AGENTS.md`) |

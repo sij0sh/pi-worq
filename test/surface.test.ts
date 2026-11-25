@@ -10,7 +10,6 @@ import { createWorq, TOOLS } from "../index.ts";
 import { DEFAULT_LIMITS, loadConfig } from "../src/runtime/config.ts";
 import { dispatch, ops, serve } from "../src/control.ts";
 import { obj, text } from "../src/contracts.ts";
-import { loadPrompts } from "../src/prompts.ts";
 import { Conversation, NUDGE } from "../src/session.ts";
 import { fakeDriver, KINDS, pass, planSubmission, repo, setup, type Script } from "./fake.ts";
 
@@ -74,12 +73,12 @@ test("config: defaults, removed keys become migration findings, invalid keys nam
   assert.throws(() => loadConfig(dir), /pi-worq\.json/);
 });
 
-test("shipped Plan and Execute are ordinary packages; one review prompt", () => {
+test("shipped Plan and Execute are ordinary packages; workflow-owned role files", () => {
   assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan"]);
   assert.equal(KINDS.get("plan")!.access, "read");
   assert.equal(KINDS.get("execute")!.access, "write");
   assert.ok([...KINDS.values()].every((kind) => !kind.userOnly && kind.skill));
-  assert.match(loadPrompts().review, /What consequential reason is there not to accept this result as-is\?/);
+  assert.match(KINDS.get("execute")!.review!, /What consequential reason is there not to accept this result as-is\?/);
 });
 
 test("one command, four active tools and CLI socket integration", async (t) => {
@@ -249,8 +248,8 @@ test("/worq launches a user-only package", async (t) => {
   const last = (pattern: RegExp) => alerts.map((alert) => alert.text).filter((text) => pattern.test(text)).at(-1);
   const launchedRef = () => /as ([a-z0-9-]+)\./.exec(last(/^Launched /) ?? "")?.[1];
   const settle = async (ref: string) => {
-    for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "parked"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "parked"), `expected parked for ${ref}`);
+    for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "done"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "done"), `expected done for ${ref}`);
   };
 
   // Plan and Execute come first, followed by custom packages alphabetically; invalid siblings are reported.
@@ -277,8 +276,8 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   const table = ops();
   assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "kind", "model", "sdk", "task", "thinking", "title"]);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", title: "Surface test", task: "x" }), /Unknown kind review/);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: "no" }), /verify must be boolean/);
-  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: false }), /verify:false is no longer supported/);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: "no" }), /verify|additional/i);
+  await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: false }), /verify|additional/i);
   assert.equal(worq.size, 0, "a refused spawn leaves no agent");
   await assert.rejects(dispatch(worq, table, "send", { ref: "zz", text: "x" }), /ref/);
   await assert.rejects(dispatch(worq, table, "nope", {}), /Unknown operation/);

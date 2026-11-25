@@ -36,19 +36,13 @@ export type Op = keyof Ops;
 export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown, signal?: AbortSignal): Promise<{ text: string; data?: unknown }> {
   if (!(op in table)) throw new Block("op", `Unknown operation ${op}`);
   const key = op as Op;
-  // Legacy wire field: review follows the package. A redundant true is dropped by Worq.launch; false is refused there.
-  let verify: unknown;
-  if (key === "spawn" && raw && typeof raw === "object" && "verify" in raw) {
-    ({ verify, ...raw } = raw as Record<string, unknown>);
-    if (typeof verify !== "boolean") throw new Block("invalid-payload", "spawn: /verify must be boolean");
-  }
   const args = parse(table[key] as TSchema, raw ?? {}, op);
   switch (key) {
     case "spawn": {
       const request = args as Static<Ops["spawn"]>;
-      const agent = await worq.launch({ ...request, ...(verify !== undefined ? { verify: verify as boolean } : {}) }, { caller: "main", signal });
+      const agent = await worq.launch(request, { caller: "main", signal });
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
-      return { text: `Spawned ${request.kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and parked digest arrive as Worq notifications.`, data: { ref: agent.ref } };
+      return { text: `Spawned ${request.kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and submission notices arrive as Worq notifications.`, data: { ref: agent.ref } };
     }
     case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }

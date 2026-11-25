@@ -2,15 +2,25 @@ import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileS
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Block, errorText } from "../contracts.ts";
-import { profile, type Kind } from "../prompts.ts";
-import { exists, loadSkill, outsideCheckout } from "./skills.ts";
+import { contained, readBounded, type Skill, exists, loadSkill, outsideCheckout } from "./skills.ts";
 
 /**
  * The one agent catalog: skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write). Every agent gets exactly one review; a `review` key is ignored.
+ * `access` (`read` explicit; absent = write). Role files enable delegation and review.
  * Plan and Execute ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
+export interface Kind {
+  name: string; access: "read" | "write"; description: string; userOnly: boolean; skill: Skill;
+  pq?: string; review?: string;
+}
+function optional(root: string, file: string) {
+  const path = join(root, file);
+  if (!exists(path)) return undefined;
+  const body = readBounded(contained(root, path), true);
+  if (!body.trim() || /[\x00-\x08\x0e-\x1f\x7f]/.test(body)) throw new Block("workflow-file", `${path} must contain nonblank text`);
+  return body.trim();
+}
 const NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export const SEEDS = fileURLToPath(new URL("../../workflows/", import.meta.url));
 /** Written once every shipped package is present; Worq never seeds that profile again. */
@@ -25,8 +35,12 @@ function load(root: string, path: string, name: string): Kind | string {
   if (meta.name !== undefined && meta.name !== name) return `name "${meta.name}" must match the folder name "${name}"`;
   if (!meta.description?.trim()) return "description is required (shown by /worq and worq_spawn)";
   if (!skill.body) return "SKILL.md body is blank";
-  try { return profile(name, meta, skill.body, { access: "write" }, skill); }
-  catch (error) { return errorText(error); }
+  skill.files = skill.files.filter(file => file !== "PQ.md" && file !== "REVIEW.md");
+  const access = meta.access ?? "write";
+  if (access !== "read" && access !== "write") return "access must be read or write";
+  const disable = meta["disable-model-invocation"] ?? "false";
+  if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
+  return { name, skill, access, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md") };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */

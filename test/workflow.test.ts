@@ -68,13 +68,31 @@ test("workflow loader: skill packages with standard frontmatter; access defaults
   const audit = kinds.get("audit")!;
   assert.equal(audit.access, "read");
   assert.equal(audit.description, "Audit it");
-  assert.match(audit.prompt, /^Inspect the repository/);
+  assert.match(audit.skill.body, /^Inspect the repository/);
   assert.deepEqual(audit.skill?.files, ["references/table.md", "scripts/run.sh"]);
   assert.equal(audit.userOnly, false);
-  assert.ok(!("review" in audit), "every agent is reviewed once; a review key is ignored");
+  assert.equal(kinds.get("reviewed")!.review, undefined, "frontmatter cannot enable review");
   assert.equal(kinds.get("change")!.access, "write");
   assert.equal(kinds.get("private")!.userOnly, true);
   assert.equal(kinds.get("quoted")!.description, "Quoted");
+});
+
+test("role files are independent; invalid files withhold only their package", async (t) => {
+  const base = { "SKILL.md": skillFile({ description: "Package" }) };
+  const dir = await agentDir(t, {
+    renamed: { ...base, "PQ.md": "Investigate", "REVIEW.md": "Review" },
+    questions: { ...base, "PQ.md": "Ask" },
+    blank: { ...base, "REVIEW.md": "  " }, binary: { ...base, "PQ.md": "a\0b" },
+    large: { ...base, "REVIEW.md": "x".repeat(256 * 1024 + 1) },
+    folder: { ...base, "PQ.md/file": "invalid" },
+  });
+  const { kinds, problems } = loadWorkflows(dir);
+  assert.deepEqual([...kinds.keys()], ["questions", "renamed"]);
+  assert.equal(kinds.get("questions")!.pq, "Ask");
+  assert.equal(kinds.get("questions")!.review, undefined);
+  assert.equal(kinds.get("renamed")!.review, "Review");
+  assert.equal(kinds.get("renamed")!.pq, "Investigate");
+  assert.equal(problems.length, 4);
 });
 
 test("workflow loader: the documented example loads", async () => {
@@ -160,7 +178,7 @@ test("model-invocable workflows spawn like kinds; user-only ones and review opti
   await assert.rejects(worq.spawn("nope", "x", { title: "Write docs" }), /Unknown kind nope; installed: execute \| plan \| documentation/);
   const agent = await worq.spawn("documentation", "Write the CLI docs", { title: "Write docs" });
   assert.equal(agent.ref, "write-docs");
-  await next("parked", agent.ref);
+  await next("done", agent.ref);
   assert.deepEqual(skills, ["documentation"], "the workflow's own package is readable through the skill tool");
   await worq.cancel(agent.ref);
 });
@@ -186,12 +204,12 @@ test("a user launch generates a readable title and uses either the written task 
   assert.match(dock.render(96)[2]!, /^ ● documentation: documentation run\s/);
   assert.match(dock.render(34)[2]!, /^documentation: documentation run/);
   assert.equal(agent.task, "Run the documentation workflow on this repository and submit its result.");
-  await next("parked", agent.ref);
+  await next("done", agent.ref);
   await worq.cancel(agent.ref);
   const directed = await userLaunch(worq, "documentation", "  Focus on the CLI reference.  ");
   assert.equal(directed.ref, "focus-on-the-cli");
   assert.equal(directed.task, "Focus on the CLI reference.");
-  await next("parked", directed.ref);
+  await next("done", directed.ref);
   await worq.cancel(directed.ref);
   assert.deepEqual(tasks, [
     "Run the documentation workflow on this repository and submit its result.",
@@ -218,7 +236,7 @@ test("a running workflow is listable, steerable and cancellable", async (t) => {
 test("read package: plan artifact and exactly one review", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs" }) });
+  const agentDirPath = await agentDir(t, { documentation: { "SKILL.md": workflowFile({ access: "read", description: "Write docs" }), "REVIEW.md": "Inspect the plan" } });
   const { kinds } = userKinds(agentDirPath);
   let system = "";
   let finish = "";
@@ -232,7 +250,7 @@ test("read package: plan artifact and exactly one review", async (t) => {
   }, {}, undefined, kinds);
   const agent = await userLaunch(worq, "documentation");
   const ready = await next("parked", agent.ref);
-  assert.match(system, /One independent review checks your first submission/);
+  assert.match(system, /Inspect the repository/);
   assert.match(finish, /^Submit your result\. Worq saves it to \.agents\/plans\/\./);
   assert.equal(seen.filter((spec) => spec.name === "review").length, 1);
   assert.equal(agent.review?.verdict, "pass");
@@ -242,7 +260,7 @@ test("read package: plan artifact and exactly one review", async (t) => {
   await worq.cancel(agent.ref);
 });
 
-test("write package pins worq/<ref>, never merges, and gets one review of the exact commit", async (t) => {
+test("write package pins worq/<ref>, never merges, and ends without review", async (t) => {
   const { dir, root, state, git } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const agentDirPath = await agentDir(t, { "change-log": workflowFile({ access: "write", description: "Change the log" }) });
@@ -261,19 +279,20 @@ test("write package pins worq/<ref>, never merges, and gets one review of the ex
   const agent = await userLaunch(worq, "change-log");
   assert.equal(agent.ref, "change-log-run");
   assert.equal(agent.branch, "worq/change-log-run");
-  const ready = await next("parked", agent.ref);
-  assert.match(system, /One independent review checks your first submission/);
+  const ready = await next("done", agent.ref);
+  assert.match(system, /Inspect the repository/);
   assert.match(finish, /^Submit your result\. Ends your turn\.$/);
-  assert.equal(seen.filter((spec) => spec.name === "review").length, 1);
+  assert.equal(seen.filter((spec) => spec.name === "review").length, 0);
+  assert.match(ready.text, /not independently reviewed/);
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
-  assert.equal(agent.state, "parked");
+  assert.equal(agent.state, "done");
   await worq.cancel(agent.ref);
   assert.equal(agent.work, undefined, "closing removed its worktree");
   git("rev-parse", "--verify", `worq/${agent.ref}`);
 });
 
-test("a review key cannot opt out; a parked package releases capacity", async (t) => {
+test("a read package without REVIEW.md saves an unreviewed plan", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const agentDirPath = await agentDir(t, { documentation: workflowFile({ access: "read", description: "Write docs", extra: ["review: false"] }) });
@@ -283,9 +302,10 @@ test("a review key cannot opt out; a parked package releases capacity", async (t
     review: async (turn) => { await turn.tool("submit", pass); },
   }, {}, undefined, kinds);
   const agent = await userLaunch(worq, "documentation");
-  const ready = await next("parked", agent.ref);
-  assert.match(ready.text, /parked · no review issues reported/);
-  assert.equal(agent.review?.verdict, "pass");
+  const ready = await next("done", agent.ref);
+  assert.match(ready.text, /not independently reviewed/);
+  assert.match(agent.plan!.text, /not independently reviewed/);
+  assert.equal(agent.review, undefined);
   assert.equal(worq.all().filter(a => a.active).length, 0);
   await worq.cancel(agent.ref);
 });

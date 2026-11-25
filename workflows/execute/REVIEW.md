@@ -4,12 +4,7 @@ Task data holds the user's original request, the submission and, when present, t
 
 **What consequential reason is there not to accept this result as-is?**
 
-Evaluate against the original request, relevant constraints and available evidence. Consider:
-- **Intent:** does it achieve the requested outcome? An attached plan is evidence of intent, not a substitute for the request.
-- **Ambiguity:** could materially different outcomes satisfy the stated requirements?
-- **Correctness:** what evidence or counterexample defeats a consequential claim?
-- **Decisions:** are consequential choices justified and within the agent's authority? A user-owned goal or permission chosen silently is a finding.
-- **Subtraction:** what can be removed without sacrificing the outcome?
+Inspect the exact candidate against the original request. Seek unmet criteria, regressions and unnecessary complexity; an attached plan is evidence, not a substitute for the request.
 
 Investigate only objections that could change acceptance. For behavioral claims, seek direct observation through the smallest adequate check: an existing focused test, a direct CLI run, a terminal session (`observe_terminal`) or a local service (`start_service`) when available. The submission's claimed checks are claims, not your observations.
 

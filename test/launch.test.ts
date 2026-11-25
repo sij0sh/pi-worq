@@ -6,7 +6,6 @@ import { launchPanel, type LaunchRequest } from '../src/launch-picker.ts';
 import { MAIN } from '../src/runtime/config.ts';
 import { resolveRuntime } from '../src/runtime/launch.ts';
 import { rm, writeFile } from 'node:fs/promises';
-import { loadPrompts } from '../src/prompts.ts';
 import { Worq } from '../src/worq.ts';
 import type { Spec } from '../src/sdk/contract.ts';
 import { config, fakeDriver, KINDS, planSubmission, pass, repo } from './fake.ts';
@@ -78,7 +77,7 @@ test('runtime preflight precedes repository checks, and children inherit the own
   const order: string[] = [], seen: Spec[] = [];
   const driver = fakeDriver({ agent: async turn => { await turn.tool('submit', planSubmission); }, review: async turn => { await turn.tool('submit', pass); } }, seen);
   driver.validate = async runtime => { order.push(`validate ${runtime.model}`); if (runtime.model === 'p/bad') throw new Error('unknown model p/bad'); };
-  const at = (cwd: string) => new Worq({ driver, config: config(), kinds: KINDS, prompts: loadPrompts(), state, cwd, notify() {} });
+  const at = (cwd: string) => new Worq({ driver, config: config(), kinds: KINDS, state, cwd, notify() {} });
   const outside = at(dir), inside = at(root);
   t.after(async () => { await outside.shutdown(); await inside.shutdown(); });
   await assert.rejects(inside.spawn('plan', 'check', { title: 'Bad model', model: 'p/bad' }), /unknown model/);
@@ -99,7 +98,7 @@ test('shutdown aborts an admission still in preflight', async () => {
   let mounted!: () => void;
   const visible = new Promise<void>(resolve => { mounted = resolve; });
   driver.validate = (_runtime, signal) => { mounted(); return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); };
-  const worq = new Worq({ config: config(), kinds: KINDS, driver, prompts: loadPrompts(), state: '', cwd: '', notify() {} });
+  const worq = new Worq({ config: config(), kinds: KINDS, driver, state: '', cwd: '', notify() {} });
   const pending = worq.spawn('plan', 'test', { title: 'Test launch' });
   await visible; await worq.shutdown(); await assert.rejects(pending, /closed/);
   assert.equal(worq.size, 0);

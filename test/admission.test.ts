@@ -5,7 +5,6 @@ import { Block } from "../src/contracts.ts";
 import type { Capabilities, Driver, RequestDecision, Runtime } from "../src/sdk/contract.ts";
 import { Conversation } from "../src/session.ts";
 import { obj, text } from "../src/contracts.ts";
-import { loadPrompts } from "../src/prompts.ts";
 import { DEFAULT_LIMITS } from "../src/runtime/config.ts";
 import type { Observation } from "../src/telemetry.ts";
 import { Worq } from "../src/worq.ts";
@@ -126,7 +125,7 @@ test("fatal runtime invalidation is latched, clears pending settings, and forbid
 test("worq.choices does not fall back to Main for an invalidated session", async () => {
   const worq = new Worq({
     driver: { capabilities: () => ADMITTED, async open() { throw new Error("not opened"); } },
-    prompts: loadPrompts(), kinds: KINDS, config: { path: "test", limits: { ...DEFAULT_LIMITS } }, state: "/tmp/worq-admission-state", cwd: process.cwd(),
+    kinds: KINDS, config: { path: "test", limits: { ...DEFAULT_LIMITS } }, state: "/tmp/worq-admission-state", cwd: process.cwd(),
     notify() {},
   });
   worq.sessions.set("bad", {

@@ -4,7 +4,7 @@ import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { test } from "node:test";
 import { reserveName } from "../src/workspace.ts";
-import { pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
+import { KINDS, pass, planSubmission, repo, setup, type Turn } from "./fake.ts";
 
 test("readable claims serialize across linked worktrees and survive restart", async (t) => {
   const { dir, root, state } = await repo();
@@ -114,7 +114,7 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback o
       if (turn.text.includes('"task"')) {
         assert.match(await turn.tool("read_file", { path: "app.py" }), /hello/);
         assert.match(await turn.tool("write_file", { path: "x", content: "y" }), /No tool/);
-        assert.match(await turn.tool("delegate", { name: "evidence", question: "Where is the greeting printed?", why: "decides the edit" }), /Delegated PQ: Where is the greeting printed/);
+        assert.match(await turn.tool("delegate", { name: "evidence", question: "Where is the greeting printed?", why: "decides the edit", context: "Scope is the CLI" }), /Delegated PQ: Where is the greeting printed/);
         assert.match(await turn.tool("submit", planSubmission), /still open/);
         return; // end turn: wait for the PQ
       }
@@ -127,6 +127,7 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback o
     },
     "subagent.evidence": async (turn) => {
       assert.equal(turn.spec.name, "subagent.evidence");
+      assert.equal(JSON.parse(turn.text).context, "Scope is the CLI");
       assert.match(turn.text, /Where is the greeting printed/);
       assert.deepEqual(turn.spec.tools.map((x) => x.name).sort(), ["list_files", "read_file", "search", "submit"]);
       await turn.tool("submit", { answer: "app.py:1", basis: "observed" });
@@ -208,6 +209,8 @@ test("execute agent: plan explicitly attached, own worktree and branch, review s
   const { worq, next } = setup(root, state, {
     "agent.plan": (turn) => turn.tool("submit", planSubmission).then(() => {}),
     "agent.execute": async (turn) => {
+      assert.ok(!turn.spec.tools.some((tool) => tool.name === "delegate"));
+      assert.doesNotMatch(turn.system, /question tree|recursive question/i);
       attached = turn.text;
       assert.match(await turn.tool("write_file", { path: "app.py", content: "print('HELLO')\n" }), /Wrote/);
       assert.match(await turn.tool("run_command", { executable: "node", args: ["-e", "process.stdout.write(require('node:fs').readFileSync('app.py'))"] }), /HELLO/);
@@ -324,7 +327,7 @@ test("parked agents hold no slot; resuming one needs a free slot", async (t) => 
   await worq.cancel("all");
 });
 
-test("budget exhaustion parks with the last response and an unreviewed partial commit; Main resumes with a fresh budget", async (t) => {
+for (const reviewed of [true, false]) test(`budget exhaustion and resume, review enabled: ${reviewed}`, async (t) => {
   const { dir, root, state, git } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq, next, seen } = setup(root, state, {
@@ -336,7 +339,7 @@ test("budget exhaustion parks with the last response and an unreviewed partial c
       turn.steered.push("keep going");
     },
     review: (turn) => turn.tool("submit", pass).then(() => {}),
-  }, { agentTurns: 1 });
+  }, { agentTurns: 1 }, undefined, reviewed ? KINDS : new Map([["execute", { ...KINDS.get("execute")!, review: undefined }]]));
   const agent = await worq.spawn("execute", "Edit greeting", { title: "Edit greeting" });
   const notice = await next("parked", agent.ref);
   assert.match(notice.text, /turn limit[\s\S]*Nothing was submitted or reviewed/);
@@ -346,10 +349,10 @@ test("budget exhaustion parks with the last response and an unreviewed partial c
   assert.equal(git("show", `${agent.recoverySha}:app.py`).toString(), "partial\n");
   assert.equal(seen.filter((s) => s.name === "review").length, 0);
   assert.match(worq.send(agent.ref, "finish"), /Resumed .* with a fresh budget/);
-  await next("parked", agent.ref, 2);
+  await next(reviewed ? "parked" : "done", agent.ref, reviewed ? 2 : 1);
   assert.equal(agent.exhausted, undefined);
   assert.ok(agent.candidate);
-  assert.equal(agent.review?.verdict, "pass");
+  assert.equal(agent.review?.verdict, reviewed ? "pass" : undefined);
   await worq.cancel(agent.ref);
 });
 

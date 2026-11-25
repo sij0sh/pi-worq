@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { loadConfig, type Config } from "../src/runtime/config.ts";
 import { Block } from "../src/contracts.ts";
-import { loadPrompts } from "../src/prompts.ts";
 import { compose, EMPTY, loadResources } from "../src/runtime/resources.ts";
 import { assertRuntime, type Runtime } from "../src/sdk/contract.ts";
 import { Worq } from "../src/worq.ts";
@@ -60,7 +59,7 @@ test("config: the migration gate blocks every new launch before preflight; manag
   const driver = fakeDriver({});
   driver.validate = async (runtime) => { validated.push(runtime.sdk); };
   const config = await configOf({ review: {}, launch: { countdownSeconds: 2 } });
-  const worq = new Worq({ driver, prompts: loadPrompts(), kinds: KINDS, config, state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
+  const worq = new Worq({ driver, kinds: KINDS, config, state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
   t.after(() => worq.shutdown());
   for (const kind of ["plan", "execute"]) {
     await assert.rejects(worq.spawn(kind, "plan it", { title: "Plan work" }), (error) => configError(error) && /\/review is no longer supported/.test((error as Block).message));
@@ -77,7 +76,7 @@ test("config: an ignored launch block alone does not block launches", async (t) 
   t.after(() => rm(dir, { recursive: true, force: true }));
   const warnings: string[] = [];
   const worq = new Worq({ driver: fakeDriver({ agent: (turn) => turn.tool("submit", { summary: "ok" }).then(() => {}), review: (turn) => turn.tool("submit", pass).then(() => {}) }),
-    prompts: loadPrompts(), kinds: KINDS, config: await configOf({ launch: { interactive: false } }), state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
+    kinds: KINDS, config: await configOf({ launch: { interactive: false } }), state, cwd: root, notify() {}, warn: (text) => warnings.push(text) });
   t.after(() => worq.shutdown());
   const agent = await worq.spawn("plan", "plan it", { title: "Plan work" });
   await worq.spawn("plan", "plan more", { title: "Plan more" });
@@ -85,20 +84,13 @@ test("config: an ignored launch block alone does not block launches", async (t) 
   await agent.cancel();
 });
 
-test("verify:false is refused before admission; every agent is reviewed once", async (t) => {
-  const { dir, root, state } = await repo();
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const worq = new Worq({ driver: fakeHarness(FULL_CAPS, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
-  await assert.rejects(worq.spawn("execute", "x", { title: "No review", verify: false }), (error) => error instanceof Block && error.code === "verify" && /exactly one independent review/.test(error.message));
-  assert.equal(worq.size, 0);
-});
 
 test("explicit runtime fields the harness cannot honour are refused before admission", async (t) => {
   const { dir, root, state } = await repo();
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
+  const worq = new Worq({ driver: fakeHarness({ ...MINIMAL_CAPS, context: FULL_CAPS.context }, {}), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
   await assert.rejects(worq.spawn("plan", "plan it", { title: "Plan work", thinking: "high" }), (error: unknown) => error instanceof Block && error.code === "capability" && /thinking/.test(error.message));
-  const isolated = new Worq({ driver: fakeHarness(MINIMAL_CAPS, {}), prompts: loadPrompts(), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
+  const isolated = new Worq({ driver: fakeHarness(MINIMAL_CAPS, {}), kinds: KINDS, config: await configOf({}), state, cwd: root, notify() {} });
   await assert.rejects(isolated.spawn("plan", "plan it", { title: "Plan work" }), /cannot isolate context/);
   assert.equal(worq.size + isolated.size, 0);
 });

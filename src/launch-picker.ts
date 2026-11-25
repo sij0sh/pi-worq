@@ -1,4 +1,4 @@
-import type { Kind } from './prompts.ts';
+import type { Kind } from './runtime/workflows.ts';
 import { execFile } from 'node:child_process';
 import { getSelectListTheme, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { getNativeClipboard, Editor, type Component, type TuiMouseEvent, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';

@@ -7,8 +7,7 @@ import { Value } from "typebox/value";
 import type { AgentEvent } from "../src/agent.ts";
 import { DEFAULT_LIMITS, type Config, type Limits } from "../src/runtime/config.ts";
 import { errorText } from "../src/contracts.ts";
-import { loadPrompts, type Kind } from "../src/prompts.ts";
-import { loadCatalog } from "../src/runtime/workflows.ts";
+import { loadCatalog, type Kind } from "../src/runtime/workflows.ts";
 import type { Capabilities, CoreHandle, Driver, Spec } from "../src/sdk/contract.ts";
 import { Worq } from "../src/worq.ts";
 
@@ -175,7 +174,7 @@ export function setup(root: string, state: string, scripts: Record<string, Scrip
   const events: AgentEvent[] = [];
   const seen: Spec[] = [];
   let wake: (() => void) | undefined;
-  const worq = new Worq({ telemetry, driver: fakeDriver(scripts, seen), prompts: loadPrompts(), kinds, config: config(limits), state, cwd: root,
+  const worq = new Worq({ telemetry, driver: fakeDriver(scripts, seen), kinds, config: config(limits), state, cwd: root,
     notify: (event) => { events.push(event); wake?.(); } });
   /** Resolve when an event of this type for this ref arrives. */
   const next = async (type: AgentEvent["type"], ref?: string, count = 1) => {

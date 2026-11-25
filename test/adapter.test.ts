@@ -102,6 +102,7 @@ test("a new folder package and a new adapter launch through worq_spawn and the C
   await install(agentDir, "echo", adapterSource(key));
   await mkdir(join(agentDir, "workflows", "notes"), { recursive: true });
   await writeFile(join(agentDir, "workflows", "notes", "SKILL.md"), "---\ndescription: Write release notes\naccess: read\n---\nWrite the release notes.\n");
+  await writeFile(join(agentDir, "workflows", "notes", "REVIEW.md"), "Check the submitted notes.");
   process.env.WORQ_STATE_DIR = state;
   t.after(() => { delete process.env.WORQ_STATE_DIR; });
   const tools: { name: string; description: string; execute: Function }[] = [];
