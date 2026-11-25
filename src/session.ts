@@ -302,7 +302,7 @@ export class Conversation<T extends TSchema> {
     const { spec, driver } = this.options;
     await driver.load?.(spec.runtime?.sdk ?? "pi");
     const caps = driver.capabilities(spec.name, spec.runtime);
-    if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
+    if ((caps.context.system !== "replace" && caps.context.system !== "append") || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
     this.awaitAdmission = caps.requestAdmission === "awaited";
     const handle = await driver.open({
       id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.options.signal,

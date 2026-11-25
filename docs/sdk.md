@@ -1,6 +1,6 @@
 # SDKs
 
-An **SDK adapter** runs one Worq session (agent, PQ subagent or review) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Two ship: Pi (`pi`, the default) and Claude Code (`claude-code`, an optional lazy built-in). Pi is the only reserved id.
+An **SDK adapter** runs one Worq session (agent, PQ subagent or review) on a backend. Worq is the harness; SDKs are interchangeable execution backends. Three ship: Pi (`pi`, the default), Claude Code (`claude-code`, optional lazy built-in) and Antigravity (`antigravity`, optional lazy built-in). Pi is the only reserved id.
 
 Adding an SDK = one folder: `<agentDir>/worq/adapters/<id>/adapter.mjs`. No Worq source changes. Folder name = id (lowercase, hyphenated; `pi` is reserved). Global only: never project-local, never a path from a launch request. Installing it is the trust opt-in: it runs in-process with Pi's privileges (not a sandbox). A valid installed adapter wins its own id over a non-reserved built-in, including an installed `claude-code` or `claude`; a failed built-in load never replaces an installed adapter and never affects Pi or management.
 
@@ -18,9 +18,10 @@ Select it per launch: `worq_spawn { kind, sdk: "echo", model? , thinking? }`, `w
 
 ```
 src/sdk/contract.ts       contract types, assertRuntime
-src/sdk/registry.ts       Pi/Claude records + installed adapter discovery (lazy loaders) + createDriver
+src/sdk/registry.ts       Pi/Claude/Antigravity records + installed adapter discovery (lazy loaders) + createDriver
 src/sdk/pi.ts             Pi adapter (shipped)
 src/sdk/claude.ts         Claude Code adapter (shipped, optional package)
+src/sdk/antigravity.ts    Antigravity adapter (shipped, optional `agy` CLI over ACP)
 src/runtime/launch.ts     resolveRuntime (every launch route) + picker choices
 src/runtime/config.ts     limits, migration findings
 src/runtime/resources.ts  shared AGENTS.md + skills snapshot
@@ -49,7 +50,7 @@ export async function createDriver(host, resources, records): Promise<Driver>;
 
 `HostServices` carries the shipped Pi adapter's host (`pi: { model, modelRegistry, thinkingLevel, agentDir }`) and a provider-neutral accessor for Main's live selection (`main(): { model?, thinking? }`); installed adapters get `{ id, dir, agentDir }`. `resolveRuntime` loads the requested adapter, fills defaults, judges capabilities and runs `validateRuntime` before Worq reserves a slot, ref or worktree; it never calls `models()`. Worq freezes the selection and passes it through the conversation; PQs and reviews inherit the owner's effective runtime. Per `open(spec)` the driver re-checks that runtime, composes the system prompt, appends the `skill` tool, then calls the adapter.
 
-Built-in discovery seeds `pi`, adds every valid installed folder, then adds `claude-code` only when no installed adapter claimed that id. `pi` cannot be replaced; installed `claude` remains its own id (there is no `claude` alias).
+Built-in discovery seeds `pi`, adds every valid installed folder, then adds `claude-code` and `antigravity` only when no installed adapter claimed those ids. `pi` cannot be replaced; installed `claude` remains its own id (there is no `claude` alias).
 
 ## Contract
 
@@ -113,7 +114,7 @@ Pure data; `assertRuntime(runtime, caps)` judges the resolved runtime. Not a sub
 |---|---|---|
 | `switchModel` | `Handle.configure` can change the model | Manual model switch when `false` → `capability` |
 | `thinking` | Levels the runtime's model accepts; `[]` = no level control | Explicit level outside the list → `capability` |
-| `context` | `replace` + no ambient instructions required | Anything else refuses the session |
+| `context` | `replace` or `append` with no ambient instructions required | Ambient instructions refuse the session |
 | `turnUnit` | `request` (one `turn` per model request) or `prompt` | Informational; logged at open |
 | `requestAdmission` | `"awaited"` opts into the pre-request gate; `turn` events are observational only | None; the adapter must call it |
 | `contextFork` | `Handle.snapshot()` / `SessionSpec.seed` work: a new session can continue another's history | Absent/`false`: `fork: true` children start fresh with a brief |
@@ -162,3 +163,11 @@ Claude uses the SDK's native in-process MCP server (`createSdkMcpServer`) scoped
 - **Pinned HTTP limit:** The local provider observed one HTTP send for a 429, but three same-model sends for a generic 400 within one admitted generation even with `CLAUDE_CODE_MAX_RETRIES=0` and no `api_retry` event. This pre-existing internal fallback is not an extra Worq generation and is an exception to the literal per-wire-attempt contract; this repair does not enforce a strict wire-attempt cap.
 - Model changes use `applyFlagSettings({ model })` and bounded summary read-back. An uncertain change invalidates the handle; a verified refusal keeps the previous selection. The dock shows the verified wire ID, while the effective runtime selection carries the context option for reuse. TURNS counts observed top-level response starts and CACHE/TOK/S are sampled from finalized successful responses, not startup, tool wait or whole-prompt aggregates.
 - One native streaming query preserves history across prompts and switches (`persistSession: false`). Interrupt waits for prompt settlement, not just the control ACK; a worker which cannot confirm settlement is closed instead of reused.
+
+### Antigravity (`antigravity`)
+
+- `src/sdk/antigravity.ts` → `antigravityAdapter(host)`; probes the optional `agy` CLI (`ANTIGRAVITY_CLI`, default `agy`) lazily and spawns `agy acp --stdio --process-per-session --disable-telemetry --include-default-customizations=false`. A missing `agy` binary fails `antigravity` alone and is skipped by the picker.
+- Uses your existing Google Account OAuth login (`agy` Pro/Enterprise subscription), `GEMINI_API_KEY`, or Vertex ADC through a curated `workerEnv()`; unrelated provider keys do not reach the worker.
+- Isolation: passes `--include-default-customizations=false` (`ambientInstructions: false`), appends `spec.system` via ACP `_meta.antigravity.systemPrompt.append` (`context.system: "append"`), and handles ACP `session/request_permission` by auto-allowing only Worq's session-scoped tools and denying built-in `agy` tools.
+- Tools are served over a per-session `127.0.0.1` bearer-authenticated Streamable HTTP MCP server passed to `session/new`, supporting long-blocking tools, `{ text, image }` outputs, `tool-error` reporting, and terminal `submit` cancellation.
+- Capabilities: `switchModel: true` (live `configure({ model, thinking })` via ACP `session/set_config_option`), `thinking: ["low", "medium", "high", "xhigh"]`, `turnUnit: "request"`, `context: { system: "append", ambientInstructions: false }`. Default model inherits a compatible Main reference, else `gemini-4-neon`.

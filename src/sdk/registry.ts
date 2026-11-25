@@ -21,6 +21,7 @@ export interface SDKRecord {
 }
 export const PI: SDKRecord = { load: async (host) => (await import("./pi.ts")).piAdapter(host.pi) };
 export const CLAUDE: SDKRecord = { load: async (host) => (await import("./claude.ts")).claudeAdapter(host) };
+export const ANTIGRAVITY: SDKRecord = { load: async (host) => (await import("./antigravity.ts")).antigravityAdapter(host) };
 
 /** What an installed adapter's factory receives. */
 export interface AdapterContext { id: string; dir: string; agentDir: string }
@@ -41,8 +42,12 @@ export function discoverAdapters(agentDir: string): { records: Record<string, SD
   const records: Record<string, SDKRecord> = { pi: PI };
   const problems: { path: string; message: string }[] = [];
   const base = join(agentDir, "worq", "adapters");
-  /** The built-in Claude record is a fallback: a valid installed adapter with the same id wins it. */
-  const builtins = (): Record<string, SDKRecord> => Object.hasOwn(records, "claude-code") ? records : { ...records, "claude-code": CLAUDE };
+  /** Built-in optional records are fallbacks: a valid installed adapter with the same id wins. */
+  const builtins = (): Record<string, SDKRecord> => ({
+    ...records,
+    ...(Object.hasOwn(records, "claude-code") ? {} : { "claude-code": CLAUDE }),
+    ...(Object.hasOwn(records, "antigravity") ? {} : { antigravity: ANTIGRAVITY }),
+  });
   try {
     if (!exists(base)) return { records: builtins(), problems };
     const root = realpathSync(base);
@@ -79,7 +84,7 @@ async function importAdapter(id: string, file: string, dir: string, agentDir: st
  * The core's single Driver. Imports each SDK lazily by id (once, in-flight loads shared), judges runtimes
  * against the SDK's capabilities and prepares the shared environment (AGENTS.md, skill index + `skill` tool).
  */
-export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI, "claude-code": CLAUDE }): Promise<Driver> {
+export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI, "claude-code": CLAUDE, antigravity: ANTIGRAVITY }): Promise<Driver> {
   const loading = new Map<string, Promise<SDKAdapter>>();
   const adapters = new Map<string, SDKAdapter>();
   const installed = () => Object.keys(sdks).sort((a, b) => a === "pi" ? -1 : b === "pi" ? 1 : a.localeCompare(b));

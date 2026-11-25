@@ -175,5 +175,5 @@ export function assertRuntime(runtime: Runtime, caps: Capabilities): void {
       ? `${at(runtime, "thinking")}: ${runtime.thinking} is not a ${runtime.sdk} thinking level (${caps.thinking.join(", ")})`
       : `${at(runtime, "thinking")}: ${runtime.sdk} has no thinking level control`);
   }
-  if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${at(runtime, "sdk")}: ${runtime.sdk} cannot isolate context`);
+  if ((caps.context.system !== "replace" && caps.context.system !== "append") || caps.context.ambientInstructions) throw new Block("capability", `${at(runtime, "sdk")}: ${runtime.sdk} cannot isolate context`);
 }
