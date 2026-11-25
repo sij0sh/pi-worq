@@ -53,6 +53,8 @@ test("guidance is nonfatal for unreadable or invalid data and ignores profiles i
   await writeFile(path, "a".repeat(16 * 1024 + 1));
   assert.match(load().warning ?? "", /exceeds 16 KiB/);
   await writeFile(path, "No table here");
+  assert.deepEqual(load(), {}, "prose only: nothing configured, nothing to warn about");
+  await writeFile(path, "| sdk | model | think | use when |\n| --- | --- | --- | --- |\n| pi | provider/model | high | wrong header |");
   assert.match(load().warning ?? "", /expected a table/);
   await writeFile(path, header + row);
   await writeFile(join(agent, ".git"), "gitdir: /worktrees/profile\n");

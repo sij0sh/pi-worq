@@ -12,6 +12,8 @@ Main can use the four Worq tools by default. Ask Main directly or launch an agen
 
 First use installs the shipped `plan`, `execute` and `scout` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace. Existing seeded profiles (`.worq-seeded`) are not modified on upgrade; copy `workflows/scout/` into `<agentDir>/workflows/scout/` once if upgrading.
 
+First load also creates `<agentDir>/worq/AGENTS.md`, `RUNTIMES.md` and `SPAWN-GUIDANCE.md` as inert templates: each holds commented example content and changes nothing until you edit it. A file is only created when nothing is at its path, so updates and re-installs never touch your copies; delete one and restart Pi to get the template back. See `docs/configuration.md`.
+
 ### Windows (native)
 
 Requires Windows 10/11, Node.js 22.19+, Git for Windows, and CPython 3.12+ (`git.exe` and `python.exe` on `PATH`). From this checkout in PowerShell:

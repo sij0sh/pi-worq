@@ -19,6 +19,7 @@ import { clean } from "./src/render.ts";
 import type { Driver, Runtime } from "./src/sdk/contract.ts";
 import { hintLoader } from "./src/runtime/hints.ts";
 import { loadSpawnGuidance, spawnRuntimeRule } from "./src/runtime/spawn-guidance.ts";
+import { provisionTemplates } from "./src/runtime/templates.ts";
 import { createUsageTracker, formatUsageForPrompt, type UsageTracker } from "./src/runtime/usage.ts";
 import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
@@ -73,10 +74,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
   return function worq(pi: ExtensionAPI) {
     const agentDir = () => options.agentDir?.() ?? getAgentDir();
     const usage = options.usage ?? createUsageTracker();
+    // Operator resource files come first, so the catalog and guidance reads below see them; each is created only when missing.
+    const templates = provisionTemplates(agentDir());
     // One catalog, read once per extension load (shipped packages are provisioned first): worq_spawn's description is fixed at registration.
     const workflows = loadCatalog(agentDir());
     const adapters = discoverAdapters(agentDir());
-    const issues = [...workflows.problems, ...adapters.problems];
+    const issues = [...templates.problems, ...workflows.problems, ...adapters.problems];
     const catalog: ReadonlyMap<string, Kind> = workflows.kinds;
     const spawnable = [...catalog.values()].filter((kind) => !kind.userOnly);
     const table = ops();

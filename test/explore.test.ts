@@ -225,8 +225,9 @@ test("exploreRepo: benchmark against pi-worq itself produces a compact Tier 2 sy
   assert.equal(autoSnap.text, mapSnap.text, "auto and map produce identical Tier 2 prefix for pi-worq");
   assert.ok(autoSnap.bytes <= EXPLORE_LIMITS.tier2PayloadBytes, `pi-worq map ${autoSnap.bytes} <= 12 KB`);
   assert.match(autoSnap.text, /package\.json: pi-worq@/);
-  assert.match(autoSnap.text, /src\/worq\.ts[\s\S]*class Worq/);
-  assert.match(autoSnap.text, /src\/explore\.ts[\s\S]*exploreRepo/);
+  // Symbol density per file depends on the byte cap, so assert the listing itself: every source file is named.
+  assert.match(autoSnap.text, /^src\/worq\.ts \(\d+L, [\d.]+[BK]B?\)$/m);
+  assert.match(autoSnap.text, /^src\/explore\.ts \(\d+L, [\d.]+[BK]B?\)$/m);
   assert.match(autoSnap.text, /### Other Files[\s\S]*test \(/);
 });
 

@@ -54,6 +54,8 @@ export function loadSpawnGuidance(agentDir: string, spawn: Ops["spawn"]): { sect
 
   const schema = Type.Pick(spawn, ["sdk", "model", "thinking"]);
   const lines = raw.replace(/<!--[\s\S]*?(?:-->|$)/g, "").split(/\r?\n/).map(line => line.trim());
+  // No table at all is the shipped template's shape: nothing configured, so nothing to warn about.
+  if (!lines.some(line => line.startsWith("|"))) return {};
   let fence: string | undefined;
   for (let i = 0; i < lines.length; i++) {
     const marker = /^(`{3,}|~{3,})(.*)$/.exec(lines[i]);

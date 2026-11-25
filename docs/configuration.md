@@ -27,7 +27,7 @@ PQ subagents and reviews inherit their agent's effective runtime at child launch
 
 ## Runtime hints (`RUNTIMES.md`)
 
-Optional `<agentDir>/worq/RUNTIMES.md`: one Markdown table of soft per-role defaults (`role | sdk | model | thinking | max-turns | max-minutes`). Starter: `docs/examples/RUNTIMES.md`. Missing file = behaviour above, unchanged.
+Optional `<agentDir>/worq/RUNTIMES.md`: one Markdown table of soft per-role defaults (`role | sdk | model | thinking | max-turns | max-minutes`). Starter: `docs/examples/RUNTIMES.md`. Missing file = behaviour above, unchanged. The file Worq creates on first load is that example table inside an HTML comment, so it parses as zero rows; no table, or only commented rows, means no hints.
 
 - Hot reload: re-read when mtime/size changes; next spawn or child launch uses it. Running sessions keep their runtime.
 - Precedence: explicit launch field > hint > Main/adapter default. Explicit values stay fail-closed; hints never throw.
@@ -44,7 +44,7 @@ To let Main choose a worker runtime for the task, put a shortlist in `<agentDir>
 
 Main can copy a suitable pair and its listed thinking level into `worq_spawn`, even for different tasks using the same workflow. Explicit user preferences win, including choices outside the list. If no choice fits, Main omits runtime fields: `RUNTIMES.md` provides the same per-role defaults as before, then normal Main/adapter defaults apply. The shortlist does not change workflow permissions or route `/worq`, the CLI or child sessions.
 
-Pi reads this file once at extension load; reload Pi to apply edits. Only the table's valid rows enter Main's prompt (up to eight choices, with notes no longer than 200 characters). Put a regular UTF-8 file of at most 16 KiB in the active profile outside any Git checkout. The profile root may be a symlink, but the `worq` directory and guidance file may not. Missing or invalid guidance does not prevent launches.
+Pi reads this file once at extension load; reload Pi to apply edits. Only the table's valid rows enter Main's prompt (up to eight choices, with notes no longer than 200 characters). Put a regular UTF-8 file of at most 16 KiB in the active profile outside any Git checkout. The profile root may be a symlink, but the `worq` directory and guidance file may not. Missing or invalid guidance does not prevent launches. A file with no table row at all — including the all-commented template created on first load — is silently read as "no shortlist"; Worq warns only when a table exists but its header or separator is wrong, or when valid-table rows are skipped.
 
 ## Subscription usage checks
 
@@ -69,6 +69,22 @@ Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`
 
 Relying on a distinct reviewer model? Keep the older release until you accept inherited reviewer runtime; Worq never translates or silently drops it. Fix the file, then reload Pi.
 
+## First-run files
+
+On first load Worq creates three operator files under `<agentDir>/worq/` when they are missing:
+
+| File | Read by | Shipped content |
+|---|---|---|
+| `AGENTS.md` | every agent, PQ, review and edit system prompt | one HTML comment |
+| `RUNTIMES.md` | runtime hints (re-read when the file changes) | example table inside an HTML comment: zero rows |
+| `SPAWN-GUIDANCE.md` | Main's `worq_spawn` shortlist (read once at load) | example table inside an HTML comment: zero rows |
+
+Those templates are inert: the comments carry no instructions, and both table parsers ignore commented rows, so a fresh profile behaves exactly as if the files were absent. Add content by replacing a comment, or by deleting a commented table's `<!--` and `-->` lines and editing its rows.
+
+These files are operator-owned data, not shipped assets. Extension updates and re-installs only create a missing file: an existing `AGENTS.md`, `RUNTIMES.md` or `SPAWN-GUIDANCE.md` is never written, moved or reformatted, whatever it contains. There is no marker file, so a deleted file comes back on the next load — **reset** one by deleting it and restarting Pi. The templates live in the installed package at `templates/worq/` if you want a current copy by hand.
+
+Provisioning is fail-soft: a profile inside a Git checkout is refused, a symlinked `worq/` directory or symlinked file is reported and never followed, and each failure is one warning (`Default resource not installed: …`). Loading continues without the missing file.
+
 ## Shared resources
 
 Installed once, identical for every role and every SDK (harness-neutral: plain Markdown only). Never part of model selection.
@@ -76,6 +92,8 @@ Installed once, identical for every role and every SDK (harness-neutral: plain M
 ```
 <agentDir>/worq/
 ├── AGENTS.md                  appended to every system prompt
+├── RUNTIMES.md                per-role runtime hints
+├── SPAWN-GUIDANCE.md          Main's worq_spawn runtime shortlist
 ├── skills/<name>/SKILL.md     indexed in the prompt; body read on demand via the `skill` tool
 └── skills/<name>.md
 ```

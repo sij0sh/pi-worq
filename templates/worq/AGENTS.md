@@ -1,0 +1,1 @@
+<!-- Operator instructions: this text is appended to every Worq agent, PQ, review and edit system prompt as context, not authority. Comments reach the model, so delete this one once you add content. -->
