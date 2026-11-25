@@ -53,6 +53,7 @@ export interface ConversationOptions<T extends TSchema> {
   warning?: (message: string) => void;
   /** Open work (delegations) the session must wait for before it may stop. */
   pending?: () => number;
+  onFirstResponse?: () => void;
   /** A fatal, backend-neutral runtime invalidation. Wakes a parked owner; the session can never run again. */
   invalidated?(error: Block): void;
 }
@@ -72,6 +73,7 @@ export class Conversation<T extends TSchema> {
   private wake?: () => void;
   private turns = 0;
   private prepaid = false;
+  private responded = false;
   /** Tool fence: dispatch only while a run is in progress and within budget. */
   private active = false;
   private budget = new AbortController();
@@ -251,10 +253,19 @@ export class Conversation<T extends TSchema> {
       },
     };
   }
+  private firstResponse() {
+    if (this.responded || !this.active || this.gate.aborted) return;
+    this.responded = true;
+    observe(this.options.onFirstResponse, undefined);
+  }
   private event(event: SessionEvent) {
     const { spec } = this.options;
     switch (event.type) {
-      case "telemetry": observe(spec.observe, event.value); return;
+      case "response": if (event.completed) this.firstResponse(); return;
+      case "telemetry":
+        if ("cache" in event.value) this.firstResponse();
+        observe(spec.observe, event.value);
+        return;
       case "log": spec.log(event.text); return;
       case "tool-start": spec.log(`→ ${event.name} ${JSON.stringify(event.args ?? {}).slice(0, 200)}`); return;
       case "tool-error":
@@ -263,7 +274,10 @@ export class Conversation<T extends TSchema> {
         return;
       case "text":
         spec.log(event.text);
-        if (event.completed && event.text.trim()) this.last = event.text.slice(-8000);
+        if (event.completed) {
+          this.firstResponse();
+          if (event.text.trim()) this.last = event.text.slice(-8000);
+        }
         return;
       case "turn":
         // An opted-in adapter's turns are observational only: admission already charged or refused the request.

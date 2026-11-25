@@ -276,17 +276,14 @@ export class Agent {
         box = processTools(cwd, join(this.dir, "runtime"), { signal, projectRoot: root });
         tools.push(...writeTools(cwd, this.scope), ...box.tools);
       }
-      const scopeHint = this.scope
-        ? `\n\nAssigned writePaths (enforced on edit and submit): ${this.scope.patterns.join(", ")}. Do not modify files outside these paths.`
-        : "";
       const exploreBlock = this.explore ? `\n\n${this.explore.text}` : "";
       if (this.explore) {
         this.log(`explore tier ${this.explore.tier} (${this.explore.stats.sourceFiles} src, ${(this.explore.bytes / 1024).toFixed(1)}KB)`);
       }
       this.conversation = new Conversation({
-        driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs,
+        driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs, onFirstResponse: this.onWarm,
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}${exploreBlock}\n\n${this.kind.skill.body}${scopeHint}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}${exploreBlock}\n\n${this.kind.skill.body}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
           description: `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : " Worq saves it to .agents/plans/."}`,
@@ -322,7 +319,11 @@ export class Agent {
         }
         signal.throwIfAborted();
       }
-      let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
+      let message: string | undefined = JSON.stringify({
+        task: this.task, kind: this.kind.name,
+        ...(this.scope ? { writePaths: this.scope.patterns, writePathsNote: "Do not modify files outside these paths; enforced on edit and submit." } : {}),
+        ...(this.attachments.length ? { attachments: this.attachments } : {}),
+      }, null, 2);
       let done = false;
       while (message !== undefined) {
         if (this.fatal) throw this.fatal;
@@ -335,7 +336,6 @@ export class Agent {
           }
           this.set("running");
           const submitted = await this.conversation.run(message);
-          this.onWarm?.();
           await this.submit(submitted);
           if (this.final || !this.kind.review) { done = true; break; }
         } catch (error) {

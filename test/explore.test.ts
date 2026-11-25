@@ -402,3 +402,44 @@ test("Worq: Tier 1 parallel group staggers siblings until cache warmup and cance
   assert.equal(c.state, "done");
   await worq.shutdown();
 });
+
+test("grouped scoped writers share the system prefix and release siblings on a tool-only response", async (t) => {
+  const bigModule = Array.from({ length: 140 }, (_, i) => `export const item_${i} = "value-${i}-padding-for-cache";`).join("\n");
+  const { root, state } = await initRepo(t, { "src/items.ts": bigModule });
+  const kinds = new Map(KINDS);
+  kinds.set("execute", { ...kinds.get("execute")!, explore: "auto", review: undefined });
+  const systems: string[] = [];
+  const paths: string[][] = [];
+  let firstResponse!: () => void;
+  const response = new Promise<void>(resolve => { firstResponse = resolve; });
+  let finishLeader!: () => void;
+  const stay = new Promise<void>(resolve => { finishLeader = resolve; });
+  const worq = new Worq({ cwd: root, state, kinds, config: config(), exploreStaggerMs: 60_000, notify() {}, driver: fakeDriver({
+    "agent.execute": async (turn) => {
+      systems.push(turn.system);
+      paths.push(JSON.parse(turn.text).writePaths);
+      if (systems.length === 1) {
+        turn.spec.emit({ type: "response", completed: false });
+        await response;
+        turn.spec.emit({ type: "response", completed: true });
+        await stay;
+      }
+      await turn.tool("submit", { summary: "ready" });
+    },
+  }) });
+  try {
+    const options = { group: "writers", notify: "barrier" as const, expect: 2 };
+    const leader = await worq.spawn("execute", "lead", { ...options, title: "Lead writer", writePaths: ["src/lead.ts"] });
+    const sibling = await worq.spawn("execute", "follow", { ...options, title: "Next writer", writePaths: ["src/next.ts"] });
+    assert.strictEqual(leader.explore, sibling.explore);
+    assert.ok(leader.explore!.bytes >= EXPLORE_LIMITS.tier1WarmupThresholdBytes);
+    for (let i = 0; i < 100 && systems.length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    assert.deepEqual(paths, [["src/lead.ts"]]);
+    firstResponse();
+    for (let i = 0; i < 100 && systems.length < 2; i++) await new Promise(r => setTimeout(r, 10));
+    assert.deepEqual(paths, [["src/lead.ts"], ["src/next.ts"]]);
+    assert.equal(systems[0], systems[1]);
+    assert.doesNotMatch(systems[0], /src\/(lead|next)\.ts/);
+    assert.equal(leader.state, "running", "the sibling starts before the leader submits");
+  } finally { firstResponse(); finishLeader(); await worq.shutdown(); }
+});

@@ -117,13 +117,15 @@ test("Pi applies a queued model and thinking switch after tools, within the same
     return stream;
   };
   let release: (() => void) | undefined;
+  let warmed = 0;
   const hold = tool("hold", "Wait for the test.", obj({}), () => new Promise<string>(resolve => { release = () => resolve("tool finished"); }));
-  const c = new Conversation({ driver, finish, signal: new AbortController().signal, turns: 4, minutes: 1,
+  const c = new Conversation({ driver, finish, signal: new AbortController().signal, turns: 4, minutes: 1, onFirstResponse: () => { warmed++; },
     spec: { name: "agent.plan", cwd, system: "S", tools: [hold], log() {} } });
   const done = c.run("go");
   void done.catch(() => {});
   try {
     await until(() => release !== undefined);
+    assert.equal(warmed, 1, "the tool-only response warms before its tool finishes");
     assert.equal(c.runtime?.model, `openai/${first.id}`);
     assert.equal(c.runtime?.thinking, "medium");
     assert.equal(await c.configure({ model: `openai/${second.id}` }), "queued");
@@ -137,6 +139,7 @@ test("Pi applies a queued model and thinking switch after tools, within the same
     assert.equal(c.runtime?.model, `openai/${second.id}`);
     assert.equal(c.runtime?.thinking, "high");
     assert.equal(c.pendingChange, undefined);
+    assert.equal(warmed, 1, "one callback across responses");
   } finally { release?.(); c.dispose(); }
 });
 

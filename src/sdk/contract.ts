@@ -55,6 +55,8 @@ export type SessionEvent =
   | { type: "tool-error"; name: string; message: string }
   /** Assistant text; `completed` is false for errored/aborted messages. */
   | { type: "text"; text: string; completed: boolean }
+  /** Top-level assistant response ended; no text or usage is required. */
+  | { type: "response"; completed: boolean }
   | { type: "telemetry"; value: Observation }
   | { type: "log"; text: string };
 

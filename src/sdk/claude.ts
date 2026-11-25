@@ -525,6 +525,7 @@ export function claudeAdapter(host: HostServices = {}, injected?: ClaudeSdk): SD
       } else if (event.type === "message_stop" && turn.sample) {
         const { start, input, read, write, output, ended } = turn.sample;
         turn.sample = undefined;
+        emit({ type: "response", completed: ended });
         if (ended && (input !== undefined || read !== undefined || write !== undefined || output !== undefined)) {
           report({ cache: { read, write, input, speed: output === undefined ? undefined : output / Math.max(0.001, (performance.now() - start) / 1000) } });
         }

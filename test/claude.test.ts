@@ -135,12 +135,12 @@ function fakeQuery(input: AsyncIterable<unknown>, options: Record<string, unknow
         mcp_servers: [{ name: "worq", source: "sdk", status: "connected" }], skills: [], slash_commands: [], plugins: [], permissionMode: "dontAsk" });
       if (prompt.startsWith("fail")) { queue.push({ type: "result", subtype: "error_during_execution", is_error: true }); continue; }
       aborted = false;
-      const start = { type: "message_start", message: { id: `test${++responseId}`, usage: { input_tokens: 8, cache_read_input_tokens: 2 } } };
+      const start = { type: "message_start", message: { id: `test${++responseId}`, usage: prompt === "no-usage" ? undefined : { input_tokens: 8, cache_read_input_tokens: 2 } } };
       emitStream(start);
       emitStream(start);
       emitStream({ ...start, message: { id: "subagent" } }, "subagent");
       if (prompt !== "hang") {
-        emitStream({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 20 } });
+        emitStream({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: prompt === "no-usage" ? undefined : { output_tokens: 20 } });
         emitStream({ type: "message_stop" });
         emitStream({ type: "message_stop" });
       }
@@ -413,12 +413,20 @@ test("claude: refused prompt cannot become success; partial and subagent streams
   assert.equal(await rejected.prompt("original"), "failed", "the SDK success result does not override the hook refusal");
   rejected.dispose();
   const telemetry: import("../src/telemetry.ts").Observation[] = [];
-  const handle = await claudeAdapter({}, fakeSdk().sdk).open(direct((event) => { if (event.type === "telemetry") telemetry.push(event.value); }));
+  const completed: boolean[] = [];
+  const handle = await claudeAdapter({}, fakeSdk().sdk).open(direct((event) => {
+    if (event.type === "telemetry") telemetry.push(event.value);
+    if (event.type === "response") completed.push(event.completed);
+  }));
+  assert.equal(await handle.prompt("no-usage"), "completed");
+  assert.deepEqual(completed, [true], "one top-level completion even without cache usage or assistant text");
+  assert.ok(!telemetry.some(value => "cache" in value));
   assert.equal(await handle.prompt("wait"), "completed");
   const partial = handle.prompt("hang");
-  while (telemetry.filter((value) => "turn" in value).length < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+  while (telemetry.filter((value) => "turn" in value).length < 3) await new Promise<void>((resolve) => setImmediate(resolve));
   await handle.abort();
   assert.equal(await partial, "aborted");
+  assert.deepEqual(completed, [true, true], "the partial response has no completion");
   const samples = telemetry.flatMap((value) => "cache" in value ? [value.cache] : []);
   assert.equal(samples.length, 1);
   assert.equal(samples[0].read, 2);

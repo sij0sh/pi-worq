@@ -147,6 +147,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
           seen.add(event.message);
           const { usage, stopReason } = event.message;
           const completed = stopReason !== "error" && stopReason !== "aborted";
+          spec.emit({ type: "response", completed });
           failed = stopReason === "error";
           if (failed) {
             // Record a bounded status code only; provider bodies can contain credentials or prompt text.
