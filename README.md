@@ -63,6 +63,8 @@ See `docs/workflows.md`.
 
 ## Tools
 
+Only `worq_spawn` is active before launch. The three management tools become active after a successful launch via `worq_spawn`, `/worq`, or the CLI. Finished reports remain inspectable; cancelling the last non-cancelled agent hides the management tools again.
+
 | Tool | Params | Effect |
 |---|---|---|
 | `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `group?`, `notify?`, `expect?`, `writePaths?`, `gates?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan names, inline agent refs, or repo-relative plan paths; `group`/`notify: "barrier"`/`expect` coalesce multi-agent waves into one wake-up; `writePaths` and `gates` enforce disjoint write scopes and pre-submit checks for write kinds; runtime defaults to Main's (`sdk` pi) |

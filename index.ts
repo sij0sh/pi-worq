@@ -20,7 +20,8 @@ import { hintLoader } from "./src/runtime/hints.ts";
 import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
 
-export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
+const MANAGEMENT_TOOLS = ["worq_list", "worq_send", "worq_cancel"] as const;
+export const TOOLS = ["worq_spawn", ...MANAGEMENT_TOOLS] as const;
 const actionable = (event: Partial<AgentEvent> | undefined) => {
   if (!event) return false;
   if (event.wake !== undefined) return event.wake;
@@ -33,7 +34,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. If the package includes REVIEW.md, Worq runs one automatic review on first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
-      "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Default to a 2–4 `scout` barrier wave (one turn) whenever a request requires locating or cross-checking behavior across 2+ areas of the repo before launching `plan` or `execute`. Stay free after spawning; wait for the single barrier notice instead of polling `worq_list`. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
+      "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Default to a 2–4 `scout` barrier wave (one turn) whenever a request requires locating or cross-checking behavior across 2+ areas of the repo before launching `plan` or `execute`. Stay free after spawning; wait for the single barrier notice instead of polling. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
     ],
   },
   worq_list: {
@@ -133,7 +134,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host, main: () => ({ model: host.model && `${host.model.provider}/${host.model.id}`, thinking: host.thinkingLevel }) }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify, hints: hintLoader(dir),
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify, hints: hintLoader(dir), onAgentsChanged: syncTools,
           warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;
@@ -144,12 +145,13 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return result;
     };
 
-    for (const name of TOOLS) {
+    function registerTool(name: (typeof TOOLS)[number], active: boolean) {
       const { op, description, guidelines } = descriptions[name];
       const body = name === "worq_spawn" ? `${description} Kinds — ${kinds}` : description;
       const parameters: TSchema = table[op];
       pi.registerTool({
-        name, label: name, description: body, parameters, promptSnippet: body, defaultActive: true,
+        name, label: name, description: body, parameters, promptSnippet: body,
+        exposure: active ? "direct" : "hidden", defaultActive: active,
         ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
         async execute(_id, params, signal, _update, ctx) {
           const { text, data } = await run(ctx, op, params, signal);
@@ -157,6 +159,18 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         },
       });
     }
+    let managementActive = false;
+    function syncTools() {
+      if (closing) return;
+      const active = instance?.hasNonCancelledAgents() ?? false;
+      if (active === managementActive) return;
+      managementActive = active;
+      // Withdraw at the registry level: subtracting restored tools with setActiveTools
+      // would also discard unrelated tools still pending registration in Pi.
+      for (const name of MANAGEMENT_TOOLS) registerTool(name, active);
+    }
+    for (const name of TOOLS) registerTool(name, name === "worq_spawn");
+
     const say = (ctx: ExtensionContext, text: string, level: 'info' | 'warning' | 'error' = 'info') => {
       if (ctx.mode === "tui") ctx.ui.notify(clean(text), level);
       else process.stderr.write(`${clean(text)}\n`);
@@ -263,6 +277,13 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });
 
+    pi.on("session_tree", () => {
+      if (closing || !managementActive) return;
+      // Pi has restored the branch's loadout, which may predate the current agents.
+      const active = pi.getActiveTools();
+      const missing = MANAGEMENT_TOOLS.filter((name) => !active.includes(name));
+      if (missing.length) pi.setActiveTools([...active, ...missing]);
+    });
     pi.on("session_start", async (_event, ctx) => {
       ui = ctx;
       if (!warned && ctx.mode === "tui") { warned = true; problems(ctx); }

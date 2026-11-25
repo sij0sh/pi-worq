@@ -66,6 +66,7 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
+  onCancelled?(): void;
   /** Invoked whenever the agent enters parked or any ENDED state (including cancel/close). */
   onSettled?(agent: Agent): void;
   /** The admitted runtime; PQ and review children inherit the owner's effective runtime. */
@@ -428,8 +429,10 @@ export class Agent {
       }
       this.state = done ? "done" : "closed";
     } catch (error) {
-      if (signal.aborted) this.state = "cancelled";
-      else { this.error = errorText(error); this.state = "failed"; }
+      if (signal.aborted) {
+        this.state = "cancelled";
+        this.deps.onCancelled?.();
+      } else { this.error = errorText(error); this.state = "failed"; }
     } finally {
       this.onWarm?.();
       this.controller.abort(new Block("ended", "Agent ended"));

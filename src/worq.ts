@@ -24,6 +24,7 @@ export interface WorqDeps {
   state: string;
   cwd: string;
   notify(event: AgentEvent): void;
+  onAgentsChanged?(): void;
   /** Operator-only notice (obsolete settings). */
   warn?(text: string): void;
   /** Override Tier 1 parallel group warmup stagger (ms); 0 disables. */
@@ -102,6 +103,10 @@ export class Worq {
     this.semaphore = new Semaphore(deps.config.limits.parallel);
   }
   private admissions = new AbortController();
+  hasNonCancelledAgents(): boolean {
+    for (const agent of this.agents.values()) if (agent.state !== "cancelled") return true;
+    return false;
+  }
   get size() { return this.agents.size; }
   get kinds() { return this.deps.kinds; }
   all() { return [...this.agents.values()]; }
@@ -231,6 +236,7 @@ export class Worq {
           runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root,
           semaphore: this.semaphore, notify: agentNotify, sessions: this.sessions,
           ...(this.deps.hints ? { hints: { get: () => this.hints() ?? { path: "", rows: new Map(), problems: [] }, warn: this.hintWarn } } : {}),
+          onCancelled: this.deps.onAgentsChanged,
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
         }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, hint, startDelay, onWarm });
         this.agents.set(ref, agent);
@@ -239,6 +245,7 @@ export class Worq {
           if (request.expect !== undefined) group.expect = Math.max(group.expect, request.expect);
           group.fired = false;
         }
+        this.deps.onAgentsChanged?.();
         beforeStart?.();
         agent.launch();
         return agent;

@@ -88,14 +88,14 @@ test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role
   assert.match(KINDS.get("execute")!.review!, /What consequential reason is there not to accept this result as-is\?/);
 });
 
-test("one command, four active tools and CLI socket integration", async (t) => {
+test("one command, agent-gated tools and CLI socket integration", async (t) => {
   const { dir, root, state } = await repo();
   const agentDir = join(dir, "agent");
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(agentDir);
   await writeFile(join(agentDir, "pi-worq.json"), JSON.stringify({ limits: { agentTurns: 2, reviewerTurns: 2 } }));
   process.env.WORQ_STATE_DIR = state;
-  const tools: { name: string; defaultActive?: boolean; parameters: unknown; execute: Function }[] = [];
+  const tools: { name: string; defaultActive?: boolean; exposure?: string; parameters: unknown; execute: Function }[] = [];
   const handlers: Record<string, Function> = {};
   let command: Function | undefined;
   let renderNotice: Function | undefined;
@@ -104,11 +104,18 @@ test("one command, four active tools and CLI socket integration", async (t) => {
   const requests: string[] = [];
   const pi = {
     sendUserMessage: (text: string) => requests.push(text),
-    registerTool: (tool: never) => tools.push(tool),
+    registerTool(tool: (typeof tools)[number]) {
+      const index = tools.findIndex((entry) => entry.name === tool.name);
+      if (index < 0) tools.push(tool);
+      else tools[index] = tool;
+    },
     registerCommand(name: string, options: {handler: Function}) { assert.equal(name,"worq"); assert.equal(command,undefined); command = options.handler; },
     registerMessageRenderer(_name: string, renderer: Function) { renderNotice = renderer; },
     on: (event: string, handler: Function) => { handlers[event] = handler; },
-    sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
+    sendMessage(message: typeof notices[number]["message"], options: typeof notices[number]["options"]) {
+      if (options.triggerTurn) assert.deepEqual(tools.filter(t => t.exposure === "direct").map(t => t.name), [...TOOLS]);
+      notices.push({ message, options });
+    },
   };
   const resumedReviews: string[] = [];
   const scripts: Record<string, Script> = {
@@ -134,7 +141,8 @@ test("one command, four active tools and CLI socket integration", async (t) => {
   };
   createWorq({ driver: () => fakeDriver(scripts), agentDir: () => agentDir })(pi as never);
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
-  assert.ok(tools.every(t => t.defaultActive));
+  assert.deepEqual(tools.filter(t => t.defaultActive).map(t => t.name), ["worq_spawn"]);
+  assert.ok(tools.slice(1).every(t => t.exposure === "hidden"));
   let widget: { render(width: number): string[] } | undefined;
   const ctx = { mode: "tui", cwd: root, ui: { notify(text: string) { alerts.push(text); }, setStatus() {},
     setWidget(key: string, factory?: Function) {
@@ -226,7 +234,7 @@ test("/worq launches a user-only package", async (t) => {
   process.env.WORQ_STATE_DIR = state;
   t.after(() => { delete process.env.WORQ_STATE_DIR; });
 
-  const tools: { name: string; description: string; parameters: { properties?: Record<string, { enum?: unknown; pattern?: string }> }; execute: Function }[] = [];
+  const tools: { name: string; description: string; exposure?: string; parameters: { properties?: Record<string, { enum?: unknown; pattern?: string }> }; execute: Function }[] = [];
   let command: Function | undefined;
   const notices: { content: string; type?: string; ref: string }[] = [];
   const alerts: { text: string; level: string }[] = [];
@@ -260,7 +268,9 @@ test("/worq launches a user-only package", async (t) => {
   };
 
   // Plan and Execute come first, followed by custom packages alphabetically; invalid siblings are reported.
+  assert.deepEqual(tools.filter(tool => tool.exposure === "direct").map(tool => tool.name), ["worq_spawn"]);
   await command!("", ctx);
+  assert.deepEqual(tools.filter(tool => tool.exposure === "direct").map(tool => tool.name), [...TOOLS]);
   assert.match(last(/broken: description is required/) ?? "", /broken/);
   assert.equal(launchedRef(), "docs-run");
   await settle("docs-run");
