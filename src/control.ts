@@ -8,7 +8,7 @@ import { controlExtension, controlPipe, windows } from "./platform.mjs";
 import { KIND_PATTERN, REF_PATTERN, type Worq } from "./worq.ts";
 
 const ref = Type.String({ pattern: REF_PATTERN, description: "Exact agent name from worq_spawn or worq_list" });
-/** One schema for the Pi tools, /worq subcommands and the worq CLI. Kind is checked against the live catalog, not an enum. */
+/** One schema for the Pi tools and the worq CLI. Kind is checked against the live catalog, not an enum. */
 export function ops() {
   return {
     spawn: obj({

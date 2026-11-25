@@ -23,7 +23,7 @@ No config. Every launch resolves the same way, from `/worq`, `worq_spawn` or `wo
 - `thinking`: explicit, else the adapter default (Pi: Main's level) when the model supports it; an unsupported inherited level is dropped, an unsupported explicit one refused (`capability`).
 - Then the adapter's local preflight (`validateRuntime`) rejects malformed/unknown models before admission. Account, network and provider-side failures can still surface at open; the agent then fails with the existing cleanup.
 
-PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included). `/worq configure` / the dock change a live session; the harness stays locked.
+PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included). The CLI `worq configure` and the dock change a live session; the harness stays locked.
 
 `/worq` shows a runtime step (harness, model, thinking) with Main's selection preselected. Enter launches, Esc cancels; no countdown. Changing harness resets model and thinking to that harness's defaults. Tool and CLI launches never open it.
 

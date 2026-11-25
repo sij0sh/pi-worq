@@ -50,7 +50,7 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 | `worq_spawn` / socket / `worq spawn` | Main, CLI | model-invocable | request fields, else Main's |
 
 - Same payload everywhere: `kind`, optional `task` (omitted: "Run the `<name>` workflow…"), `title` (omitted: first task words, else `<name> run`), `attach`, `sdk`, `model`, `thinking`.
-- `/worq`: menu `name · access[ · user-only] · description` → optional instructions (Ctrl+V or right-click pastes the clipboard) → runtime. Esc at any step changes nothing. Success activates all four Main tools before the agent starts.
+- `/worq`: package and access → optional instructions (Ctrl+V or right-click pastes the clipboard) → runtime. Esc at any step changes nothing.
 - `verify:false` is refused.
 
 ## Lifecycle

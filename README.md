@@ -8,7 +8,7 @@ Background Pi SDK agents you or Main (your Pi session) can spawn. Agents can del
 pi install /path/to/pi-worq
 ```
 
-Tools stay hidden until you launch an agent with `/worq` or enable them with `/worq on` (zero context cost otherwise). The choice survives resume.
+Main can use the four Worq tools by default. Ask Main directly or launch an agent yourself.
 
 First use installs the shipped `plan` and `execute` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace.
 
@@ -27,19 +27,14 @@ Start Pi, then run `node ./bin/worq.mjs sessions` in another terminal. To instal
 
 ```
 /worq                         launch an agent: package → optional instructions → runtime (Enter launches, Esc cancels)
-/worq on                      enable the tools only (bare /worq does this outside the TUI)
-/worq plan <request>           ask Main for a reviewed plan
-/worq <request>                give Main the request
-/worq off                      block new launches, not cancellation; active refs remain serviceable
-/worq list [ref] · /worq send <ref> <text> · /worq cancel <ref|all>
 ```
 
-`/worq workflow` is an alias for `/worq`. A successful `/worq` launch activates all four Main tools before the agent starts, so Main can drive it; cancelling at any step changes nothing. Under `/worq off`, `/worq` asks before re-enabling the tools.
+The panel sits above the prompt. Shift+Enter adds a line of instructions; Esc cancels.
 
-Main answers bounded factual lookups with primary-source citations unless delegation is requested. Main drives substantive agents through questions, review and authorized repairs. Even “plan and execute” pauses after the reviewed plan for direction: execute only (verified candidate, no merge), or execute and merge (verify before landing). A changed candidate needs fresh verification. `/worq on`, a confirmed `/worq` launch or an explicit task re-enables launches.
+Main answers bounded factual lookups with primary-source citations unless delegation is requested. Main drives substantive agents through questions, review and authorized repairs. Even “plan and execute” pauses after the reviewed plan for direction: execute only (verified candidate, no merge), or execute and merge (verify before landing). A changed candidate needs fresh verification.
 
 - **Small, deterministic edit:** Unless Worq was requested, edit directly in Pi. Start from a clean commit and prepare the expected patch independently of Pi. Keep the patch outside the checkout and don't stage the candidate. From the repository root, run `bash /path/to/pi-worq/docs/examples/check-exact-diff.sh /path/to/expected.patch`. Generate the expected patch from the same baseline using `git diff --binary --no-ext-diff --no-textconv --no-color HEAD --`. The check compares the entire tracked diff and rejects staged changes and non-ignored untracked files; it does not inspect ignored files or prove behavior beyond the expected edit.
-- **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/plan-<ref>.md`. `parked` means the submission and its one review are done, not that the result passed. The notice wakes Main. Use `/worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
+- **Ambiguous or consequential work:** Keep independent review. Plan first when it helps resolve a decision. Worq saves the submission to `.agents/plans/plan-<ref>.md`. `parked` means the submission and its one review are done, not that the result passed. The notice wakes Main. Use the CLI `worq list <ref>` for all findings. For plan objections, first remove or narrow optional scope; fix required gaps or report them as unresolved. Only escalate consequential user-owned decisions.
 - **One review, one feedback pass:** every agent's first submission gets exactly one independent review, then it parks (session and worktree kept). Main accepts and closes it (`worq_cancel`), or sends filtered feedback once (`worq_send`): the agent makes one final revision, submits without another review and ends as `done` (branch/plan kept, worktree removed). Main may instead spawn a fresh agent for a different approach, or ask the user. To execute an existing plan, attach it explicitly. Only Main may merge, with explicit authority and exact-SHA verification.
 
 ## Agent packages

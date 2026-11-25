@@ -82,7 +82,7 @@ test("shipped Plan and Execute are ordinary packages; one review prompt", () => 
   assert.match(loadPrompts().review, /What consequential reason is there not to accept this result as-is\?/);
 });
 
-test("tools are hidden until /worq, restored on resume, and share one schema with the CLI", async (t) => {
+test("one command, four active tools and CLI socket integration", async (t) => {
   const { dir, root, state } = await repo();
   const agentDir = join(dir, "agent");
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -92,22 +92,16 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const tools: { name: string; defaultActive?: boolean; parameters: unknown; execute: Function }[] = [];
   const handlers: Record<string, Function> = {};
   let command: Function | undefined;
-  let inspect: Function | undefined;
   let renderNotice: Function | undefined;
-  let active = ["read", "bash"];
-  const entries: { type: string; customType: string; data: unknown }[] = [];
   const notices: { message: { content: string; customType: string; details: { ref: string; type?: string } }; options: { triggerTurn: boolean; deliverAs?: string } }[] = [];
   const alerts: string[] = [];
   const requests: string[] = [];
   const pi = {
     sendUserMessage: (text: string) => requests.push(text),
     registerTool: (tool: never) => tools.push(tool),
-    registerCommand: (name: string, options: { handler: Function }) => { if (name === 'worq') command = options.handler; else if (name === 'worq-inspect') inspect = options.handler; },
+    registerCommand(name: string, options: {handler: Function}) { assert.equal(name,"worq"); assert.equal(command,undefined); command = options.handler; },
     registerMessageRenderer(_name: string, renderer: Function) { renderNotice = renderer; },
     on: (event: string, handler: Function) => { handlers[event] = handler; },
-    getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
-    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendMessage: (message: typeof notices[number]["message"], options: typeof notices[number]["options"]) => notices.push({ message, options }),
   };
   const resumedReviews: string[] = [];
@@ -134,41 +128,16 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   };
   createWorq({ driver: () => fakeDriver(scripts), agentDir: () => agentDir })(pi as never);
   assert.deepEqual(tools.map((x) => x.name), [...TOOLS]);
-  assert.ok(tools.every((x) => x.defaultActive === false));
-  assert.ok(!active.some((name) => name.startsWith("worq_")));
+  assert.ok(tools.every(t => t.defaultActive));
   let widget: { render(width: number): string[] } | undefined;
   const ctx = { mode: "tui", cwd: root, ui: { notify(text: string) { alerts.push(text); }, setStatus() {},
     setWidget(key: string, factory?: Function) {
-      assert.equal(key, "worq");
+      if (key !== "worq") return;
       widget = factory?.({ requestRender() {} }, { fg: (_: string, value: string) => value });
     },
-  }, sessionManager: { getBranch: () => entries } };
-  await command!("on", ctx);
-  assert.ok(TOOLS.every((name) => active.includes(name)));
-  await command!("off", ctx);
-  assert.ok(!active.some((name) => name.startsWith("worq_")));
-  const inspectorCtx = { ...ctx, ui: { ...ctx.ui, custom: async (create: Function) => {
-    let closed = false;
-    const panel = create({ requestRender() {}, terminal: { rows: 30 } }, { fg: (_: string, s: string) => s }, {}, () => { closed = true; });
-    assert.match(panel.render(100).join(' '), /Worq/);
-    panel.handleInput('\x1b');
-    assert.equal(closed, false);
-    panel.handleInput('\x1b');
-    assert.ok(closed);
-  } } };
-  const entryCount = entries.length;
-  await inspect!('', inspectorCtx);
-  await inspect!('aaaa extra', inspectorCtx);
-  assert.equal(entries.length, entryCount);
-  assert.ok(!active.some((name) => name.startsWith('worq_')));
-  await command!("inspect", ctx);
-  await command!("inspect the failing tests", ctx);
-  await command!("describe the greeting", ctx);
-  assert.deepEqual(requests, ["inspect", "inspect the failing tests", "describe the greeting"]);
-  assert.equal(notices.length, 0);
-  active = ["read"];
+  } };
+  await command!("on",ctx); assert.deepEqual(requests,[]); assert.deepEqual(alerts,["Usage: /worq"]);
   await handlers.session_start({}, ctx);
-  assert.ok(TOOLS.every((name) => active.includes(name)), "resume restores /worq");
 
   const spawn = tools.find((x) => x.name === "worq_spawn")!;
   const result = await spawn.execute("id", { kind: "plan", title: "Surface test", task: "Plan it" }, undefined, undefined, ctx);
@@ -193,12 +162,8 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   const durable = { ...asked.message, content: `[worq ${ref}] Legacy heading\nPrintable legacy-only detail` };
   assert.doesNotMatch(renderNotice!(durable, { expanded: false }, theme).render(120).join(" "), /legacy-only/);
   assert.match(renderNotice!(durable, { expanded: true }, theme).render(120).join(" "), /Printable legacy-only detail/);
-  await command!("off", ctx);
-  assert.ok(active.includes("worq_send") && !active.includes("worq_spawn"));
-  await assert.rejects(spawn.execute("id", { kind: "plan", title: "Surface test", task: "blocked" }, undefined, undefined, ctx), /off/);
-  await command!(`send ${ref} Use HELLO`, ctx);
+  const send = tools.find(t => t.name === "worq_send")!; await send.execute("id",{ref,text:"Use HELLO"},undefined,undefined,ctx);
   const ready = await waitFor("parked");
-  await inspect!(ref, inspectorCtx);
   assert.deepEqual(ready.options, { triggerTurn: true, deliverAs: "followUp" });
   const warnings = notices.filter(({ message }) => message.details.ref === ref && message.details.type === "warning");
   assert.ok(warnings.some(({ message }) => /one further turn remains/.test(message.content)));
@@ -211,9 +176,6 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   assert.equal(handlers.context({ messages: [assistant, ask, parked] }), undefined);
   assert.match((await run(process.execPath, [cli, "list", ref], { env })).stdout, /Plan: \.agents\/plans\//);
   assert.match((await run(process.execPath, [cli, "cancel", ref], { env })).stdout, /surface-test closed/);
-  assert.ok(!active.some(name => name.startsWith("worq_")));
-  await command!("on", ctx);
-  assert.ok(active.includes("worq_spawn"));
   const nextRef = "surface-test-2";
   const launched = await run(process.execPath, [cli, "spawn", "plan", "--title", "Surface test", "--attach", ref, "--attach", `.agents/plans/plan-${ref}.md`, "Simplify the report"], { env });
   assert.match(launched.stdout, /Surface test \(surface-test-2\).*plan-surface-test\.md/);
@@ -223,7 +185,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
     assert.ok(ready(), `expected ${type}`);
   };
   await waitFor2("parked");
-  await command!(`send ${nextRef} Remove the watcher`, ctx);
+  await send.execute("id",{ref:nextRef,text:"Remove the watcher"},undefined,undefined,ctx);
   await waitFor2("done");
   assert.equal(resumedReviews.length, 1, "one review per agent; the feedback revision is not re-reviewed");
   assert.doesNotMatch(resumedReviews[0], /no background process/);
@@ -245,7 +207,7 @@ test("tools are hidden until /worq, restored on resume, and share one schema wit
   delete process.env.WORQ_STATE_DIR;
 });
 
-test("/worq launches any package: select → optional instructions → explicit runtime; tools activate only on admission", async (t) => {
+test("/worq launches a user-only package", async (t) => {
   const { dir, root, state } = await repo();
   const agentDir = await mkdtemp(join(tmpdir(), "worq-agent-"));
   t.after(() => rm(agentDir, { recursive: true, force: true }));
@@ -260,27 +222,15 @@ test("/worq launches any package: select → optional instructions → explicit 
 
   const tools: { name: string; description: string; parameters: { properties?: Record<string, { enum?: unknown; pattern?: string }> }; execute: Function }[] = [];
   let command: Function | undefined;
-  let active = ["read"];
-  const entries: { type: string; customType: string; data: unknown }[] = [];
   const notices: { content: string; type?: string; ref: string }[] = [];
   const alerts: { text: string; level: string }[] = [];
   const tasks: string[] = [];
-  const selects: string[][] = [];
-  const inputs: string[] = [];
-  const overlays: string[] = [];
-  let choose: string | undefined = "docs";
-  let answer: string | undefined = "";
-  /** Keys pressed in successive overlays (runtime step, then the off confirmation). */
-  let keys: string[] = [];
   const pi = {
     sendUserMessage: () => {},
     registerTool: (tool: never) => tools.push(tool),
     registerCommand: (name: string, options: { handler: Function }) => { if (name === "worq") command = options.handler; },
     registerMessageRenderer() {},
     on() {},
-    getActiveTools: () => active,
-    setActiveTools: (names: string[]) => { active = names; },
-    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendMessage: (message: { content: string; details: { ref: string; type?: string } }) => notices.push({ content: message.content, type: message.details.type, ref: message.details.ref }),
   };
   const record = async (turn: { text: string; tool(name: string, params: object): Promise<string> }) => { tasks.push(JSON.parse(turn.text).task); await turn.tool("submit", planSubmission); };
@@ -289,28 +239,15 @@ test("/worq launches any package: select → optional instructions → explicit 
     mode: "tui", cwd: root,
     ui: {
       notify: (text: string, level: string) => alerts.push({ text, level }),
-      setStatus() {},
-      setWidget() {},
-      select: async (_title: string, options: string[]) => { selects.push(options); return choose === undefined ? undefined : options.find((o) => o.startsWith(`${choose} ·`)); },
-      custom: (factory: Function) => new Promise((resolve) => {
-        const component = factory({ requestRender() {}, terminal: { rows: 30 } }, { fg: (_: string, s: string) => s }, {}, resolve);
-        const view = component.render(100).join("\n");
-        overlays.push(view);
-        // The instructions prompt: type the answer then Enter, or Esc when there is none.
-        if (/instructions \(optional\)/.test(view)) {
-          inputs.push(view);
-          if (answer === undefined) component.handleInput("\x1b");
-          else { component.handleInput(answer); component.handleInput("\r"); }
-          return;
-        }
-        component.handleInput(keys.shift() ?? "\r");
-      }),
+      setWidget(key: string, factory?: Function) {
+        if (!factory || key !== 'worq-launch') return;
+        const panel = factory({terminal:{rows:24},requestRender(){},getFocusedComponent(){return null;},setFocus(){}},{});
+        for (const key of ['\x1b[B','\x1b[B','\r','\r','\r']) panel.handleInput(key);
+      },
     },
-    sessionManager: { getBranch: () => entries },
   };
   const last = (pattern: RegExp) => alerts.map((alert) => alert.text).filter((text) => pattern.test(text)).at(-1);
   const launchedRef = () => /as ([a-z0-9-]+)\./.exec(last(/^Launched /) ?? "")?.[1];
-  const launches = () => alerts.filter((alert) => /^Launched /.test(alert.text)).length;
   const settle = async (ref: string) => {
     for (let i = 0; i < 100 && !notices.some((notice) => notice.ref === ref && notice.type === "parked"); i++) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.ok(notices.some((notice) => notice.ref === ref && notice.type === "parked"), `expected parked for ${ref}`);
@@ -319,17 +256,10 @@ test("/worq launches any package: select → optional instructions → explicit 
   // Plan and Execute come first, followed by custom packages alphabetically; invalid siblings are reported.
   await command!("", ctx);
   assert.match(last(/broken: description is required/) ?? "", /broken/);
-  assert.deepEqual(selects.at(-1)!.map((label) => label.split(" · ").slice(0, 2).join(" · ")), ["plan · read", "execute · write", "docs · read", "shared · read"]);
-  assert.match(selects.at(-1)![2], /docs · read · user-only · Write the docs/);
-  assert.match(overlays.at(-1)!, /Configure SDK agent · docs[\s\S]*Harness: ‹ pi ›[\s\S]*Enter launch · Esc cancel/);
-  assert.doesNotMatch(overlays.at(-1)!, /\d+s ·/, "no countdown");
   assert.equal(launchedRef(), "docs-run");
   await settle("docs-run");
-  assert.ok(TOOLS.every((name) => active.includes(name)), "all four Main tools are active after a user launch");
-  assert.deepEqual(entries.at(-1)?.data, { on: true });
   // Empty instructions run the package as written.
   assert.equal(tasks.at(-1), "Run the docs workflow on this repository and submit its result.");
-  assert.match(inputs.at(-1)!, /Launch docs: instructions \(optional\)[\s\S]*Leave empty to run the package as written[\s\S]*Ctrl\+V \/ right-click paste/);
 
   // The model sees model-invocable packages with their policies; kind is checked against the catalog, not an enum.
   const spawn = tools.find((tool) => tool.name === "worq_spawn")!;
@@ -338,57 +268,6 @@ test("/worq launches any package: select → optional instructions → explicit 
   assert.match(spawn.description, /plan \(read\)/);
   assert.doesNotMatch(spawn.description, /Write the docs/, "user-only packages are not offered to the model");
   await assert.rejects(spawn.execute("id", { kind: "docs", title: "Docs", task: "x" }, undefined, undefined, ctx), /user-only/);
-  await command!("cancel docs-run", ctx);
-
-  // Instructions become the task; the title comes from them.
-  answer = "Focus on the CLI reference";
-  await command!("workflow", ctx);
-  assert.equal(launchedRef(), "focus-on-the-cli");
-  await settle("focus-on-the-cli");
-  assert.equal(tasks.at(-1), "Focus on the CLI reference");
-  await command!("cancel focus-on-the-cli", ctx);
-
-  // Cancelling at any step changes neither tools nor agents, even while off.
-  await command!("off", ctx);
-  const before = { launches: launches(), entries: entries.length, active: [...active] };
-  const unchanged = () => {
-    assert.equal(launches(), before.launches);
-    assert.equal(entries.length, before.entries);
-    assert.deepEqual(active, before.active);
-  };
-  choose = undefined;
-  await command!("", ctx); unchanged();
-  choose = "docs"; answer = undefined;
-  await command!("", ctx); unchanged();
-  answer = ""; keys = ["\x1b"];
-  await command!("", ctx); unchanged();
-  keys = ["\r", "n"];
-  await command!("", ctx); unchanged();
-  assert.match(overlays.at(-1)!, /Worq is off[\s\S]*re-enables worq_spawn/);
-
-  // `workflow` takes no arguments.
-  await command!("workflow extra", ctx);
-  assert.equal(last(/^Usage: \/worq$/), "Usage: /worq");
-  unchanged();
-
-  // Off: a confirmed user launch re-enables all four tools; Main's spawn stays blocked until then.
-  await assert.rejects(spawn.execute("id", { kind: "shared", title: "Shared docs", task: "blocked" }, undefined, undefined, ctx), /off/);
-  keys = ["\r", "y"];
-  await command!("", ctx);
-  assert.equal(launchedRef(), "docs-run-2");
-  await settle("docs-run-2");
-  assert.ok(TOOLS.every((name) => active.includes(name)));
-  await command!("cancel docs-run-2", ctx);
-
-  // Non-TUI sessions have no selector: bare /worq only enables the tools.
-  await command!("off", ctx);
-  const write = process.stderr.write;
-  let stderr = "";
-  process.stderr.write = ((chunk: string) => { stderr += chunk; return true; }) as never;
-  try { await command!("", { ...ctx, mode: "rpc" }); }
-  finally { process.stderr.write = write; }
-  assert.match(stderr, /Worq tools enabled/);
-  assert.ok(TOOLS.every((name) => active.includes(name)));
 });
 
 test("dispatch validates arguments against the shared schema", async (t) => {

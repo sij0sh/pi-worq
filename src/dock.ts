@@ -39,7 +39,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     const control = (s: string) => theme.bold?.(s) ?? s;
     const more = folded() || rows.length <= visible.length ? '' : ` · +${rows.length-visible.length}`;
     const live = `${rows.filter(working).length} live${more}`;
-    const header = w < 35 ? band(`${folded()?'[+]':'[−]'} ${live} · WORQ`) : band(`${control(`${folded()?'[+]':'[−]'} [Inspect]`)}  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
+    const header = w < 35 ? band(`${folded()?'[+]':'[−]'}[Inspect] ${rows.filter(working).length} live`) : band(`${control(`${folded()?'[+]':'[−]'} [Inspect]`)}  ◈ WORQ   ${live} · ${owners.filter(r=>r.actor).length} need Main`);
     if (folded()) return [header];
     // Keep Activity readable, but give extra space to titles and PQ questions.
     const activityWidth = w >= 74 ? Math.min(20, w-58) : Math.min(16, w-35);
@@ -72,7 +72,7 @@ export function agentDock(data: Telemetry, theme: Theme, folded: () => boolean, 
     if(e.type!=='click'||e.button!=='left') return;
     const row = e.y>=2 ? visible[e.y-2] : undefined;
     const within = (at?: [number, number]) => !!at && e.x>=at[0] && e.x<at[1];
-    if(e.y===0 && e.x<3) toggle(); else if(e.y===0 && e.width>=35 && e.x<13) inspect();
+    if(e.y===0 && e.x<3) toggle(); else if(e.y===0 && (e.width < 35 ? e.x>=3 && e.x<12 : e.x>=4 && e.x<13)) inspect();
     else if(row && act && working(row) && row.state!=='cancelling' && within(cancelAt)) act(row.key,'cancel');
     else if(row && act && working(row) && row.state!=='cancelling' && within(modelAt)) act(row.key,'runtime');
     else if(row) inspect(row.ref,row.key); else return;

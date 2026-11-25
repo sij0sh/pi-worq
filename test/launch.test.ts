@@ -2,47 +2,53 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Component } from '@earendil-works/pi-tui';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { launchPicker, type LaunchRequest } from '../src/launch-picker.ts';
+import { launchPanel, type LaunchRequest } from '../src/launch-picker.ts';
 import { MAIN } from '../src/runtime/config.ts';
 import { resolveRuntime } from '../src/runtime/launch.ts';
 import { rm, writeFile } from 'node:fs/promises';
 import { loadPrompts } from '../src/prompts.ts';
 import { Worq } from '../src/worq.ts';
-import type { Runtime, Spec } from '../src/sdk/contract.ts';
+import type { Spec } from '../src/sdk/contract.ts';
 import { config, fakeDriver, KINDS, planSubmission, pass, repo } from './fake.ts';
 
 function surface(request: LaunchRequest) {
   let component!: Component;
-  const tui = { terminal: { rows: 24 }, requestRender() {} }, theme = { fg: (_: string, s: string) => s };
-  const ui = { custom: (factory: (t: typeof tui, th: typeof theme, keys: unknown, done: (value: Runtime | undefined) => void) => Component) =>
-    new Promise<Runtime | undefined>(resolve => { component = factory(tui, theme, {}, resolve); }) };
-  const picked = launchPicker(ui as unknown as ExtensionContext['ui'], request);
+  const prior = { render: () => [], invalidate() {} }; let focus: Component | null = prior;
+  const tui = { terminal: { rows: 24 }, requestRender() {}, getFocusedComponent: () => focus, setFocus: (c: Component | null) => { focus = c; } };
+  const color = (_: string, s: string) => s;
+  const ui = { setWidget(_key: string, factory?: Function) {
+    if (factory) component = factory(tui, {fg:color,bg:color}); else (component as Component & {dispose():void}).dispose();
+  } };
+  const picked = launchPanel(ui as unknown as ExtensionContext['ui'], request).then(result => { assert.equal(focus,prior); return result; });
   return { picked, input: (key: string) => component.handleInput!(key), render: () => component.render(80).join('\n') };
 }
-const request = (): LaunchRequest => ({ label: 'plan', initial: { ...MAIN, model: 'p/a', thinking: 'high' },
+const request = (): LaunchRequest => ({ kinds: [...KINDS.values()], initial: { ...MAIN, model: 'p/a', thinking: 'high' },
   choices: [{ sdk: 'pi', model: 'p/a', levels: ['low', 'high'], thinking: 'high' }, { sdk: 'pi', model: 'p/b', levels: ['off'] }, { sdk: 'other', model: 'c', levels: ['off', 'low'], thinking: 'low' }] });
 
 test('picker: explicit Enter, no countdown; model change keeps only supported thinking', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'] });
   const s = surface(request());
-  assert.match(s.render(), /Thinking: ‹ high ›/);
+  assert.match(s.render(),/1\/3/); s.input('\x1b[B'); s.input('\r');
+  s.input('A'); s.input('\x1b[13;2u'); s.input('B'); s.input('\n'); s.input('\x1b[200~C\nD\x1b[201~'); s.input('\r');
+  assert.match(s.render(), /Thinking +‹ High ›/);
   t.mock.timers.tick(60_000);
   let settled = false;
   void s.picked.then(() => { settled = true; });
   await Promise.resolve();
   assert.equal(settled, false, 'waits for the user');
   s.input('\x1b[B'); s.input('\x1b[C'); // model p/b
-  assert.match(s.render(), /Thinking: ‹ SDK default ›/);
+  assert.match(s.render(), /Thinking +‹ SDK default ›/);
   s.input('\r');
-  assert.deepEqual(await s.picked, { ...request().initial, model: 'p/b', thinking: undefined });
+  const result = await s.picked; assert.equal(result?.instructions,'A\nB\nC\nD'); assert.equal(result?.kind.name,request().kinds[1].name);
+  assert.deepEqual(result?.runtime, { ...request().initial, model: 'p/b', thinking: undefined });
 });
 
 test('picker: harness change resets model and thinking to that harness defaults; Esc cancels', async () => {
   const s = surface(request());
-  s.input('\x1b[C');
-  assert.match(s.render(), /Harness: ‹ other ›/); assert.match(s.render(), /Model: ‹ c ›/); assert.match(s.render(), /Thinking: ‹ low ›/);
+  s.input('\r'); s.input('\r'); s.input('\x1b[C');
+  assert.match(s.render(), /Harness +‹ other ›/); assert.match(s.render(), /Model +‹ c ›/); assert.match(s.render(), /Thinking +‹ Low ›/);
   s.input('\r');
-  assert.deepEqual(await s.picked, { ...request().initial, sdk: 'other', model: 'c', thinking: 'low' });
+  assert.deepEqual((await s.picked)?.runtime, { ...request().initial, sdk: 'other', model: 'c', thinking: 'low' });
   const cancelled = surface(request());
   cancelled.input('\x1b');
   assert.equal(await cancelled.picked, undefined);

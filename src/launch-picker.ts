@@ -1,6 +1,7 @@
+import type { Kind } from './prompts.ts';
 import { execFile } from 'node:child_process';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { getNativeClipboard, Input, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
+import { getSelectListTheme, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { getNativeClipboard, Editor, type Component, type TuiMouseEvent, matchesKey, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
 import type { ModelChoice } from './runtime/launch.ts';
@@ -21,44 +22,85 @@ function cycle<T>(values: readonly T[], value: T | undefined, delta: number) {
   return values[(start + values.length + delta) % values.length];
 }
 
-export interface LaunchRequest { label: string; initial: Runtime; choices: ModelChoice[] }
-/**
- * The /worq runtime step: harness, model and thinking, confirmed explicitly with Enter (no countdown).
- * Resolves the selection, or undefined when dismissed. Changing harness resets model and thinking to its defaults.
- */
-export function launchPicker(ui: ExtensionContext['ui'], request: LaunchRequest): Promise<Runtime | undefined> {
-  const { choices } = request;
-  let selected: Runtime = { ...request.initial };
-  let field = 0;
-  return ui.custom<Runtime | undefined>((tui, theme, _keys, done) => ({
-    invalidate() {},
-    render(width) {
-      const r = selected;
-      const lines = [theme.fg('accent', `Configure SDK agent · ${clean(request.label).replace(/\s+/g, ' ')}`),
-        ...[`Harness: ‹ ${r.sdk} ›`, `Model: ‹ ${r.model ?? 'SDK default'} ›`, `Thinking: ‹ ${r.thinking ?? 'SDK default'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s).replace(/\s+/g, ' ')}`),
-        '↑↓ field · ←→ change', 'Enter launch · Esc cancel'];
-      return boxed(theme, width, lines);
-    },
-    handleInput(data) {
-      if (matchesKey(data, 'enter')) return done(selected);
-      if (matchesKey(data, 'escape')) return done(undefined);
-      if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab')) field = (field + (matchesKey(data, 'up') ? 2 : 1)) % 3;
-      else if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
-        const delta = matchesKey(data, 'left') ? -1 : 1;
-        const r = selected;
-        const current = choices.find(c => c.sdk === r.sdk && c.model === r.model);
-        if (field === 0) {
-          const sdk = cycle([...new Set(choices.map(c => c.sdk))], r.sdk, delta);
-          const first = choices.find(c => c.sdk === sdk);
-          if (sdk !== r.sdk && first) selected = { ...r, sdk, model: first.model, thinking: first.thinking };
-        } else if (field === 1) {
-          const next = cycle(choices.filter(c => c.sdk === r.sdk), current, delta);
-          if (next) selected = { ...r, model: next.model, thinking: supportedThinking(r.thinking, next.levels) };
-        } else if (current?.levels.length) selected = { ...r, thinking: cycle(current.levels, r.thinking, delta) };
-      } else return;
-      tui.requestRender();
-    },
-  }), { overlay: true, overlayOptions: { width: '85%', anchor: 'center' } });
+export interface LaunchRequest { kinds: Kind[]; initial: Runtime; choices: ModelChoice[] }
+type LaunchResult = { kind: Kind; instructions: string; runtime: Runtime };
+const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial, choices }: LaunchRequest): Promise<LaunchResult | undefined> {
+  return new Promise(resolve => ui.setWidget('worq-launch', (tui, theme) => {
+    // Pi 1.6 main and fullscreen TUIs both extend TuiBase.
+    const screen = tui as typeof tui & { getFocusedComponent(): Component | null };
+    const previous = screen.getFocusedComponent();
+    const editor = new Editor(tui, { borderColor: s => theme.fg('border', s), selectList: getSelectListTheme() });
+    let step = 0, agent = 0, field = 0, selected = { ...initial }, closed = false;
+    const finish = (result?: LaunchResult) => { resolve(result); ui.setWidget('worq-launch', undefined); };
+    const paste = async () => {
+      const text = await readClipboardText();
+      if (!closed && step === 1 && text) { editor.insertTextAtCursor(text.replace(/\r\n?/g, '\n')); tui.requestRender(); }
+    };
+    const panel: Component & { focused: boolean; dispose(): void } = {
+      get focused() { return editor.focused; }, set focused(value) { editor.focused = value; },
+      dispose() { closed = true; if (screen.getFocusedComponent() === panel) tui.setFocus(previous); resolve(undefined); },
+      invalidate() { editor.invalidate(); },
+      render(width) {
+        const w = Math.max(1, width - 4);
+        const align = (a: string, b: string) => truncateToWidth(a, Math.max(0,w-visibleWidth(b)-1)) + ' '.repeat(Math.max(1,w-visibleWidth(a)-visibleWidth(b))) + b;
+        const rule = theme.fg('border', '─'.repeat(w));
+        const header = align(`◆ WORQ / ${['Launch SDK Agent','Optional instructions','Configure runtime'][step]}`, `${step+1}/3`);
+        const row = (text: string, active: boolean) => active ? theme.bg('selectedBg', theme.fg('accent', text + ' '.repeat(Math.max(0,w-visibleWidth(text))))) : text;
+        const height = Math.max(1,tui.terminal.rows - 14), start = Math.max(0,agent-height+1);
+        let body: string[];
+        if (step === 0) {
+          body = kinds.slice(start, start + height).map((kind, i) => {
+            const active = agent === start + i;
+            const access = kind.access === 'write' ? 'Write' : 'Read-only';
+            return row(`${active ? '›' : ' '} ${titleCase(kind.name).padEnd(12)} ${access}${kind.userOnly ? ' · user-only' : ''}`, active);
+          });
+        } else if (step === 1) {
+          const lines = editor.render(w).slice(1, -1); // The panel already draws separators.
+          while (lines.length < 3) lines.push(' '.repeat(w));
+          body = lines.map(line => theme.bg('customMessageBg', line));
+        } else {
+          const model = selected.sdk === initial.sdk && selected.model === initial.model && initial.model ? "Main's model" : selected.model ?? 'SDK default';
+          const values = [selected.sdk === 'pi' ? 'Pi' : selected.sdk, model, titleCase(selected.thinking ?? 'SDK default')];
+          body = values.map((value, i) => row(align(`${i === field ? '›' : ' '} ${['Harness', 'Model', 'Thinking'][i]}`, `‹ ${clean(value)} ›`), i === field));
+        }
+        const hint = ['↑↓ Select · Enter Continue','Shift+Enter New line · Enter Continue','↑↓ Select · ←→ Change · Enter Launch'][step];
+        return [truncateToWidth(`STEP ${step+1} — ${['AGENT','PROMPT','RUNTIME'][step]}`,width), ...boxed(theme,width,[theme.fg('accent',header),rule,...body,rule,theme.fg('muted',`${hint} · Esc Cancel`)])];
+      },
+      handleMouse(e: TuiMouseEvent) {
+        if (step === 1 && e.button === 'right') { if (e.type === 'press') void paste(); return { handled: true }; }
+      },
+      handleInput(data) {
+        if (matchesKey(data,'escape')) return finish();
+        if (matchesKey(data,'enter') && !(step === 1 && data === '\n')) {
+          if (step === 2) return finish({ kind: kinds[agent], instructions: editor.getExpandedText(), runtime: selected });
+          step++;
+        } else if (step === 1) {
+          if (matchesKey(data,'ctrl+v')) void paste();
+          else if (matchesKey(data,'ctrl+j') || matchesKey(data,'shift+enter')) editor.insertTextAtCursor('\n');
+          else editor.handleInput(data);
+        } else if (matchesKey(data,'up') || matchesKey(data,'down') || matchesKey(data,'tab')) {
+          const d = matchesKey(data,'up') ? -1 : 1;
+          if (step === 0) agent = (agent + d + kinds.length) % kinds.length; else field = (field+d+3)%3;
+        } else if (step === 2 && (matchesKey(data,'left') || matchesKey(data,'right'))) {
+          const delta = matchesKey(data, 'left') ? -1 : 1;
+          const r = selected;
+          const current = choices.find(c => c.sdk === r.sdk && c.model === r.model);
+          if (field === 0) {
+            const sdk = cycle([...new Set(choices.map(c => c.sdk))], r.sdk, delta);
+            const first = choices.find(c => c.sdk === sdk);
+            if (sdk !== r.sdk && first) selected = { ...r, sdk, model: first.model, thinking: first.thinking };
+          } else if (field === 1) {
+            const next = cycle(choices.filter(c => c.sdk === r.sdk), current, delta);
+            if (next) selected = { ...r, model: next.model, thinking: supportedThinking(r.thinking, next.levels) };
+          } else if (current?.levels.length) selected = { ...r, thinking: cycle(current.levels, r.thinking, delta) };
+        }
+        tui.requestRender();
+      },
+    };
+    tui.setFocus(panel);
+    return panel;
+  }, { placement: 'aboveEditor' }));
 }
 
 export interface RuntimeRequest { label: string; current: Runtime; choices: ModelChoice[]; pending?: RuntimeChange }
@@ -138,46 +180,4 @@ async function readClipboardText(): Promise<string | undefined> {
     if (text !== undefined) return text || undefined;
   }
   try { return (await getNativeClipboard()?.getText()) || undefined; } catch { return undefined; }
-}
-
-/**
- * Single-line text prompt as an overlay. Unlike ui.input it pastes the system clipboard on Ctrl+V and right-click
- * (terminal paste, e.g. Ctrl+Shift+V, still works). Newlines in pasted text become spaces.
- * Resolves the text (possibly empty) on Enter, undefined on Esc.
- */
-export function textPrompt(ui: ExtensionContext['ui'], title: string, hint: string): Promise<string | undefined> {
-  return ui.custom<string | undefined>((tui, theme, _keys, done) => {
-    const input = new Input();
-    let closed = false;
-    const finish = (value: string | undefined) => { closed = true; done(value); };
-    const paste = async () => {
-      const text = await readClipboardText();
-      if (closed || !text) return;
-      input.handleInput(`\x1b[200~${text.replace(/\r\n|\r|\n/g, ' ')}\x1b[201~`);
-      tui.requestRender();
-    };
-    return {
-      get focused() { return input.focused; },
-      set focused(value: boolean) { input.focused = value; },
-      invalidate() { input.invalidate(); },
-      render: (width) => boxed(theme, width, [theme.fg('accent', clean(title)), ...input.render(Math.max(1, width - 4)),
-        theme.fg('muted', clean(hint)), theme.fg('muted', 'Enter submit · Esc cancel · Ctrl+V / right-click paste')]),
-      handleInput(data) {
-        if (matchesKey(data, 'enter')) return finish(input.getValue());
-        if (matchesKey(data, 'escape')) return finish(undefined);
-        if (matchesKey(data, 'ctrl+v')) { void paste(); return; }
-        input.handleInput(data);
-        tui.requestRender();
-      },
-      handleMouse(event) {
-        if (event.button === 'right') {
-          if (event.type === 'press') void paste();
-          return { handled: true, render: false };
-        }
-        // Box layout: border, title, input row (y=2); content starts after '│ '.
-        if (event.y === 2) return input.handleMouse({ ...event, x: event.x - 2, y: 0 });
-        return undefined;
-      },
-    };
-  }, { overlay: true, overlayOptions: { width: '85%', anchor: 'center' } });
 }
