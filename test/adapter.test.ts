@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { createAssistantMessageEventStream, getSystemMessageText, type ToolCall } from "@earendil-works/pi-ai";
+import { isModelType } from "@earendil-works/pi-ai/models";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { createWorq } from "../index.ts";
 import { serve } from "../src/control.ts";
@@ -150,6 +154,168 @@ test("a new folder package and a new adapter launch through worq_spawn and the C
   assert.equal(calls.open.length, opened);
   assert.doesNotMatch((await run(process.execPath, [cli, "list"], { env })).stdout, /pending/);
   await run(process.execPath, [cli, "cancel", "all"], { env });
+});
+
+test("scripted Main sends spawn guidance tuples through real Pi tools to native worker selection", { timeout: 20_000 }, async t => {
+  const { dir, root, state } = await repo();
+  const agentDir = join(dir, "agent");
+  const key = "__worqSpawnGuidanceEcho";
+  const globals = globalThis as unknown as Record<string, Calls | undefined>;
+  const shutdown: (() => Promise<void>)[] = [];
+  t.after(async () => {
+    for (const close of shutdown) await close();
+    delete globals[key];
+    delete process.env.WORQ_STATE_DIR;
+    await rm(dir, { recursive: true, force: true });
+  });
+  process.env.WORQ_STATE_DIR = state;
+  await install(agentDir, "echo", adapterSource(key));
+  await mkdir(join(agentDir, "workflows", "notes"), { recursive: true });
+  const workerMarker = "Fixture worker instruction.";
+  await writeFile(join(agentDir, "workflows", "notes", "SKILL.md"), `---\ndescription: Examine notes\naccess: read\nexplore: none\n---\n${workerMarker}\n`);
+  const guide = join(agentDir, "worq", "SPAWN-GUIDANCE.md");
+  const hints = join(agentDir, "worq", "RUNTIMES.md");
+  const chosen = { sdk: "echo", model: "e/analysis", thinking: "high" };
+  await writeFile(guide, `Unlisted prompt prose\n\n| sdk | model | thinking | use when |\n| --- | --- | --- | --- |\n| echo | ${chosen.model} | high | Difficult diagnosis |\n| echo | Bogus | low | Unavailable fixture choice |\n`);
+  await writeFile(hints, "| role | sdk | model | thinking |\n| --- | --- | --- | --- |\n| notes | echo | e/hinted | low |\n");
+
+  const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+  const sessionManager = SessionManager.inMemory(root);
+  let force = false;
+  let setTools!: (tools: string[]) => void;
+  const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
+    systemPromptOverride: () => "Fixture Main custom preamble.", extensionFactories: [pi => {
+      setTools = tools => pi.setActiveTools(tools);
+      pi.on("before_agent_start", event => {
+        if (force) event.systemPromptOptions.forceSystemPrompt = "Exact forced Main prompt.";
+      });
+      pi.registerTool({ name: "cloak", label: "Cloak", description: "Hide the spawn declaration", defaultActive: false,
+        parameters: Type.Object({}), prepareLoadout: () => ({ hiddenDeclarations: ["worq_spawn"] }),
+        async execute() { throw new Error("fixture only hides tools"); } });
+    }, createWorq({ agentDir: () => agentDir })],
+  });
+  await resourceLoader.reload();
+  // The snapshot is already loaded; editing the source must not affect subsequent prompts.
+  await writeFile(guide, "Deleted table after extension load.\n");
+  const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false, authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
+  const main = modelRuntime.getAllModels().filter(m => isModelType(m, "chat"))
+    .find(m => m.provider === "openai" && m.thinkingLevelMap?.medium !== undefined);
+  assert.ok(main, "a local bundled Main model is available");
+  await modelRuntime.setRuntimeApiKey(main.provider, "test-transport-only");
+  const prompts: { text: string; tools: string[]; model: string; thinking?: string }[] = [];
+  const piWorker: { model: string; thinking?: string }[] = [];
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  let outbound: ToolCall | undefined;
+  let nextId = 0;
+  modelRuntime.streamSimple = (model, { messages }, options) => {
+    const system = messages.filter(m => m.role === "system");
+    const text = system.map(getSystemMessageText).join("\n");
+    const tools = new Set<string>();
+    for (const message of system) {
+      for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+      for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+    }
+    const selection = { model: `${model.provider}/${model.id}`, thinking: options?.reasoning };
+    let call: ToolCall | undefined;
+    if (text.includes(workerMarker)) {
+      if (messages.at(-1)?.role !== "toolResult") {
+        piWorker.push(selection);
+        call = { type: "toolCall", id: `worker_${++nextId}`, name: "submit", arguments: { summary: "Pi fixture submitted" } };
+      }
+    } else {
+      prompts.push({ text, tools: [...tools], ...selection });
+      call = outbound;
+      outbound = undefined;
+    }
+    const reason = call ? "toolUse" : "stop";
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "done", reason, message: { role: "assistant", api: model.api, provider: model.provider, model: model.id,
+      usage, timestamp: Date.now(), stopReason: reason, content: call ? [call] : [{ type: "text", text: "Scripted response" }] } });
+    return stream;
+  };
+  const { session } = await createAgentSession({ cwd: root, agentDir, settingsManager, sessionManager, modelRuntime,
+    model: main, thinkingLevel: "medium", resourceLoader });
+  shutdown.push(async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); });
+  await session.bindExtensions({ mode: "print" });
+
+  setTools([]);
+  await session.prompt("No active spawn tool");
+  assert.ok(!prompts.at(-1)?.tools.includes("worq_spawn"));
+  assert.doesNotMatch(prompts.at(-1)?.text ?? "", /Difficult diagnosis/);
+  setTools(["worq_spawn", "cloak"]);
+  assert.ok(session.getActiveToolNames().includes("worq_spawn"), "the spawn tool is selected but its declaration is hidden");
+  await session.prompt("Hidden spawn tool");
+  assert.ok(!prompts.at(-1)?.tools.includes("worq_spawn"));
+  assert.doesNotMatch(prompts.at(-1)?.text ?? "", /Difficult diagnosis/);
+  setTools(["worq_spawn"]);
+  await session.prompt("Do not delegate this request");
+  const visible = prompts.at(-1);
+  assert.ok(visible);
+  assert.ok(visible.tools.includes("worq_spawn"));
+  assert.match(visible.text, /Fixture Main custom preamble/);
+  assert.match(visible.text, /honor explicit user preferences first/);
+  assert.match(visible.text, /"sdk":"echo","model":"e\/analysis","thinking":"high","use when":"Difficult diagnosis"/);
+  assert.match(visible.text, /Unavailable fixture choice/, "well-formed entries are not preflighted");
+  assert.doesNotMatch(visible.text, /Unlisted prompt prose|Deleted table/);
+  force = true;
+  await session.prompt("Exact unmodified prompt");
+  assert.equal(prompts.at(-1)?.text, "Exact forced Main prompt.");
+  force = false;
+  assert.equal(globals[key], undefined, "Main prompts never import/create the adapter or call validation, catalog or open");
+  assert.deepEqual(piWorker, [], "Main prompts don't open a Pi worker either");
+
+  const control = (...args: string[]) => run(process.execPath, [cli, ...args]);
+  const launch = async (title: string, fields: object) => {
+    const id = `main_${++nextId}`;
+    const args = { kind: "notes", title, task: "Examine the fixture notes", ...fields };
+    outbound = { type: "toolCall", id, name: "worq_spawn", arguments: structuredClone(args) };
+    await session.prompt(`Script a spawn: ${title}`);
+    const messages = sessionManager.getBranch().flatMap(entry => entry.type === "message" ? [entry.message] : []);
+    const calls = messages.flatMap(m => m.role === "assistant" ? m.content : []);
+    assert.deepEqual(calls.find(call => call.type === "toolCall" && call.id === id), { type: "toolCall", id, name: "worq_spawn", arguments: args });
+    const result = messages.find(m => m.role === "toolResult" && m.toolCallId === id);
+    assert.ok(result?.role === "toolResult");
+    return result;
+  };
+  const assertLaunch = async (title: string, fields: object, expected: { sdk: string; model: string; thinking: string }) => {
+    const result = await launch(title, fields);
+    assert.equal(result.isError, false, JSON.stringify(result.content));
+    const { ref } = result.details as { ref: string };
+    const end = Date.now() + 5000;
+    let status: string;
+    do {
+      ({ stdout: status } = await control("list", ref));
+      if (/^.* · done$/m.test(status)) break;
+      assert.doesNotMatch(status, /^.* · failed$/m);
+      await sleep(10);
+    } while (Date.now() < end);
+    assert.match(status, /^.* · done$/m);
+    const record = /^agent\.notes: (\{.*\})/m.exec(status);
+    assert.ok(record, status);
+    const { sdk, model, thinking } = JSON.parse(record[1]);
+    assert.deepEqual({ sdk, model, thinking }, expected);
+  };
+  const mainSelection = { model: `${main.provider}/${main.id}`, thinking: "medium" };
+  await assertLaunch("Listed choice", chosen, chosen);
+  const explicit = { sdk: "echo", model: "e/outside", thinking: "low" };
+  await assertLaunch("User choice", explicit, explicit);
+  await assertLaunch("Hinted default", {}, { sdk: "echo", model: "e/hinted", thinking: "low" });
+  await rm(hints);
+  await assertLaunch("Main default", {}, { sdk: "pi", ...mainSelection });
+  const unavailable = await launch("Unavailable choice", { sdk: "echo", model: "Bogus", thinking: "low" });
+  assert.equal(unavailable.isError, true);
+  assert.match(JSON.stringify(unavailable.content), /echo: unknown model Bogus/);
+  assert.deepEqual(piWorker, [mainSelection], "real Pi worker request inherits the live Main runtime");
+  const calls = globals[key] as Calls | undefined;
+  assert.ok(calls);
+  assert.deepEqual(calls.open.map(({ id, model, thinking }) => ({ sdk: id, model, thinking })), [
+    chosen, explicit, { sdk: "echo", model: "e/hinted", thinking: "low" },
+  ]);
+  assert.ok(calls.validate.includes("Bogus"));
+  assert.equal(calls.models, 0);
+  assert.ok(prompts.every(({ model, thinking }) => model === mainSelection.model && thinking === mainSelection.thinking));
+  assert.equal(session.model?.id, main.id);
+  assert.equal(session.thinkingLevel, "medium");
 });
 
 test("CLI compatibility: legacy syntax sends the legacy wire shape; new-only requests to an old host get an upgrade hint, never a retry", async (t) => {

@@ -1,8 +1,6 @@
 # Configuration
 
-One optional JSON file: `<agentDir>/pi-worq.json` (`~/.pi/agent/pi-worq.json`), plus one optional shared resource directory: `<agentDir>/worq/`. By default, every new Worq session uses Main's current Pi model and thinking level.
-
-Both are read once per Pi session, when the first Worq tool call creates the Worq instance. Edit, then start a new Pi session; running agents keep what they launched with.
+The optional `<agentDir>/pi-worq.json` (normally `~/.pi/agent/pi-worq.json`) and shared worker resources are read when Worq starts on first use. Running agents keep what they launched with. The runtime Markdown files below have their own reload rules.
 
 Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-payload` naming the JSON pointer (e.g. `/limits/agents`). Runtime problems (unknown SDK, unknown model, unsupported thinking, context isolation) fail at launch, before any slot, ref or worktree.
 
@@ -16,7 +14,7 @@ Top-level key: `limits`.
 
 ## Runtime
 
-No config. Every launch resolves the same way, from `/worq`, `worq_spawn` or `worq spawn`:
+Every launch uses the same resolver, from `/worq`, `worq_spawn` or `worq spawn`. With no `RUNTIMES.md` hints:
 
 - `sdk`: explicit, else `pi`. The adapter is imported on first use. `claude-code` is a lazy built-in when its optional `@anthropic-ai/claude-agent-sdk` and `zod` packages are installed; a valid installed adapter with the same id wins. `pi` is the only reserved id.
 - `model`: explicit, else the adapter default (Pi: Main's current model).
@@ -39,6 +37,14 @@ Optional `<agentDir>/worq/RUNTIMES.md`: one Markdown table of soft per-role defa
 - Roles: `*`, `<kind>`; children `pq`, `<kind>.pq[.<name>]`, `review`, `<kind>.review`, `edit`, `<kind>.edit[.<name>]`. Fields merge broad → specific.
 - `/worq` preselects hinted values per kind (`· RUNTIMES.md`). `worq list <ref>` shows `via: RUNTIMES.md (<role>)`.
 - Safety: same as shared resources (outside Git checkouts, no symlink escape, ≤ 256 KiB). Bad rows/cells skip with one warning per file version.
+
+## Main spawn guidance (`SPAWN-GUIDANCE.md`)
+
+To let Main choose a worker runtime for the task, put a shortlist in `<agentDir>/worq/SPAWN-GUIDANCE.md` (see [example](examples/SPAWN-GUIDANCE.md)). Use the first table with the exact columns `sdk | model | thinking | use when`. List SDK/model pairs you've already launched successfully on that profile, using `provider/model` for Pi. Enter a supported literal thinking level or leave it blank to use defaults; leave it blank for built-in `claude-code`. Give each choice a short task-fit note. The shortlist is checked for argument shape, not adapter, model or account availability.
+
+Main can copy a suitable pair and its listed thinking level into `worq_spawn`, even for different tasks using the same workflow. Explicit user preferences win, including choices outside the list. If no choice fits, Main omits runtime fields: `RUNTIMES.md` provides the same per-role defaults as before, then normal Main/adapter defaults apply. The shortlist does not change workflow permissions or route `/worq`, the CLI or child sessions.
+
+Pi reads this file once at extension load; reload Pi to apply edits. Only the table's valid rows enter Main's prompt (up to eight choices, with notes no longer than 200 characters). Put a regular UTF-8 file of at most 16 KiB in the active profile outside any Git checkout. The profile root may be a symlink, but the `worq` directory and guidance file may not. Missing or invalid guidance does not prevent launches.
 
 ## Migration
 

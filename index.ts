@@ -17,6 +17,7 @@ import { loadCatalog, type Kind } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
 import type { Driver, Runtime } from "./src/sdk/contract.ts";
 import { hintLoader } from "./src/runtime/hints.ts";
+import { loadSpawnGuidance, spawnRuntimeRule } from "./src/runtime/spawn-guidance.ts";
 import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
 
@@ -32,10 +33,11 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
   worq_spawn: {
     op: "spawn",
     description:
-      "Primary delegation tool: offload planning, implementation, codebase investigation, and any multi-step or non-trivial work to a background SDK agent (kind) instead of doing it directly in Main. Returns an exact readable ref; runs one automatic independent review on first submission when the package includes REVIEW.md; inherits Main's model and thinking unless overridden.",
+      "Primary delegation tool: offload planning, implementation, codebase investigation, and any multi-step or non-trivial work to a background SDK agent (kind) instead of doing it directly in Main. Returns an exact readable ref; runs one automatic independent review on first submission when the package includes REVIEW.md. Omitted runtime fields follow configured defaults, then Main or the adapter.",
     guidelines: [
       "DEFAULT TO DELEGATION: Use `worq_spawn` for planning, code changes, refactors, audits, and multi-file investigation. Only skip spawning for trivial single-turn factual lookups (answer with primary-source citations) or when the user explicitly tells you to work directly in Main.",
-      "ROUTE BY WORK TYPE: Match the task to the right installed `kind` — `plan` for design/architecture/ambiguous work, `execute` for code changes (never infer write permission from a read/plan request), `scout` for recon, or any other installed package whose description fits. Pass a concise 2-4 word `title` and the user's full original request in `task`. Set `sdk`/`model`/`thinking` only when explicitly requested.",
+      "ROUTE BY WORK TYPE: Match the task to the right installed `kind` — `plan` for design/architecture/ambiguous work, `execute` for code changes (never infer write permission from a read/plan request), `scout` for recon, or any other installed package whose description fits. Pass a concise 2-4 word `title` and the user's full original request in `task`.",
+      spawnRuntimeRule,
       "SWARMS, ATTACHMENTS & PARALLEL WRITES: When a request spans 2+ areas of the repo, start with a 2-4 `scout` barrier wave in one turn (`group`, `notify: \"barrier\"`, `expect: <exact count>`) before launching `plan` or `execute`. Pass scout refs and plans via `attach` (exact plan names, inline refs, or `.agents/plans/...` paths), never inline mentions. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`. Stay free after spawning; wait for Worq notices instead of polling.",
     ],
   },
@@ -75,6 +77,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     const catalog: ReadonlyMap<string, Kind> = workflows.kinds;
     const spawnable = [...catalog.values()].filter((kind) => !kind.userOnly);
     const table = ops();
+    const spawnGuidance = loadSpawnGuidance(agentDir(), table.spawn);
     const kinds = spawnable.length
       ? spawnable.map((kind) => `${kind.name} (${kind.access}): ${kind.description}`).join("; ")
       : "none installed for Main; the user can add packages under <agentDir>/workflows/";
@@ -279,6 +282,12 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });
 
+    pi.on("before_agent_start", ({ systemPromptOptions: prompt }) => {
+      if (spawnGuidance.section && prompt.forceSystemPrompt === undefined &&
+          prompt.selectedTools.includes("worq_spawn") && !prompt.hiddenTools.includes("worq_spawn")) {
+        prompt.sections.worq_spawn_guidance = spawnGuidance.section;
+      }
+    });
     pi.on("session_tree", () => {
       if (closing || !managementActive) return;
       // Pi has restored the branch's loadout, which may predate the current agents.
@@ -286,8 +295,13 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       const missing = MANAGEMENT_TOOLS.filter((name) => !active.includes(name));
       if (missing.length) pi.setActiveTools([...active, ...missing]);
     });
+    let guidanceWarned = false;
     pi.on("session_start", async (_event, ctx) => {
       ui = ctx;
+      if (spawnGuidance.warning && !guidanceWarned) {
+        guidanceWarned = true;
+        say(ctx, spawnGuidance.warning, "warning");
+      }
       if (!warned && ctx.mode === "tui") { warned = true; problems(ctx); }
       if (socket) return;
       try { socket = await serve(statePath(), (op, args) => run(ctx, op, args)); }
