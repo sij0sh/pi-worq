@@ -260,7 +260,7 @@ test("read package: plan artifact and exactly one review", async (t) => {
   assert.match(reviewingDetail, /Phase: independent review in progress/);
   assert.doesNotMatch(reviewingDetail, /No review ran|not independently reviewed|Phase: initial work/i);
   assert.equal(agent.review?.verdict, "pass");
-  assert.match(ready.text, /parked · no review issues reported/);
+  assert.match(ready.text, /parked · review passed/);
   assert.equal(agent.plan?.path, ".agents/plans/plan-documentation-run.md");
   assert.match(await readFile(join(root, agent.plan!.path), "utf8"), /^# Plan: documentation run\n/);
   await worq.cancel(agent.ref);
@@ -289,10 +289,10 @@ test("write package pins worq/<ref>, never merges, and ends without review", asy
   assert.match(system, /Inspect the repository/);
   assert.match(finish, /^Submit your result\. Ends your turn\.$/);
   assert.equal(seen.filter((spec) => spec.name === "review").length, 0);
-  assert.match(ready.text, /not independently reviewed/);
+  assert.doesNotMatch(ready.text, /review|unverified/i);
   assert.match(ready.text, /worq_list\(change-log-run\)/);
   const detail = worq.list(agent.ref);
-  assert.match(detail, /Phase: not independently reviewed/);
+  assert.match(detail, /Phase: submission complete/);
   assert.match(detail, /Writer submission:\nChanged the greeting\n\nChecks: CLI output changed\.\nBlocker: integration service unavailable\./);
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
@@ -313,8 +313,8 @@ test("a read package without REVIEW.md saves an unreviewed plan", async (t) => {
   }, {}, undefined, kinds);
   const agent = await userLaunch(worq, "documentation");
   const ready = await next("done", agent.ref);
-  assert.match(ready.text, /not independently reviewed/);
-  assert.match(agent.plan!.text, /not independently reviewed/);
+  assert.doesNotMatch(ready.text, /review|unverified/i);
+  assert.match(agent.plan!.text, /review not configured/);
   assert.equal(agent.review, undefined);
   assert.equal(worq.all().filter(a => a.active).length, 0);
   await worq.cancel(agent.ref);

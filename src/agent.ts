@@ -179,6 +179,12 @@ export class Agent {
       renameSync(`${file}.tmp`, file);
     } catch { /* the record is forensic; the live view stays authoritative */ }
   }
+  reviewedSha?: string;
+  reviewedDigest?: string;
+  get reviewDelta() {
+    return this.state === "done" && this.final && this.reviewedSha && this.candidate && this.reviewedSha !== this.candidate
+      ? `git diff ${this.reviewedSha}..${this.candidate}` : undefined;
+  }
   view() {
     return {
       ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, group: this.group, state: this.state, final: this.final, task: this.task,
@@ -186,7 +192,7 @@ export class Agent {
       writePaths: this.scope?.patterns, gates: this.gateResults.length ? this.gateResults : undefined,
       explore: this.explore ? { tier: this.explore.tier, bytes: this.explore.bytes, sourceFiles: this.explore.stats.sourceFiles } : undefined,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
-      review: this.review, started: this.started, finished: this.finished,
+      review: this.review, reviewedSha: this.reviewedSha, reviewedDigest: this.reviewedDigest, started: this.started, finished: this.finished,
     };
   }
 
@@ -495,6 +501,8 @@ export class Agent {
     this.deps.telemetry?.revision(revision);
     const review = await this.runReview();
     this.review = review;
+    if ("sha" in identity) this.reviewedSha = identity.sha;
+    else this.reviewedDigest = identity.digest;
     this.deps.telemetry?.revision({ ...revision, status: review.verdict, review: { findings: review.findings?.map((f) => f.need === true) ?? [], artifacts: review.artifacts?.length ?? 0 } });
   }
   private async runReview(): Promise<ReviewRecord> {
@@ -551,10 +559,10 @@ export class Agent {
           `Full report: worq_list(${this.ref}).`,
         ].join("\n");
       }
-      return `${this.headline} done · not independently reviewed\n${where}\nSubmission details: worq_list(${this.ref}).`;
+      return `${this.headline} done\n${where}\nSubmission details: worq_list(${this.ref}).`;
     }
-    if (this.state === "done") return [`${this.headline} done · final revision submitted after review; not re-reviewed`, where,
-      `Verify the exact candidate before reporting success or merging. worq_list(${this.ref}) has the review.`].join("\n");
+    if (this.state === "done") return [`${this.headline} done · final revision submitted`, where,
+      `${this.reviewDelta ? `Post-review delta: ${this.reviewDelta}. ` : ""}See the first review and any gate results in worq_list(${this.ref}).`].join("\n");
     return [`${this.headline} parked · ${reviewStatus(this.review)}`, where,
       ...reviewLines(this.review, { ...DIGEST, label: `worq_list(${this.ref})` }),
       `Full findings: worq_list(${this.ref}). ${close}`,

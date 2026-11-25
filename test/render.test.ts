@@ -30,5 +30,5 @@ test("reviewLines: detail is lossless at the schema maxima, the digest is not", 
   const digest = reviewLines(record, DIGEST)[1];
   assert.ok(!digest.includes(witness) && digest.includes("…"), "the digest clips long fields");
   assert.equal(reviewLines(record, DETAIL)[0], "review: findings");
-  assert.deepEqual(reviewLines(undefined), ["No review ran: this result is unverified."]);
+  assert.deepEqual(reviewLines(undefined), ["No review configured for this workflow."]);
 });

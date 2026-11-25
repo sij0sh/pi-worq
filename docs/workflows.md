@@ -30,7 +30,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 - Unwritable profile: warning; copy `workflows/<name>/` by hand. Controls keep working.
 - No built-in fallback: with no packages, `/worq` says so and `worq_spawn` lists none.
 
-**Before upgrading:** Installed packages are not updated. Without `REVIEW.md` their submissions now finish **not independently reviewed**; without `PQ.md` they lose delegation. Back up `<agentDir>/workflows`, diff each installed package against the extension’s shipped `workflows/`, then copy the desired stock files or merge the instructions into your customized packages. Install review instructions for every custom workflow requiring independent review. Reload Pi.
+**Before upgrading:** Installed packages are not updated. Without `REVIEW.md` their submissions finish `done` by design; without `PQ.md` they lose delegation. Back up `<agentDir>/workflows`, diff each installed package against the extension’s shipped `workflows/`, then copy the desired stock files or merge the instructions into your customized packages. Install review instructions for every custom workflow requiring independent review. Reload Pi.
 
 ## Frontmatter
 
@@ -67,7 +67,7 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 
 - **One review.** With `REVIEW.md`, the first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
 - Main accepts with `worq_cancel`, or sends filtered feedback once with `worq_send`. The agent revises, submits its final result without another review, and ends as `done` (worktree removed, branch/plan kept).
-- Without `REVIEW.md`, the recorded submission ends as `done`, not independently reviewed.
+- Remove `REVIEW.md` from a provisioned package to opt out of review. The submission ends as `done`, with no substitute reviewer needed.
 - Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
 - Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.

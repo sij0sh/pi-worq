@@ -7,7 +7,7 @@ const bullets = (items?: string[]) => items?.length ? items.map((item) => `- ${i
 export function planMarkdown(input: { ref: string; title?: string; kind: string; final?: boolean; reviewRequired?: boolean; task: string; report: Submission; label?: string }) {
   const { ref, kind, task, report } = input;
   return [
-    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · ${input.final ? "final revision after review" : input.reviewRequired === false ? "not independently reviewed" : "submission for independent review"} · ${new Date().toISOString().slice(0, 10)}`, "",
+    `# ${input.label ?? "Plan"}: ${input.title ?? ref}`, "", `Worq ${kind} agent · ${input.final ? "final revision after review" : input.reviewRequired === false ? "review not configured" : "submission for independent review"} · ${new Date().toISOString().slice(0, 10)}`, "",
     "## Request", "", task, "", "## Summary", "", report.summary, ...(report.report ? ["", report.report] : []), "",
   ].join("\n");
 }
@@ -47,12 +47,12 @@ function keep(findings: NonNullable<ReviewReport["findings"]>, limit?: number) {
 }
 
 export function reviewStatus(review?: ReviewRecord) {
-  if (!review || review.verdict === "inconclusive") return "unverified";
-  return review.verdict === "pass" && !review.findings?.length ? "no review issues reported" : "unresolved review issues";
+  if (!review || review.verdict === "inconclusive") return "review inconclusive";
+  return review.verdict === "pass" && !review.findings?.length ? "review passed" : "review findings";
 }
 
-export function reviewLines(review: ReviewRecord | undefined, caps: ReviewCaps = DETAIL) {
-  if (!review) return ["No review ran: this result is unverified."];
+export function reviewLines(review: ReviewRecord | undefined, caps: ReviewCaps = DETAIL, reviewRequired = false) {
+  if (!review) return [reviewRequired ? "Expected review did not finish: review inconclusive." : "No review configured for this workflow."];
   const findings = review.findings ?? [];
   const shown = keep(findings, caps.limit);
   const dropped = findings.length - shown.length;

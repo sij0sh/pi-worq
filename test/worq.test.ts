@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -148,7 +149,7 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback o
   assert.equal(reviews.length, 1);
   assert.match(ready.text, /review: findings/);
   assert.match(ready.text, /1: Criterion ignores trailing newline/);
-  assert.match(ready.text, /parked · unresolved review issues/);
+  assert.match(ready.text, /parked · review findings/);
   assert.match(ready.text, /does not authorize further action/);
   assert.ok(agent.plan);
   assert.equal(agent.plan.path, `.agents/plans/plan-${agent.ref}.md`);
@@ -162,7 +163,7 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback o
   // Main's feedback reaches the same SDK session once; the revision is final, unreviewed, and ends the agent.
   assert.match(worq.send(agent.ref, "include the newline"), /Sent feedback[\s\S]*final revision/);
   const done = await next("done", agent.ref);
-  assert.match(done.text, /done · final revision submitted after review; not re-reviewed/);
+  assert.match(done.text, /done · final revision submitted/);
   assert.equal(agent.state, "done");
   assert.equal(seen.filter((s) => s.name === "agent.plan").length, 1);
   assert.equal(reviews.length, 1, "no second review");
@@ -174,6 +175,8 @@ test("plan agent: PQ delegation, plan saved, one review, parked; Main feedback o
   const record = JSON.parse(await readFile(join(state, agent.ref, "record.json"), "utf8"));
   assert.equal(record.state, "done");
   assert.equal(record.review.verdict, "findings");
+  assert.equal(record.reviewedDigest, createHash("sha256").update(saved).digest("hex"));
+  assert.match(worq.list(agent.ref), new RegExp(`Reviewed digest: ${record.reviewedDigest}`));
   assert.ok(!JSON.stringify(record).includes(agent.id));
 });
 
@@ -194,7 +197,7 @@ test("a compact factual answer can be submitted, and compact findings still flag
   });
   const agent = await worq.spawn("plan", "What does the app print? Cite source.", { title: "What does the" });
   const ready = await next("parked", agent.ref);
-  assert.match(ready.text, /unresolved review issues/);
+  assert.match(ready.text, /review findings/);
   assert.match(worq.list(agent.ref), /1: app.py:1 prints hello, not goodbye/);
   const saved = await readFile(join(root, agent.plan!.path), "utf8");
   assert.match(saved, /## Summary\n\nThe app prints goodbye \(app.py:1\)\.\n$/);
@@ -233,7 +236,7 @@ test("execute agent: plan explicitly attached, own worktree and branch, review s
   assert.match(attached, /Change the greeting to uppercase/);
   assert.match(verifierSaw, /HELLO/);
   assert.match(ready.text, /review: pass/);
-  assert.match(ready.text, /parked · no review issues reported/);
+  assert.match(ready.text, /parked · review passed/);
   assert.match(ready.text, new RegExp(`Branch worq/${exec.ref}`));
   assert.doesNotMatch(ready.text, /git merge|worq_spawn/);
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "baseline untouched: Worq never merges");
@@ -280,9 +283,9 @@ test("limits, refusals and failures", async (t) => {
   }, { agents: 2 });
   const a = await worq.spawn("plan", "One", { title: "One plan" });
   const ready = await next("parked", a.ref);
-  assert.match(ready.text, /parked · unverified/);
+  assert.match(ready.text, /parked · review inconclusive/);
   assert.match(ready.text, /review: inconclusive \(Review error: reviewer crashed\)/);
-  assert.match(worq.list(a.ref), /Review: unverified/);
+  assert.match(worq.list(a.ref), /Review: review inconclusive/);
   await assert.rejects(worq.spawn("plan", "Needs plan", { title: "Needs plan", attach: ["ffff"] }), /exact plan name/);
   await assert.rejects(worq.spawn("review", "x", { title: "Review work" }), /Unknown kind/);
 

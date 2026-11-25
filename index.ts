@@ -29,7 +29,7 @@ const actionable = (event: Partial<AgentEvent> | undefined) => {
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
     op: "spawn",
-    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. REVIEW.md requires one independent review of the first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
+    description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. If the package includes REVIEW.md, Worq runs one automatic review on first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
       "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Stay free after spawning; wait for the single barrier notice instead of polling `worq_list`. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
@@ -40,8 +40,8 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     description: "List Worq agents (no args), inspect one group (group, including merge-tree verification for write branches), or show one agent in full: plan path, branch, gates, PQs, reviews and recent activity.",
     guidelines: [
       "Drive asks and parked agents without polling. Surface unresolved user choices with the plan.",
-      "Even for ‘plan and execute’, present the plan and its review status before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
-      "Parked is not a pass. Obtain affirmative verification of the exact candidate before reporting execution success, including execute only. Reverify after changes. Without verification report unverified and leave unmerged; Main merges manually only with explicit merge authority.",
+      "Even for ‘plan and execute’, present the plan and its review status before execution. Offer execute only (no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
+      "A clean automatic review pass applies to the exact reviewed submission: accept and close with worq_cancel. For a reviewless workflow, done is ready to continue. Address findings or inconclusive reviews explicitly. After feedback, inspect the incremental diff and gate results directly if needed. Do not spawn an additional agent solely to re-review. Main merges manually only with explicit merge authority.",
     ],
   },
   worq_send: {

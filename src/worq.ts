@@ -419,7 +419,7 @@ export class Worq {
     return pending.concat(agents.map((a) => {
       const groupTag = a.group ? ` [${a.group}]` : "";
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
-      const verdicts = a.review ? ` · review ${a.review.verdict}` : a.state === "done" ? " · not independently reviewed" : "";
+      const verdicts = a.review ? ` · ${a.final ? "first submission: " : ""}${reviewStatus(a.review)}` : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
       return `${a.headline}${groupTag} · ${a.state}${a.final && !a.ended ? " · final revision" : ""}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
     })).join("\n");
@@ -454,7 +454,7 @@ export class Worq {
       `${a.headline} · ${a.state}`,
       a.group && `Group: ${a.group} (${a.notifyMode})`,
       `Task: ${a.task}`,
-      `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "not independently reviewed") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
+      `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "submission complete") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.explore && `Explore: tier ${a.explore.tier} (${a.explore.stats.sourceFiles} source file${a.explore.stats.sourceFiles === 1 ? "" : "s"}, ${(a.explore.bytes / 1024).toFixed(1)} KB)`,
@@ -471,6 +471,10 @@ export class Worq {
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.state}: ${d.question}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
+      a.reviewedSha && `Reviewed SHA: ${a.reviewedSha}`,
+      a.reviewedDigest && `Reviewed digest: ${a.reviewedDigest}`,
+      a.reviewDelta && `Post-review delta: ${a.reviewDelta}`,
+      a.state === "done" && !a.kind.review && reviewLines(undefined).join("\n"),
       a.review && [`Review: ${reviewStatus(a.review)}`, ...reviewLines(a.review)].join("\n"),
       ["Recent activity:", ...a.tail(20).map((h) => `  ${h.line}`)].join("\n"),
     ].filter(Boolean).join("\n");
