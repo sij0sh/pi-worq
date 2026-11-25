@@ -19,6 +19,7 @@ import { clean } from "./src/render.ts";
 import type { Driver, Runtime } from "./src/sdk/contract.ts";
 import { hintLoader } from "./src/runtime/hints.ts";
 import { loadSpawnGuidance, spawnRuntimeRule } from "./src/runtime/spawn-guidance.ts";
+import { createUsageTracker, formatUsageForPrompt, type UsageTracker } from "./src/runtime/usage.ts";
 import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
 
@@ -68,9 +69,10 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
 };
 
 /** Test seam: replace the Pi SDK driver. */
-export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string; telemetry?: Telemetry } = {}) {
+export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver; agentDir?: () => string; telemetry?: Telemetry; usage?: UsageTracker } = {}) {
   return function worq(pi: ExtensionAPI) {
     const agentDir = () => options.agentDir?.() ?? getAgentDir();
+    const usage = options.usage ?? createUsageTracker();
     // One catalog, read once per extension load (shipped packages are provisioned first): worq_spawn's description is fixed at registration.
     const workflows = loadCatalog(agentDir());
     const adapters = discoverAdapters(agentDir());
@@ -199,7 +201,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       const fallback = await worq.defaults();
       const initials = new Map<string, Runtime>();
       for (const kind of kinds) initials.set(kind.name, await worq.defaults(undefined, kind.name).catch(() => fallback));
-      const result = await launchPanel(ctx.ui, { kinds, initial: fallback, initials, choices: await worq.launchChoices(fallback, [...initials.values()]) });
+      void usage.refresh();
+      const result = await launchPanel(ctx.ui, { kinds, initial: fallback, initials, choices: await worq.launchChoices(fallback, [...initials.values()]), usage });
       if (!result || closing) return;
       const { kind, instructions: extra, runtime } = result;
       const initial = initials.get(kind.name) ?? fallback;
@@ -248,7 +251,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const choices = await instance.choices(key);
         const runtime = session.runtime() ?? { name: 'main', sdk: choices[0]?.sdk ?? 'pi', path: '', via: '' };
         // choices[0] is the current runtime with Main's model resolved.
-        const change = await runtimePicker(ctx.ui, { label: session.label, current: { ...runtime, model: runtime.model ?? choices[0]?.model }, choices, pending: session.pending() });
+        void usage.refresh();
+        const change = await runtimePicker(ctx.ui, { label: session.label, current: { ...runtime, model: runtime.model ?? choices[0]?.model }, choices, pending: session.pending(), usage });
         if (!change) return;
         say(ctx, await instance.configure(key, change));
       } catch (error) { say(ctx, errorText(error), 'error'); }
@@ -289,6 +293,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       pi.on("before_agent_start", ({ systemPromptOptions }) => {
         // Keep the shared options: Pi finalizes the selection and hidden declarations after all start hooks.
         runPrompt = systemPromptOptions;
+        void usage.refresh();
       });
       pi.on("context_with_system", ({ messages }) => {
         // Pi projects hidden tool declarations out *after* this hook, so check the run's hidden list too.
@@ -296,7 +301,9 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
             !getCurrentTools(messages).some(tool => tool.name === "worq_spawn")) return;
         const [head, ...tail] = messages;
         if (head?.role !== "system") return;
-        const sections = { ...head.sections, worq_spawn_guidance: `<worq_spawn_guidance>\n${guidance}\n</worq_spawn_guidance>` };
+        const usageNote = formatUsageForPrompt(usage.current());
+        const body = usageNote ? `${guidance}\n\n${usageNote}` : guidance;
+        const sections = { ...head.sections, worq_spawn_guidance: `<worq_spawn_guidance>\n${body}\n</worq_spawn_guidance>` };
         return { messages: [{ ...head, sections }, ...tail] };
       });
     }
@@ -310,6 +317,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     let guidanceWarned = false;
     pi.on("session_start", async (_event, ctx) => {
       ui = ctx;
+      void usage.refresh();
       if (spawnGuidance.warning && !guidanceWarned) {
         guidanceWarned = true;
         say(ctx, spawnGuidance.warning, "warning");
@@ -321,6 +329,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     });
     pi.on("session_shutdown", async (_event, ctx) => {
       closing = true;
+      usage.dispose();
       if (ctx.mode === 'tui') ctx.ui.setWidget('worq-launch', undefined);
       stop();
       closeInspector?.();

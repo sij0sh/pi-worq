@@ -5,6 +5,7 @@ import { getNativeClipboard, Editor, type Component, type TuiMouseEvent, matches
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
 import type { ModelChoice } from './runtime/launch.ts';
+import { formatUsageTui, hasQuotaInfo, providerForRuntime, usageTone, type UsageView } from './runtime/usage.ts';
 import { supportedThinking, type Runtime, type RuntimeChange } from './sdk/contract.ts';
 
 function boxed(theme: { fg(color: string, s: string): string }, width: number, lines: string[]) {
@@ -23,16 +24,17 @@ function cycle<T>(values: readonly T[], value: T | undefined, delta: number) {
 }
 
 /** `initials`: per-kind defaults (RUNTIMES.md hints applied); `initial` otherwise. */
-export interface LaunchRequest { kinds: Kind[]; initial: Runtime; choices: ModelChoice[]; initials?: ReadonlyMap<string, Runtime> }
+export interface LaunchRequest { kinds: Kind[]; initial: Runtime; choices: ModelChoice[]; initials?: ReadonlyMap<string, Runtime>; usage?: UsageView }
 type LaunchResult = { kind: Kind; instructions: string; runtime: Runtime };
 const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallback, choices, initials }: LaunchRequest): Promise<LaunchResult | undefined> {
+export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallback, choices, initials, usage }: LaunchRequest): Promise<LaunchResult | undefined> {
   return new Promise(resolve => ui.setWidget('worq-launch', (tui, theme) => {
     // Pi 1.6 main and fullscreen TUIs both extend TuiBase.
     const screen = tui as typeof tui & { getFocusedComponent(): Component | null };
     const previous = screen.getFocusedComponent();
     const editor = new Editor(tui, { borderColor: s => theme.fg('border', s), selectList: getSelectListTheme() });
     let step = 0, agent = 0, field = 0, initial = fallback, selected = { ...initial }, closed = false;
+    const unsubUsage = usage?.subscribe(() => { if (!closed) tui.requestRender(); });
     const finish = (result?: LaunchResult) => { resolve(result); ui.setWidget('worq-launch', undefined); };
     const paste = async () => {
       const text = await readClipboardText();
@@ -40,7 +42,7 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallba
     };
     const panel: Component & { focused: boolean; dispose(): void } = {
       get focused() { return editor.focused; }, set focused(value) { editor.focused = value; },
-      dispose() { closed = true; if (screen.getFocusedComponent() === panel) tui.setFocus(previous); resolve(undefined); },
+      dispose() { closed = true; unsubUsage?.(); if (screen.getFocusedComponent() === panel) tui.setFocus(previous); resolve(undefined); },
       invalidate() { editor.invalidate(); },
       render(width) {
         const w = Math.max(1, width - 4);
@@ -65,6 +67,23 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallba
           const hinted = initial.via.includes('RUNTIMES.md') && selected.sdk === initial.sdk && selected.model === initial.model && selected.thinking === initial.thinking ? ' · RUNTIMES.md' : '';
           const values = [selected.sdk === 'pi' ? 'Pi' : selected.sdk, `${model}${hinted && (initial.model !== fallback.model || initial.sdk !== fallback.sdk) ? hinted : ''}`, `${titleCase(selected.thinking ?? 'SDK default')}${hinted}`];
           body = values.map((value, i) => row(align(`${i === field ? '›' : ' '} ${['Harness', 'Model', 'Thinking'][i]}`, `‹ ${clean(value)} ›`), i === field));
+          if (usage) {
+            const snap = usage.current();
+            if (!snap) {
+              body.push(rule, theme.fg('muted', '  Usage · checking…'));
+            } else {
+              const available = snap.providers.filter(hasQuotaInfo);
+              if (available.length) {
+                const activeProvider = providerForRuntime(selected.sdk, selected.model);
+                body.push(rule, ...available.map(p => {
+                  const active = p.provider === activeProvider;
+                  const mark = active ? theme.fg('accent', '●') : ' ';
+                  const name = active ? theme.fg('accent', p.provider.padEnd(11)) : p.provider.padEnd(11);
+                  return `${mark} ${name} ${theme.fg(usageTone(p), clean(formatUsageTui(p)))}`;
+                }));
+              }
+            }
+          }
         }
         const hint = ['↑↓ Select · Enter Continue','Shift+Enter New line · Enter Continue','↑↓ Select · ←→ Change · Enter Launch'][step];
         return [truncateToWidth(`STEP ${step+1} — ${['AGENT','PROMPT','RUNTIME'][step]}`,width), ...boxed(theme,width,[theme.fg('accent',header),rule,...body,rule,theme.fg('muted',`${hint} · Esc Cancel`)])];
@@ -106,47 +125,55 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallba
   }, { placement: 'aboveEditor' }));
 }
 
-export interface RuntimeRequest { label: string; current: Runtime; choices: ModelChoice[]; pending?: RuntimeChange }
+export interface RuntimeRequest { label: string; current: Runtime; choices: ModelChoice[]; pending?: RuntimeChange; usage?: UsageView }
 /**
  * Live-session variant of the launch picker: harness locked. Resolves the change
  * (only fields that differ from the pending selection or current runtime), or undefined when dismissed or unchanged.
  */
 export async function runtimePicker(ui: ExtensionContext['ui'], request: RuntimeRequest): Promise<RuntimeChange | undefined> {
-  const { current, choices } = request;
+  const { current, choices, usage } = request;
   const start = { model: request.pending?.model ?? current.model, thinking: request.pending?.thinking ?? current.thinking };
   let choice = choices.find(c => c.model === start.model) ?? choices[0];
   if (!choice) throw new Block('capability', 'No models available for this harness');
   let thinking = supportedThinking(start.thinking, choice.levels);
   let field = 0;
-  return ui.custom<RuntimeChange | undefined>((tui, theme, _keys, done) => ({
-    invalidate() {},
-    render(width) {
-      const lines = [theme.fg('accent', `Runtime · ${clean(request.label).replace(/\s+/g, ' ')}`),
-        `  Harness: ${current.sdk} (locked)`,
-        ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'SDK default'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
-        theme.fg('muted', request.pending ? 'Editing a queued change.' : 'Keeps the session; applies at the next safe execution boundary.'),
-        '↑↓ select · ←→ change · Enter apply · Esc dismiss'];
-      return boxed(theme, width, lines);
-    },
-    handleInput(data) {
-      if (matchesKey(data, 'escape')) return done(undefined);
-      if (matchesKey(data, 'enter')) {
-        const change: RuntimeChange = {};
-        if (choice.model !== start.model && choice.model !== undefined) change.model = choice.model;
-        if (thinking !== start.thinking && thinking !== undefined) change.thinking = thinking;
-        return done(change.model || change.thinking ? change : undefined);
-      }
-      if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab')) field = 1 - field;
-      else if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
-        const delta = matchesKey(data, 'left') ? -1 : 1;
-        if (field === 0) {
-          choice = cycle(choices, choice, delta);
-          thinking = supportedThinking(thinking, choice.levels);
-        } else if (choice.levels.length) thinking = cycle(choice.levels, thinking, delta);
-      } else return;
-      tui.requestRender();
-    },
-  }), { overlay: true, overlayOptions: { width: '70%', anchor: 'center' } });
+  return ui.custom<RuntimeChange | undefined>((tui, theme, _keys, done) => {
+    let closed = false;
+    const unsubUsage = usage?.subscribe(() => { if (!closed) tui.requestRender(); });
+    const close = (result: RuntimeChange | undefined) => { closed = true; unsubUsage?.(); done(result); };
+    return {
+      invalidate() {},
+      render(width) {
+        const matched = usage ? providerForRuntime(current.sdk, choice.model) : undefined;
+        const quota = matched ? usage?.current()?.providers.find(p => p.provider === matched && hasQuotaInfo(p)) : undefined;
+        const lines = [theme.fg('accent', `Runtime · ${clean(request.label).replace(/\s+/g, ' ')}`),
+          `  Harness: ${current.sdk} (locked)`,
+          ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'SDK default'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
+          ...(quota ? [theme.fg(usageTone(quota), `  Quota (${quota.provider}): ${clean(formatUsageTui(quota))}`)] : []),
+          theme.fg('muted', request.pending ? 'Editing a queued change.' : 'Keeps the session; applies at the next safe execution boundary.'),
+          '↑↓ select · ←→ change · Enter apply · Esc dismiss'];
+        return boxed(theme, width, lines);
+      },
+      handleInput(data) {
+        if (matchesKey(data, 'escape')) return close(undefined);
+        if (matchesKey(data, 'enter')) {
+          const change: RuntimeChange = {};
+          if (choice.model !== start.model && choice.model !== undefined) change.model = choice.model;
+          if (thinking !== start.thinking && thinking !== undefined) change.thinking = thinking;
+          return close(change.model || change.thinking ? change : undefined);
+        }
+        if (matchesKey(data, 'up') || matchesKey(data, 'down') || matchesKey(data, 'tab')) field = 1 - field;
+        else if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
+          const delta = matchesKey(data, 'left') ? -1 : 1;
+          if (field === 0) {
+            choice = cycle(choices, choice, delta);
+            thinking = supportedThinking(thinking, choice.levels);
+          } else if (choice.levels.length) thinking = cycle(choice.levels, thinking, delta);
+        } else return;
+        tui.requestRender();
+      },
+    };
+  }, { overlay: true, overlayOptions: { width: '70%', anchor: 'center' } });
 }
 
 /** Yes/No as an overlay, so it stacks above the inspector and keeps focus. Defaults to No. */

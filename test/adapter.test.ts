@@ -15,6 +15,7 @@ import { serve } from "../src/control.ts";
 import { literals, obj, parse } from "../src/contracts.ts";
 import { resolveRuntime } from "../src/runtime/launch.ts";
 import { EMPTY } from "../src/runtime/resources.ts";
+import { createUsageTracker } from "../src/runtime/usage.ts";
 import { createDriver, discoverAdapters } from "../src/sdk/registry.ts";
 import { repo } from "./fake.ts";
 
@@ -185,8 +186,18 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   let restrictSpawn: "hide" | "deselect" | undefined = "hide";
   const visibleBeforeRestriction: boolean[] = [];
   let setTools!: (tools: string[]) => void;
+  const usageTracker = createUsageTracker({
+    poll: async () => [{
+      provider: "claude",
+      available: true,
+      fiveHour: { usedPercent: 38, remainingPercent: 62, resetsAt: null },
+      weekly: { usedPercent: 16, remainingPercent: 84, resetsAt: null },
+      fetchedAt: "2026-11-25T13:00:00.000Z",
+    }],
+  });
+  await usageTracker.refresh();
   const resourceLoader = new DefaultResourceLoader({ cwd: root, agentDir, settingsManager,
-    systemPromptOverride: () => "Fixture Main custom preamble.", extensionFactories: [createWorq({ agentDir: () => agentDir }), pi => {
+    systemPromptOverride: () => "Fixture Main custom preamble.", extensionFactories: [createWorq({ agentDir: () => agentDir, usage: usageTracker }), pi => {
       setTools = tools => pi.setActiveTools(tools);
       pi.on("before_agent_start", ({ systemPromptOptions: options }) => {
         if (force) options.forceSystemPrompt = "Exact forced Main prompt.";
@@ -252,7 +263,7 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
     assert.ok(request);
     assert.equal(visibleBeforeRestriction.at(-1), true, "spawn was visible until the later start hook");
     assert.equal(request.tools.includes("worq_spawn"), false);
-    assert.doesNotMatch(request.text, /worq_spawn_guidance|Difficult diagnosis/);
+    assert.doesNotMatch(request.text, /worq_spawn_guidance|Difficult diagnosis|Provider usage snapshot/);
   };
   // First provider call of this fresh session: the tool becomes hidden only after Worq's handler.
   await assertRestricted("hide");
@@ -267,6 +278,8 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   assert.match(visible.text, /Fixture Main custom preamble/);
   assert.match(visible.text, /honor explicit user preferences first/);
   assert.match(visible.text, /"sdk":"echo","model":"e\/analysis","thinking":"high","use when":"Difficult diagnosis"/);
+  assert.match(visible.text, /Provider usage snapshot/);
+  assert.match(visible.text, /- claude: 5h 62% left, 7d 84% left/);
   assert.match(visible.text, /Unavailable fixture choice/, "well-formed entries are not preflighted");
   assert.doesNotMatch(visible.text, /Unlisted prompt prose|Deleted table/);
   await assertRestricted("hide"); // A formerly visible shortlist must not survive in replayed history.

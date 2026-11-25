@@ -5,6 +5,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { launchPanel, type LaunchRequest } from '../src/launch-picker.ts';
 import { MAIN } from '../src/runtime/config.ts';
 import { resolveRuntime } from '../src/runtime/launch.ts';
+import type { UsageSnapshot, UsageView } from '../src/runtime/usage.ts';
 import { rm, writeFile } from 'node:fs/promises';
 import { Worq } from '../src/worq.ts';
 import type { Spec } from '../src/sdk/contract.ts';
@@ -51,6 +52,56 @@ test('picker: harness change resets model and thinking to that harness defaults;
   const cancelled = surface(request());
   cancelled.input('\x1b');
   assert.equal(await cancelled.picked, undefined);
+});
+
+test('picker: step 3 shows checking state, updates live when usage resolves, highlights matched provider, and unsubscribes on close', async () => {
+  let snap: UsageSnapshot | undefined;
+  const listeners = new Set<() => void>();
+  const usage: UsageView = {
+    current: () => snap,
+    subscribe: (fn) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+  };
+  let renders = 0;
+  let component!: Component;
+  const prior = { render: () => [], invalidate() {} }; let focus: Component | null = prior;
+  const tui = { terminal: { rows: 24 }, requestRender() { renders++; }, getFocusedComponent: () => focus, setFocus: (c: Component | null) => { focus = c; } };
+  const color = (tone: string, s: string) => tone === 'accent' || tone === 'warning' || tone === 'error' ? `<${tone}>${s}</${tone}>` : s;
+  const ui = { setWidget(_key: string, factory?: Function) {
+    if (factory) component = factory(tui, { fg: color, bg: (_: string, s: string) => s });
+    else (component as Component & { dispose(): void }).dispose();
+  } };
+  const req: LaunchRequest = {
+    kinds: [...KINDS.values()],
+    initial: { ...MAIN, model: 'anthropic/claude-sonnet-4-5', thinking: 'high' },
+    choices: [
+      { sdk: 'pi', model: 'anthropic/claude-sonnet-4-5', levels: ['low', 'high'], thinking: 'high' },
+      { sdk: 'pi', model: 'openai-codex/gpt-5.3-codex', levels: ['low', 'high'], thinking: 'high' },
+    ],
+    usage,
+  };
+  const picked = launchPanel(ui as unknown as ExtensionContext['ui'], req);
+  component.handleInput!('\r');
+  component.handleInput!('\r');
+  assert.match(component.render(80).join('\n'), /Usage · checking…/);
+  assert.equal(listeners.size, 1);
+
+  snap = {
+    fetchedAt: 1,
+    providers: [
+      { provider: 'claude', available: true, fiveHour: { usedPercent: 75, remainingPercent: 25, resetsAt: null }, weekly: { usedPercent: 20, remainingPercent: 80, resetsAt: null }, fetchedAt: '' },
+      { provider: 'codex', available: true, fiveHour: { usedPercent: 10, remainingPercent: 90, resetsAt: null }, weekly: null, fetchedAt: '' },
+    ],
+  };
+  const before = renders;
+  for (const fn of listeners) fn();
+  assert.equal(renders, before + 1);
+  const rendered = component.render(120).join('\n');
+  assert.match(rendered, /<accent>●<\/accent> <accent>claude\s+<\/accent> <warning>5h 25% left · 7d 80% left<\/warning>/);
+  assert.match(rendered, /codex\s+5h 90% left/);
+
+  component.handleInput!('\x1b');
+  assert.equal(await picked, undefined);
+  assert.equal(listeners.size, 0, 'unsubscribes on dispose');
 });
 
 test('resolveRuntime: explicit fields first, Main defaults otherwise; incompatible inherited thinking is dropped', async () => {

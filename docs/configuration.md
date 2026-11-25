@@ -46,6 +46,17 @@ Main can copy a suitable pair and its listed thinking level into `worq_spawn`, e
 
 Pi reads this file once at extension load; reload Pi to apply edits. Only the table's valid rows enter Main's prompt (up to eight choices, with notes no longer than 200 characters). Put a regular UTF-8 file of at most 16 KiB in the active profile outside any Git checkout. The profile root may be a symlink, but the `worq` directory and guidance file may not. Missing or invalid guidance does not prevent launches.
 
+## Subscription usage checks
+
+Worq checks subscription rolling-window quotas (5-hour and 7-day) in the background using each tool's local credentials or environment overrides (read-only; credentials are never modified):
+
+- **Command Code:** `COMMAND_CODE_API_KEY` / `COMMANDCODE_API_KEY` or `~/.commandcode/auth.json`
+- **OpenAI Codex:** `CODEX_ACCESS_TOKEN` (+ `CODEX_ACCOUNT_ID`) or `~/.codex/auth.json`
+- **Claude Code:** `CLAUDE_OAUTH_TOKEN`, `$CLAUDE_CONFIG_DIR/.credentials.json` / `~/.claude/.credentials.json`, or macOS Keychain `"Claude Code-credentials"`
+- **Antigravity:** `ANTIGRAVITY_ACCESS_TOKEN`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, or macOS Keychain (`gemini` / `antigravity`)
+
+Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`, stale turns, and when opening `/worq`. Available provider headroom is displayed in `/worq` Step 3 (and the live runtime picker) and appended to `<worq_spawn_guidance>` when `SPAWN-GUIDANCE.md` is configured. Missing credentials or network errors are ignored silently.
+
 ## Migration
 
 | Old key | Now | Effect until removed |
