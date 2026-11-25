@@ -130,7 +130,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const config = loadConfig(dir);
         const resources = options.driver ? EMPTY : await loadResources(dir);
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
-        const driver = options.driver?.(ctx) ?? await createDriver({ pi: host }, resources, adapters.records);
+        const driver = options.driver?.(ctx) ?? await createDriver({ pi: host, main: () => ({ model: host.model && `${host.model.provider}/${host.model.id}`, thinking: host.thinkingLevel }) }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
         return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, prompts, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify,
           warn: (text) => { if (ui) say(ui, text, "warning"); } });

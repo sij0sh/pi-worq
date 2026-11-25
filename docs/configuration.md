@@ -18,7 +18,7 @@ Top-level key: `limits`.
 
 No config. Every launch resolves the same way, from `/worq`, `worq_spawn` or `worq spawn`:
 
-- `sdk`: explicit, else `pi`. The adapter is imported on first use.
+- `sdk`: explicit, else `pi`. The adapter is imported on first use. `claude-code` is a lazy built-in when its optional `@anthropic-ai/claude-agent-sdk` and `zod` packages are installed; a valid installed adapter with the same id wins. `pi` is the only reserved id.
 - `model`: explicit, else the adapter default (Pi: Main's current model).
 - `thinking`: explicit, else the adapter default (Pi: Main's level) when the model supports it; an unsupported inherited level is dropped, an unsupported explicit one refused (`capability`).
 - Then the adapter's local preflight (`validateRuntime`) rejects malformed/unknown models before admission. Account, network and provider-side failures can still surface at open; the agent then fails with the existing cleanup.
@@ -74,7 +74,9 @@ The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extensio
 
 ## Adapters
 
-Extra harnesses: `<agentDir>/worq/adapters/<id>/adapter.mjs`. Installing one is the trust opt-in (operator code, in-process). See `docs/sdk.md`.
+Built in: `pi` (default) and `claude-code` (optional package). Claude uses the existing Claude Code login and native credentials; no API key is required. It replaces the system prompt, exposes only Worq's tools, ignores user/project/local settings and refuses behavior-affecting managed policy before a worker starts. Main's Claude-family model is the default when it has a defensible mapping; otherwise pass `model` explicitly. A live model switch is verified. Thinking is fail-closed: the pinned SDK does not report the applied effort, so Main's level is not inherited and Worq advertises no level control; an explicit level is refused before a slot (and a live change is refused before mutation).
+
+Extra harnesses: `<agentDir>/worq/adapters/<id>/adapter.mjs`. Installing one is the trust opt-in (operator code, in-process). A valid installed adapter wins its own id (including `claude-code` and `claude`); `pi` cannot be replaced. A missing or broken built-in never displaces an installed adapter and never affects Pi or management. See `docs/sdk.md`.
 
 ## Limits
 
@@ -111,8 +113,13 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 | `… are no longer supported, so new launches are refused` | Removed presets / old format | See Migration; remove the keys, reload |
 | `/launch is ignored` | Removed countdown settings | Remove `launch` |
 | `… is not a Pi model ref` | Ref shape | Use `<provider>/<model>` |
-| `Unknown sdk` | No installed adapter with that id | `pi`, or install `<agentDir>/worq/adapters/<id>/` |
+| `Unknown sdk` | No installed adapter with that id | `pi`, `claude-code` (package installed), or install `<agentDir>/worq/adapters/<id>/` |
 | `sdk "<id>" could not load` | Adapter import/factory failed | Fix the adapter; other SDKs keep working |
+| `The Claude Agent SDK is not available` | Optional package missing | `npm install @anthropic-ai/claude-agent-sdk zod` in the Worq install, or use `pi` |
+| `Claude isolation refused` | Managed policy sets behavior, or could not be read | Change managed policy or use `pi`; never weaken the refusal |
+| `Claude has no verified thinking-level control` | The pinned SDK does not report effort on stdio | Omit `thinking` for Claude |
+| `Claude cannot verify a live thinking-level change` | The pinned SDK has no effort read-back | Start a new session without thinking |
+| `runtime-invalidated` | A live model update was partial or unverifiable | The handle is fenced; restart the agent |
 | `verify:false is no longer supported` | Legacy review opt-out | Omit `verify`; every agent is reviewed once |
 | `Pi does not know model …` | Model not installed in Pi | Install it or pick another |
 | `… is not a pi thinking level` | Level unsupported by that model | Use one the error lists |

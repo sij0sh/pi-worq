@@ -86,6 +86,8 @@ export class Agent {
   private conversation?: Conversation<typeof Submission>;
   private asks = 0;
   private wakeParked?: (message: string | undefined) => void;
+  /** A fatal runtime invalidation: the agent can never run another request, child or review. */
+  private fatal?: Block;
   private readonly controller = new AbortController();
   private readonly deps: AgentDeps;
   private start!: () => void;
@@ -118,7 +120,8 @@ export class Agent {
     this.deps.sessions?.set(this.id, {
       key: this.id, ref: this.ref, role: `agent.${this.kind.name}`, label: this.headline,
       consequence: "Stops the agent and every PQ and review it owns; its branch is kept.",
-      runtime: () => this.conversation?.runtime ?? this.deps.runtime,
+      runtime: () => { try { return this.effectiveRuntime(); } catch { return undefined; } },
+      invalidated: () => this.conversation?.invalidated ?? false,
       pending: () => this.conversation?.pendingChange,
       cancel: async () => { await this.cancel(); return `${this.ref} ${this.state}`; },
       configure: (change) => {
@@ -198,9 +201,15 @@ export class Agent {
     clearTimeout(timer);
   }
 
+  /** Effective runtime, unless a fatal invalidation makes the launch selection stale by definition. */
+  private effectiveRuntime(): Runtime | undefined {
+    const conversation = this.conversation;
+    if (conversation?.invalidated) throw conversation.fatalError ?? new Block("runtime-invalidated", `${this.ref}: runtime invalidated`);
+    return conversation?.runtime ?? this.deps.runtime;
+  }
   private get children(): SubagentDeps {
     const { driver, semaphore, telemetry, sessions } = this.deps;
-    return { driver, semaphore, runtime: () => this.conversation?.runtime ?? this.deps.runtime, telemetry, sessions, warning: this.warning,
+    return { driver, semaphore, runtime: () => this.effectiveRuntime(), telemetry, sessions, warning: this.warning,
       launched: (role, runtime, label) => { this.launches.push({ role, runtime, label }); } };
   }
 
@@ -225,6 +234,7 @@ export class Agent {
       }
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
+        invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
         spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, ...(this.kind.skill ? { skills: [this.kind.skill] } : {}), system: `${prompts.protocol}\n\n${this.kind.prompt}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
@@ -235,12 +245,14 @@ export class Agent {
       let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
       let done = false;
       while (message !== undefined) {
+        if (this.fatal) throw this.fatal;
         this.exhausted = this.recoverySha = undefined;
         this.set("running");
         try {
           await this.submit(await this.conversation.run(message));
           if (this.final) { done = true; break; }
         } catch (error) {
+          if (this.fatal) throw this.fatal;
           // Budget exhaustion keeps the last response and partial work; Main may resume with a fresh budget.
           if (signal.aborted || this.conversation.disposed || !(error instanceof Block && (error.code === "turn-limit" || error.code === "time-limit"))) throw error;
           this.exhausted = errorText(error);
@@ -249,6 +261,7 @@ export class Agent {
         }
         const wasExhausted = this.exhausted !== undefined;
         message = await this.park();
+        if (this.fatal) throw this.fatal;
         // Main's first message after the review is its feedback: it opens the final revision.
         if (message !== undefined && this.review && !this.final && !wasExhausted) { this.final = true; message = `${message}\n\n${FINAL}`; }
       }

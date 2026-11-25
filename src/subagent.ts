@@ -79,7 +79,7 @@ export async function runSubagent<T extends TSchema>(deps: SubagentDeps, a: Assi
   let state: "done" | "failed" | "cancelled" = "failed";
   sessions?.set(a.key, {
     key: a.key, ref: a.ref, role: a.role, label: a.label, consequence: a.consequence,
-    runtime: () => conversation?.runtime, pending: () => conversation?.pendingChange,
+    runtime: () => conversation?.runtime, invalidated: () => conversation?.invalidated ?? false, pending: () => conversation?.pendingChange,
     cancel: async () => { telemetry?.state(a.key, "cancelling"); own.abort(new Block("cancelled", `${a.label} cancelled by Main`)); return `${a.label} cancelled`; },
     configure: (change) => {
       if (!conversation) throw new Block("busy", `${a.label} has no live session yet; try again once it is running`);
@@ -87,8 +87,10 @@ export async function runSubagent<T extends TSchema>(deps: SubagentDeps, a: Assi
     },
   });
   try {
-    const runtime = deps.runtime();
     release = await deps.semaphore.acquire(signal);
+    // Recheck inheritance at the actual launch: a waiting child must not start on a captured obsolete selection.
+    const runtime = deps.runtime();
+    signal.throwIfAborted();
     if (runtime) deps.launched?.(a.role, runtime, a.label);
     a.started?.();
     telemetry?.state(a.key, "running");

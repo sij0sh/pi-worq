@@ -68,7 +68,7 @@ test("adapter: installed by folder, imported lazily on first explicit request, p
   await install(agentDir, "pi", adapterSource(key));
   await install(agentDir, "Bad", adapterSource(key));
   const { records, problems } = discoverAdapters(agentDir);
-  assert.deepEqual(Object.keys(records).sort(), ["broken", "echo", "pi"]);
+  assert.deepEqual(Object.keys(records).sort(), ["broken", "claude-code", "echo", "pi"]);
   assert.match(problems.find((p) => p.path.endsWith("pi"))?.message ?? "", /shipped adapter/);
   assert.match(problems.find((p) => p.path.endsWith("Bad"))?.message ?? "", /lowercase/);
   assert.equal((globalThis as Record<string, unknown>)[key], undefined, "discovery imports nothing");
@@ -90,8 +90,8 @@ test("adapter: installed by folder, imported lazily on first explicit request, p
   // A failed optional adapter is isolated: its launch fails clearly, the picker skips it, others stay usable.
   await assert.rejects(resolveRuntime(driver, { sdk: "broken" }, signal), /sdk "broken" could not load: broken import/);
   const catalog = await driver.catalog!();
-  assert.deepEqual([...catalog.keys()], ["echo"], "pi (no host here) and broken are skipped, not fatal");
-  await assert.rejects(resolveRuntime(driver, { sdk: "nope" }, signal), /Unknown sdk "nope" \(installed: pi, broken, echo\)/);
+  assert.deepEqual([...catalog.keys()], ["claude-code", "echo"], "pi (no host here) and broken are skipped, not fatal");
+  await assert.rejects(resolveRuntime(driver, { sdk: "nope" }, signal), /Unknown sdk "nope" \(installed: pi, broken, claude-code, echo\)/);
 });
 
 test("a new folder package and a new adapter launch through worq_spawn and the CLI with no orchestration edits", async (t) => {

@@ -94,6 +94,10 @@ Read tools: `search` accepts a relative file or directory path; `read_file` acce
 
 Adding an agent = one package folder. Adding a harness = one adapter folder (`docs/sdk.md`). Neither changes Worq.
 
+### Claude Code (`claude-code`)
+
+Select it with `worq_spawn { kind, sdk: "claude-code", model? }`, `worq spawn <kind> --sdk claude-code`, or the `/worq` runtime step. It uses the signed-in Claude Code account (no API key required) and the optional `@anthropic-ai/claude-agent-sdk` dependency; without the package the SDK fails alone, never Pi or management. Worq replaces the system prompt, exposes only its prepared tools through a session-scoped MCP server, disables ambient settings/plugins/skills/slash commands, and refuses behavior-affecting managed policy before a worker starts. Main's Pi model is mapped only when it is a Claude-family reference; otherwise pass an explicit `model`. Live model switches are verified. Thinking is fail-closed: the pinned SDK does not report the applied effort, so Main's level is not inherited and Worq advertises no level control; an explicit level is refused before a slot is reserved. See `docs/sdk.md`.
+
 ## Config
 
 `<agentDir>/pi-worq.json` (usually `~/.pi/agent/pi-worq.json`). Optional; invalid keys fail with the key named.
@@ -128,7 +132,7 @@ On Linux, the CLI uses a Unix socket. State defaults to `$XDG_STATE_HOME/pi-worq
 
 Planning, execution, reviewer commands/services, artifacts, and the control CLI run on Linux and Windows. `observe_terminal` (automated PTY capture) remains Linux-only; use Linux or WSL if a review needs it. On Windows, command tools run `.exe` programs directly, not `.cmd` or `.bat` shims. For npm-based checks use `node` with a CLI JavaScript entry point (e.g. `node node_modules/typescript/bin/tsc`). Repo file tools use `/`-separated relative paths on both platforms.
 
-One SDK ships (Pi); others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Pi sessions are not a security sandbox. Reviewer and agent judgement quality is not proven by the test suite, which uses a scripted driver.
+Two SDKs ship: Pi (`pi`, the default) and Claude Code (`claude-code`, optional, loaded through `@anthropic-ai/claude-agent-sdk` only when selected). Any valid installed adapter wins its own lowercase id, including `claude-code` and `claude`; `pi` is the only reserved id. Others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Neither SDK session is an OS sandbox; Claude isolation is a Worq tool/settings boundary. Reviewer and agent judgement quality is not proven by the test suite, which uses scripted drivers.
 
 ## Develop
 

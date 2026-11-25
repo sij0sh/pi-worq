@@ -202,6 +202,7 @@ export class Worq {
   /** Models the session may switch to: same harness, current first. */
   async choices(target: string): Promise<ModelChoice[]> {
     const session = this.session(target);
+    if (session.invalidated?.()) throw new Block("runtime-invalidated", `${session.label}: its runtime is invalidated; restart the session`);
     const runtime = session.runtime() ?? { ...MAIN };
     await this.deps.driver.load?.(runtime.sdk);
     const current = { ...runtime, model: runtime.model ?? this.deps.driver.defaultModel?.(runtime.sdk) };

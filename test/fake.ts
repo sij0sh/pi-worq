@@ -19,6 +19,8 @@ export interface Turn {
   system: string;
   /** Call a tool like the SDK would: errors come back as text, not exceptions. */
   tool(name: string, params: object): Promise<string>;
+  /** Simulate an adapter's awaited pre-request admission for a continuation. */
+  admit(): Promise<boolean>;
   steered: string[];
 }
 export type Script = (turn: Turn) => Promise<void> | void;
@@ -39,6 +41,12 @@ export interface FakeOptions {
   aborts?: { n: number };
   /** Count of prompt() calls. */
   calls?: { n: number };
+  /** Adapter opts into awaited request admission and asks before each scripted request. */
+  admission?: boolean;
+  /** Count of admitted outbound requests. */
+  requests?: { n: number };
+  /** The adapter settles a terminal submit as part of the tool call, so there is no live turn to abort. */
+  earlyTerminate?: boolean;
 }
 export const FULL_CAPS: Capabilities = {
   switchModel: true,
@@ -68,7 +76,8 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
     let failures = options.failures ?? 0;
     const controller = new AbortController();
     const handle: CoreHandle = {
-      async prompt(first) {
+      async prompt(first, promptSignal) {
+        const signal = promptSignal ?? controller.signal;
         if (options.calls) options.calls.n++;
         if (options.prompts) options.prompts.push(first);
         // A request that failed before any work: no turn, no tool call.
@@ -81,17 +90,30 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
           for (let text: string | undefined = first; text !== undefined; text = steered.shift()) {
             if (!initial && options.prompts) options.prompts.push(text);
             initial = false;
+            if (options.admission) {
+              const decision = await spec.admitRequest?.(signal);
+              if (decision && !decision.allowed) { stopRequested = true; break; }
+              if (options.requests) options.requests.n++;
+            }
             spec.emit({ type: "turn" });
             if (stopRequested) break;
             const work = Promise.resolve(script?.({
               spec, text, system, steered,
+              async admit() {
+                if (!options.admission) return true;
+                const decision = await spec.admitRequest?.(signal);
+                if (!decision) return true;
+                if (!decision.allowed) { stopRequested = true; return false; }
+                if (options.requests) options.requests.n++;
+                return true;
+              },
               async tool(name, params) {
                 const found = spec.tools.find((t) => t.name === name);
                 if (!found) return `No tool ${name}`;
                 const fail = (message: string) => { spec.emit({ type: "tool-error", name, message }); options.toolErrors?.push({ name, message }); return `Error: ${message}`; };
                 if (!Value.Check(found.parameters, params)) return fail(`Invalid ${name} arguments`);
                 try {
-                  const out = await found.run(params, controller.signal);
+                  const out = await found.run(params, AbortSignal.any([controller.signal, signal]));
                   if (typeof out !== "string" && out.image) options.images?.push(out.image);
                   return typeof out === "string" ? out : out.text;
                 }

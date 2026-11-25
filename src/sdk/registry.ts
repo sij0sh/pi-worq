@@ -8,14 +8,19 @@ import { contained, exists, outsideCheckout } from "../runtime/skills.ts";
 import { assertRuntime, supportedThinking, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SDKAdapter, type SessionEvent } from "./contract.ts";
 import type { PiHost } from "./pi.ts";
 
-/** Explicit host dependencies. Only the shipped Pi adapter needs any; installed adapters get `AdapterContext`. */
-export interface HostServices { pi?: PiHost }
+/** Explicit host dependencies. Only the shipped adapters need any; installed adapters get `AdapterContext`. */
+export interface HostServices {
+  pi?: PiHost;
+  /** Provider-neutral accessor for Main's live Pi selection, for a built-in adapter's Main-derived defaults. */
+  main?(): { model?: string; thinking?: string };
+}
 
 /** One SDK: a lazy loader. Discovery never imports it. */
 export interface SDKRecord {
   load(host: HostServices): Promise<SDKAdapter>;
 }
 export const PI: SDKRecord = { load: async (host) => (await import("./pi.ts")).piAdapter(host.pi) };
+export const CLAUDE: SDKRecord = { load: async (host) => (await import("./claude.ts")).claudeAdapter(host) };
 
 /** What an installed adapter's factory receives. */
 export interface AdapterContext { id: string; dir: string; agentDir: string }
@@ -36,8 +41,10 @@ export function discoverAdapters(agentDir: string): { records: Record<string, SD
   const records: Record<string, SDKRecord> = { pi: PI };
   const problems: { path: string; message: string }[] = [];
   const base = join(agentDir, "worq", "adapters");
+  /** The built-in Claude record is a fallback: a valid installed adapter with the same id wins it. */
+  const builtins = (): Record<string, SDKRecord> => Object.hasOwn(records, "claude-code") ? records : { ...records, "claude-code": CLAUDE };
   try {
-    if (!exists(base)) return { records, problems };
+    if (!exists(base)) return { records: builtins(), problems };
     const root = realpathSync(base);
     outsideCheckout(root);
     for (const id of readdirSync(root).sort()) {
@@ -56,7 +63,7 @@ export function discoverAdapters(agentDir: string): { records: Record<string, SD
       } catch (error) { problems.push({ path, message: errorText(error) }); }
     }
   } catch (error) { problems.push({ path: base, message: errorText(error) }); }
-  return { records, problems };
+  return { records: builtins(), problems };
 }
 async function importAdapter(id: string, file: string, dir: string, agentDir: string): Promise<SDKAdapter> {
   const module = await import(pathToFileURL(file).href) as { default?: Partial<AdapterFactory> };
@@ -72,7 +79,7 @@ async function importAdapter(id: string, file: string, dir: string, agentDir: st
  * The core's single Driver. Imports each SDK lazily by id (once, in-flight loads shared), judges runtimes
  * against the SDK's capabilities and prepares the shared environment (AGENTS.md, skill index + `skill` tool).
  */
-export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI }): Promise<Driver> {
+export async function createDriver(host: HostServices, resources: Resources = EMPTY, sdks: Record<string, SDKRecord> = { pi: PI, "claude-code": CLAUDE }): Promise<Driver> {
   const loading = new Map<string, Promise<SDKAdapter>>();
   const adapters = new Map<string, SDKAdapter>();
   const installed = () => Object.keys(sdks).sort((a, b) => a === "pi" ? -1 : b === "pi" ? 1 : a.localeCompare(b));
@@ -153,7 +160,7 @@ export async function createDriver(host: HostServices, resources: Resources = EM
         return next;
       };
       return {
-        prompt: (text) => handle.prompt(text),
+        prompt: (text, signal) => handle.prompt(text, signal),
         steer: handle.steer && ((text) => handle.steer!(text)),
         get streaming() { return handle.streaming; },
         get runtime() { return current; },

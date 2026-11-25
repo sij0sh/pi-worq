@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Static, TSchema } from "typebox";
 import { observe, type Observation } from "./telemetry.ts";
 import { Block, errorText, parse } from "./contracts.ts";
-import { tool, type CoreHandle, type Driver, type Runtime, type RuntimeChange, type SessionEvent, type Tool } from "./sdk/contract.ts";
+import { tool, type CoreHandle, type Driver, type RequestDecision, type Runtime, type RuntimeChange, type SessionEvent, type Tool } from "./sdk/contract.ts";
 
 export const NUDGE = "You ended your turn without calling submit. Re-ask your recursive question: if consequential work remains within your authority, do it; otherwise call submit now.";
 
@@ -20,6 +20,8 @@ export interface SessionControl {
   /** What cancelling this session does, shown before confirmation. */
   consequence: string;
   runtime(): Runtime | undefined;
+  /** A fatal runtime invalidation: no live runtime and no resume. */
+  invalidated?(): boolean;
   pending(): RuntimeChange | undefined;
   cancel(): Promise<string>;
   configure(change: RuntimeChange): Promise<"applied" | "queued">;
@@ -51,6 +53,8 @@ export interface ConversationOptions<T extends TSchema> {
   warning?: (message: string) => void;
   /** Open work (delegations) the session must wait for before it may stop. */
   pending?: () => number;
+  /** A fatal, backend-neutral runtime invalidation. Wakes a parked owner; the session can never run again. */
+  invalidated?(error: Block): void;
 }
 
 /**
@@ -82,6 +86,15 @@ export class Conversation<T extends TSchema> {
   /** Covers SDK preflight as well as streaming and tools. */
   private prompting = false;
   private applying: Promise<void> = Promise.resolve();
+  /** Serializes admission decisions so concurrent or stale callbacks cannot spend one token twice. */
+  private admission: Promise<unknown> = Promise.resolve();
+  /** The current prompt's identity and cancellation scope. */
+  private current?: { signal: AbortSignal; controller: AbortController };
+  /** A fatal, backend-neutral configuration invalidation: the handle can never serve another request. */
+  private fatal?: Block;
+  private readonly invalidation = new AbortController();
+  /** True for an adapter that opted into awaited pre-request admission. */
+  private awaitAdmission = false;
   /** Last completed assistant text: what survives budget exhaustion. */
   last = "";
 
@@ -93,6 +106,9 @@ export class Conversation<T extends TSchema> {
   get streaming() { return this.handle?.streaming ?? false; }
   /** Runtime in effect, else the one requested at launch. */
   get runtime(): Runtime | undefined { return this.handle?.runtime ?? this.options.spec.runtime; }
+  /** A fatal configuration invalidation is latched for the rest of this session's life. */
+  get invalidated() { return this.fatal !== undefined; }
+  get fatalError() { return this.fatal; }
   get pendingChange(): RuntimeChange | undefined { return this.change && { ...this.change }; }
   private get ended() { return this.closed || this.options.signal.aborted; }
 
@@ -108,6 +124,7 @@ export class Conversation<T extends TSchema> {
    * otherwise before the next model request, or when the prompt settles. Never interrupts a tool.
    */
   async configure(change: RuntimeChange): Promise<"applied" | "queued"> {
+    if (this.fatal) throw this.fatal;
     if (this.ended) throw new Block("ended", `${this.options.spec.name} has ended`);
     if (this.handle && !this.handle.configure) throw new Block("capability", `${this.options.spec.name}: this harness cannot change a live session`);
     const next = { ...this.change, ...change };
@@ -132,6 +149,11 @@ export class Conversation<T extends TSchema> {
       this.note("↻ switching");
       try { await handle.configure(change); }
       catch (error) {
+        // A fatal invalidation is not an ordinary refusal: latch it and abort this conversation's live work.
+        if (error instanceof Block && error.code === "runtime-invalidated") {
+          this.invalidate(error);
+          throw error;
+        }
         this.options.spec.log(`runtime change failed: ${errorText(error)}`);
         if (interactive) throw error;
         this.options.warning?.(`${this.options.spec.name}: runtime change failed: ${errorText(error)}`);
@@ -140,9 +162,52 @@ export class Conversation<T extends TSchema> {
     this.applying = applying.catch(() => {});
     return applying;
   }
-  private async prompt(handle: CoreHandle, text: string) {
+  /** Latch a backend-neutral fatal runtime invalidation; every caller and future run sees it. */
+  private invalidate(error: Block) {
+    if (this.fatal) return;
+    this.fatal = error;
+    this.change = undefined;
+    this.note(undefined);
+    this.options.spec.log(`runtime invalidated: ${errorText(error)}`);
+    // Show unavailable, not stale settings, in the dock and inspector.
+    observe(this.options.spec.observe, { setup: { model: undefined, thinking: undefined, skills: [] } });
+    this.invalidation.abort(error);
+    this.options.invalidated?.(error);
+  }
+  /**
+   * One awaited admission decision for an opted-in adapter. The first request consumes the token `run` already
+   * charged; each continuation acquires one turn or aborts the invocation budget with `turn-limit`.
+   * Decisions are serialized, prompt identity is rechecked, and queued configuration is applied first.
+   */
+  private admit(signal: AbortSignal): Promise<RequestDecision> {
+    const decide = async (): Promise<RequestDecision> => {
+      const current = this.current;
+      const refuse = (reason: unknown): RequestDecision => ({ allowed: false, reason });
+      if (this.fatal) return refuse(this.fatal);
+      if (!current || current.signal !== signal || signal.aborted || this.ended || !this.active) {
+        return refuse(signal.aborted ? signal.reason : new Block("stale", `${this.options.spec.name}: stale request admission`));
+      }
+      if (this.prepaid) this.prepaid = false;
+      else {
+        const exhausted = this.spend();
+        if (exhausted) return refuse(exhausted);
+      }
+      // A safe boundary: queued model/thinking changes apply before the request is released.
+      try { await this.flush(signal); }
+      catch (error) { return refuse(error); }
+      if (this.fatal) return refuse(this.fatal);
+      if (!this.current || this.current.signal !== signal || signal.aborted || this.ended) {
+        return refuse(signal.aborted ? signal.reason : new Block("stale", `${this.options.spec.name}: stale request admission`));
+      }
+      return { allowed: true };
+    };
+    const answer = this.admission.then(decide, decide);
+    this.admission = answer.catch(() => {});
+    return answer;
+  }
+  private async prompt(handle: CoreHandle, text: string, signal: AbortSignal) {
     this.prompting = true;
-    try { return await handle.prompt(text); }
+    try { return await handle.prompt(text, signal); }
     finally { this.prompting = false; }
   }
 
@@ -162,15 +227,19 @@ export class Conversation<T extends TSchema> {
       }
     });
   }
-  private charge() {
+  /** Acquire one turn, or abort this invocation's budget with the existing `turn-limit` reason. */
+  private spend(): Block | undefined {
     const { spec, turns, warning } = this.options;
     if (this.turns >= turns) {
-      this.budget.abort(new Block("turn-limit", `${spec.name} reached its turn limit (${turns})`));
-      return;
+      const exhausted = new Block("turn-limit", `${spec.name} reached its turn limit (${turns})`);
+      this.budget.abort(exhausted);
+      return exhausted;
     }
     this.turns++;
     if (turns - this.turns === 1) warning?.(`${spec.name}: one further turn remains; summarize evidence and unfinished work`);
+    return undefined;
   }
+  private charge() { this.spend(); }
   /** The core validates every tool call against its schema, so adapters only dispatch. */
   private wrap(target: Tool): Tool {
     return {
@@ -195,6 +264,8 @@ export class Conversation<T extends TSchema> {
         if (event.completed && event.text.trim()) this.last = event.text.slice(-8000);
         return;
       case "turn":
+        // An opted-in adapter's turns are observational only: admission already charged or refused the request.
+        if (this.awaitAdmission) return;
         if (!this.prepaid) this.charge();
         this.prepaid = false;
     }
@@ -205,11 +276,14 @@ export class Conversation<T extends TSchema> {
     await driver.load?.(spec.runtime?.sdk ?? "pi");
     const caps = driver.capabilities(spec.name, spec.runtime);
     if (caps.context.system !== "replace" || caps.context.ambientInstructions) throw new Block("capability", `${spec.name}: isolated context required`);
+    this.awaitAdmission = caps.requestAdmission === "awaited";
     const handle = await driver.open({
       id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.options.signal,
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
-      beforeRequest: (signal) => this.flush(signal),
+      ...(this.awaitAdmission
+        ? { admitRequest: (signal: AbortSignal) => this.admit(signal) }
+        : { beforeRequest: (signal: AbortSignal) => this.flush(signal) }),
     });
     // An open that settles after cancellation or dispose must not leave a live session behind.
     if (this.ended) { handle.dispose(); throw this.options.signal.reason ?? new Block("cancelled", `${spec.name} closed while opening`); }
@@ -247,13 +321,14 @@ export class Conversation<T extends TSchema> {
   async run(first: string): Promise<Static<T>> {
     const caller = this.options.signal;
     caller.throwIfAborted();                // a caller abort never prompts
+    if (this.fatal) throw this.fatal;
     if (this.closed) throw new Block("ended", `${this.options.spec.name} has ended`);
     this.result = this.rejected = undefined;
     this.turns = 0;
     this.prepaid = false;
     this.remaining = this.options.minutes * 60_000;
     this.budget = new AbortController();
-    const gate = this.gate = AbortSignal.any([caller, this.budget.signal]);
+    const gate = this.gate = AbortSignal.any([caller, this.budget.signal, this.invalidation.signal]);
     this.active = true;
     this.resume();
     const aborted = new Promise<never>((_, reject) => {
@@ -274,9 +349,15 @@ export class Conversation<T extends TSchema> {
         await this.flush();               // safe boundary: no prompt in flight
         gate.throwIfAborted();
         this.prepaid = true;
-        const turn = this.prompt(handle, next);
+        // Fresh identity per prompt: stale adapter callbacks can never authorize or spend for a later prompt.
+        const controller = new AbortController();
+        const promptSignal = AbortSignal.any([gate, controller.signal]);
+        this.current = { signal: promptSignal, controller };
+        const turn = this.prompt(handle, next, promptSignal);
         void turn.catch(() => {});        // an abandoned promise can still reject
-        const outcome = await Promise.race([turn, aborted]);
+        let outcome: Awaited<typeof turn>;
+        try { outcome = await Promise.race([turn, aborted]); }
+        finally { this.current = undefined; }
         // Also flush when no further SDK request follows (e.g. submission or waiting for PQs).
         await this.flush();
         if (this.result !== undefined) return this.result;
@@ -324,5 +405,16 @@ export class Conversation<T extends TSchema> {
     return stopped && !handle.streaming;
   }
   get disposed() { return this.closed; }
-  dispose() { this.closed = true; if (this.change) this.note(undefined); this.change = undefined; clearTimeout(this.softTimer); clearTimeout(this.timer); this.poke(); this.handle?.dispose(); this.handle = undefined; }
+  dispose() {
+    this.closed = true;
+    this.current?.controller.abort(new Block("ended", `${this.options.spec.name} has ended`));
+    this.current = undefined;
+    if (this.change) this.note(undefined);
+    this.change = undefined;
+    clearTimeout(this.softTimer);
+    clearTimeout(this.timer);
+    this.poke();
+    this.handle?.dispose();
+    this.handle = undefined;
+  }
 }

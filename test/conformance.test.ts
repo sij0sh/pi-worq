@@ -1,231 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Type } from "typebox";
 import { MAIN, } from "../src/runtime/config.ts";
-import { Block, obj, text } from "../src/contracts.ts";
+import { Block, text } from "../src/contracts.ts";
 import { EMPTY, type Resources } from "../src/runtime/resources.ts";
-import { assertRuntime, type Capabilities, type Driver, type Handle, type Runtime, type SDKAdapter, type SessionSpec, type Spec, type Tool } from "../src/sdk/contract.ts";
+import { type Capabilities, type Driver, type Handle, type Runtime, type SDKAdapter, type SessionSpec, type Spec } from "../src/sdk/contract.ts";
 import { createDriver, type SDKRecord } from "../src/sdk/registry.ts";
 import { piAdapter, thinkingLevels } from "../src/sdk/pi.ts";
-import { Conversation, NUDGE } from "../src/session.ts";
-import { fakeHarness, FULL_CAPS, MINIMAL_CAPS, type FakeOptions, type Script } from "./fake.ts";
+import { Conversation } from "../src/session.ts";
+import { fakeHarness, FULL_CAPS, type FakeOptions, type Script } from "./fake.ts";
 
-const finish = { description: "Submit.", schema: obj({ value: text(4000) }) };
-const tools = (): Tool[] => [
-  { name: "echo", description: "Echo.", parameters: obj({ value: text(20) }), run: () => ({ text: "ok", image: { mimeType: "image/png", data: "aGk=" } }) },
-  { name: "strict", description: "Strict.", parameters: obj({ n: Type.Integer() }), run: () => "ok" },
-  { name: "boom", description: "Boom.", parameters: obj({}), run: () => { throw new Block("boom", "boom"); } },
-];
-
-/** Every case drives the adapter through one scripted conversation; the caller's make() supplies the script. */
-function open(driver: Driver, extra: { minutes?: number; turns?: number; signal?: AbortSignal; logs?: string[]; system?: string } = {}) {
-  return new Conversation({
-    driver,
-    signal: extra.signal ?? new AbortController().signal,
-    turns: extra.turns ?? 10,
-    minutes: extra.minutes ?? 1,
-    finish,
-    spec: { name: "x", cwd: process.cwd(), system: extra.system ?? "SYSTEM", tools: tools(), log: (line) => { extra.logs?.push(line); } },
-  });
-}
-/** The budget timer is unref'd (right for production); keep the loop alive while a case waits on it. */
-async function guarded<T>(work: Promise<T>): Promise<T> {
-  const keep = setTimeout(() => {}, 10_000);
-  try { return await work; } finally { clearTimeout(keep); }
-}
-async function until(check: () => boolean, deadline = 2000) {
-  const end = Date.now() + deadline;
-  while (!check()) {
-    if (Date.now() > end) throw new Error("timed out waiting for the adapter");
-    await sleep(5);
-  }
-}
-
-
-/**
- * The exported conformance suite. A new adapter is proven by passing it for MINIMAL and FULL:
- * FULL proves the required capability set is sufficient, MINIMAL proves the denials are honest.
- * Agent-free: a Driver plus a signal, no workspace. `options` is the adapter's mutable recording
- * surface (abort count, image payloads, reported tool errors); the caller's make() must share it.
- */
-export async function adapterConformance(name: string, make: (caps: Capabilities) => Driver, options: FakeOptions = {}): Promise<void> {
-  await assert.rejects(open(make(MINIMAL_CAPS)).run("context"), /isolated context required/);
-  for (const caps of [{ ...MINIMAL_CAPS, context: FULL_CAPS.context }, FULL_CAPS]) await run(name, caps, make, options);
-}
-
-async function run(name: string, caps: Capabilities, make: (caps: Capabilities) => Driver, options: FakeOptions): Promise<void> {
-  const aborts = () => options.aborts?.n ?? 0;
-
-
-  // tools, images, argument validation, a thrown Block
-  {
-    const images = (options.images ??= []);
-    const errors = (options.toolErrors ??= []);
-    const before = images.length;
-    const c = open(make(caps));
-    assert.deepEqual(await c.run("tools"), { value: "tools" });
-    assert.equal(images.length, before + 1, `${name}: an image tool output reaches the model`);
-    assert.ok(errors.some((e) => e.name === "strict"), `${name}: invalid parameters are reported as tool-error events`);
-  }
-
-  // finish: a rejected submission is explained, then the second failure is fatal
-  {
-    const prompts = (options.prompts ??= []);
-    const c = open(make(caps));
-    const before = prompts.length;
-    await assert.rejects(c.run("reject"), /submission rejected/);
-    assert.match(prompts[before + 1], /Your submit call was rejected/, `${name}: a rejected submit gets the correction prompt`);
-  }
-  // finish: never submitting gets exactly one nudge
-  {
-    const prompts = (options.prompts ??= []);
-    const c = open(make(caps));
-    const before = prompts.length;
-    await assert.rejects(c.run("refuse"), /ended without calling submit/);
-    assert.deepEqual(prompts.slice(before), ["refuse", NUDGE], `${name}: exactly one settlement nudge`);
-  }
-
-  // end of run — own settle: no abort at all
-  {
-    const before = aborts();
-    const c = open(make(caps));
-    assert.deepEqual(await c.run("submit"), { value: "one" });
-    assert.equal(aborts(), before, `${name}: a turn that settles after a submission calls abort() zero times`);
-  }
-
-  // end of run — budget: submit-then-hang returns the value after one bounded stop()
-  {
-    const before = aborts();
-    const c = open(make(caps), { minutes: 0.02 });
-    const started = Date.now();
-    assert.deepEqual(await guarded(c.run("hang-after-submit")), { value: "kept" });
-    assert.equal(aborts(), before + 1, `${name}: a budget abort stops the turn once`);
-    assert.ok(Date.now() - started < 5000, `${name}: the stop is bounded`);
-  }
-  // end of run — budget: a pre-spent turn allowance admits no prompt
-  {
-    const c = open(make(caps), { turns: 0 });
-    await assert.rejects(c.run("submit"), /turn limit/);
-  }
-  // end of run — budget racing a settle
-  {
-    const before = aborts();
-    const c = open(make(caps), { minutes: 0.001 });
-    assert.deepEqual(await guarded(c.run("race")), { value: "raced" }, `${name}: a budget abort racing a settle returns the submission`);
-    assert.equal(aborts(), before + 1, `${name}: the racing abort stops the turn once`);
-  }
-  // end of run — per invocation: a spent budget fails that run without another prompt; the next run gets a fresh one
-  {
-    const prompts = (options.prompts ??= []);
-    const c = open(make(caps), { turns: 1 });
-    const before = prompts.length;
-    await assert.rejects(c.run("refuse"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
-    assert.deepEqual(prompts.slice(before), ["refuse"], `${name}: a spent budget issues no further prompt`);
-    assert.deepEqual(await c.run("submit"), { value: "one" }, `${name}: a later invocation has a fresh budget`);
-  }
-  // end of run — caller abort: its reason wins, one stop, no result
-  {
-    const before = aborts();
-    const controller = new AbortController();
-    const c = open(make(caps), { signal: controller.signal });
-    const running = c.run("hang-after-submit");
-    await sleep(50);
-    controller.abort(new Block("cancelled", "stopped by the test"));
-    await assert.rejects(running, /stopped by the test/);
-    assert.equal(aborts(), before + 1, `${name}: a caller abort stops the in-flight turn once`);
-  }
-  // end of run — caller abort racing a prompt that settles with a submission
-  {
-    const controller = new AbortController();
-    const c = open(make(caps), { signal: controller.signal });
-    const running = c.run("slow");
-    await sleep(5);
-    controller.abort(new Block("cancelled", "raced by the test"));
-    await assert.rejects(running, /raced by the test/);
-  }
-
-  // abort duty: abort() settles the in-flight prompt and clears streaming
-  {
-    const spec: Spec = { id: "duty", name: "x", cwd: process.cwd(), system: "S", tools: [], emit() {}, signal: new AbortController().signal };
-    const handle = await make(caps).open(spec);
-    const running = handle.prompt("hang");
-    await until(() => handle.streaming);
-    await handle.abort();
-    const settled = await Promise.race([running.then(() => true), sleep(5500).then(() => false)]);
-    assert.ok(settled, `${name}: abort() settles the in-flight prompt within the stop bound`);
-    assert.equal(handle.streaming, false, `${name}: abort() clears streaming`);
-    handle.dispose();
-  }
-
-  // reuse: each round returns its own submission
-  {
-    const c = open(make(caps));
-    assert.deepEqual(await c.run("submit"), { value: "one" });
-    assert.deepEqual(await c.run("submit-two"), { value: "two" }, `${name}: a second run returns its own submission`);
-  }
-
-  // steer: a steered message arrives inside the run
-  {
-    const logs: string[] = [];
-    const c = open(make(caps), { logs });
-    const running = c.run("wait");
-    await until(() => c.streaming);
-    c.deliver("main");
-    assert.deepEqual(await running, { value: "ok" });
-    assert.equal(logs.filter((line) => line.includes("message queued")).length, 0, `${name}: a steered message is not queued`);
-  }
-
-  // budgets
-  {
-    const c = open(make(caps), { turns: 1 });
-    await assert.rejects(c.run("refuse"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
-  }
-  {
-    const c = open(make(caps), { minutes: 0.02 });
-    await assert.rejects(guarded(c.run("hang")), (error: unknown) => error instanceof Block && error.code === "time-limit");
-  }
-
-  // provider preflight failures are surfaced
-  await assert.rejects(open(make(caps)).run("fail"), (error: unknown) => error instanceof Block && error.code === "model");
-
-  // thinking: the list is data on the adapter, empty only without level control
-  {
-    const levels = make(caps).capabilities("x").thinking;
-    assert.equal(levels.length === 0, !caps.switchModel && caps.thinking.length === 0, `${name}: thinking levels are exposed as data`);
-  }
-
-  // denial paths: a capability-minimal adapter must refuse what it cannot do, naming the config path
-  {
-    const preset = (extra: Partial<Runtime>): Runtime => ({ name: "plan", sdk: name, path: "/plan", via: "/plan", ...extra });
-    const iso = { ...caps, context: FULL_CAPS.context };
-    if (caps.thinking.length === 0) {
-      assert.throws(() => assertRuntime(preset({ thinking: "high" }), iso),
-        (error: unknown) => error instanceof Block && error.code === "capability" && /\/plan\/thinking/.test(error.message),
-        `${name}: a configured level without level control is denied naming the preset path`);
-    } else {
-      assert.doesNotThrow(() => assertRuntime(preset({ thinking: "high" }), iso), `${name}: a supported level is accepted`);
-    }
-  }
-
-  // context
-  {
-    const logs: string[] = [];
-    const c = open(make(caps), { logs, system: "SYSTEM-X" });
-    const result = await c.run("context");
-    assert.equal(result.value, "SYSTEM-X", `${name}: an isolating harness sees exactly spec.system`);
-  }
-
-  // identity
-  {
-    const driver = make(caps);
-    const first = await open(driver).run("id");
-    const second = await open(driver).run("id");
-    assert.notEqual(first.value, second.value, `${name}: each Conversation gets its own spec.id`);
-    assert.ok(first.value.length > 10, `${name}: spec.id is a real identity`);
-  }
-}
-
+import { adapterConformance, finish, open, tools, until } from "./conformance-suite.ts";
 /** A scripted adapter response table shared by the MINIMAL and FULL runs. */
 export const script: Script = async (turn) => {
   const { text: prompt } = turn;
@@ -240,6 +25,11 @@ export const script: Script = async (turn) => {
   if (prompt.startsWith("Your submit call was rejected")) { await turn.tool("submit", { value: "" }); return; }
   if (prompt === "reject") { await turn.tool("submit", { value: "" }); return; }
   if (prompt === "refuse") return;
+  if (prompt === "one-turn") {
+    await turn.tool("echo", { value: "hi" });
+    if (await turn.admit()) await turn.tool("submit", { value: "leak" });
+    return;
+  }
   if (prompt === "submit") { await turn.tool("submit", { value: "one" }); return; }
   if (prompt === "submit-two") { await turn.tool("submit", { value: "two" }); return; }
   if (prompt === "hang") return new Promise(() => {});
@@ -257,6 +47,18 @@ const make = (caps: Capabilities) => fakeHarness(caps, { x: script }, record);
 
 test("conformance: MINIMAL and FULL adapters", async () => {
   await adapterConformance("adapter", make, record);
+});
+
+test("conformance: awaited admission makes exactly one request, stops cleanly at turn-limit, then reuses a fresh budget", async () => {
+  const options: FakeOptions = { admission: true, requests: { n: 0 }, prompts: [] };
+  const caps: Capabilities = { ...FULL_CAPS, requestAdmission: "awaited" };
+  const driver = fakeHarness(caps, { x: script }, options);
+  const c = open(driver, { turns: 1 });
+  await assert.rejects(c.run("one-turn"), (error: unknown) => error instanceof Block && error.code === "turn-limit");
+  assert.equal(options.requests!.n, 1, "the first response's tool call is not followed by a continuation");
+  assert.equal(c.streaming, false, "the refused continuation leaves the session idle");
+  assert.deepEqual(await c.run("submit"), { value: "one" }, "the same handle runs again with a fresh budget");
+  assert.equal(options.requests!.n, 2, "each invocation released exactly its own first request");
 });
 
 test("conformance: a throwing steer downgrades to the inbox with one log line", async () => {

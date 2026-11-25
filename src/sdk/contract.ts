@@ -39,6 +39,11 @@ export interface Capabilities {
   context: { system: "replace" | "append"; ambientInstructions: boolean };
   /** What one `turn` event counts: a model request, or a whole prompt when requests are invisible. */
   turnUnit: "request" | "prompt";
+  /**
+   * "awaited": the adapter calls `SessionSpec.admitRequest` once immediately before every actual outgoing
+   * model request and releases nothing until allowed. `turn` events are observational only for core charging.
+   */
+  requestAdmission?: "awaited";
 }
 
 /** One normalized event stream from adapter to core. */
@@ -66,6 +71,11 @@ export interface Spec {
   emit(event: SessionEvent): void;
   /** Optional safe boundary before a model request, including tool continuations within a prompt. */
   beforeRequest?(signal: AbortSignal): Promise<void>;
+  /**
+   * Awaited request admission, for adapters declaring `requestAdmission: "awaited"`. Called once immediately
+   * before every actual outgoing model request; a refusal means no request is released.
+   */
+  admitRequest?(signal: AbortSignal): Promise<RequestDecision>;
   /** Aborts session opening; an adapter must not leave a live session behind it. */
   signal: AbortSignal;
 }
@@ -80,10 +90,12 @@ export interface SessionSpec extends Spec {
 export interface RuntimeChange { model?: string; thinking?: string }
 
 export type PromptOutcome = "completed" | "preflight-failed" | "failed" | "aborted";
+/** A backend-neutral answer to one pre-request admission question. */
+export type RequestDecision = { allowed: true } | { allowed: false; reason: unknown };
 /** One live SDK session. */
 export interface Handle {
-  /** Resolves when the session goes idle. May assume the handle is idle. */
-  prompt(text: string): Promise<PromptOutcome>;
+  /** Resolves when the session goes idle. May assume the handle is idle. The signal is prompt-scoped. */
+  prompt(text: string, signal?: AbortSignal): Promise<PromptOutcome>;
   /** Optional: deliver into the running turn; throws when it cannot. Absent → the core queues. */
   steer?(text: string): Promise<void>;
   readonly streaming: boolean;
