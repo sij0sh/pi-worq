@@ -78,6 +78,9 @@ export function workerEnv(source: NodeJS.ProcessEnv = process.env): Record<strin
   for (const [key, value] of Object.entries(source)) if (value !== undefined && keep.has(key)) env[key] = value;
   env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
   env.CLAUDE_CODE_MAX_RETRIES = "0";
+  // The pin has separate same-model refusal retry and fallback-model controls.
+  env.CLAUDE_CODE_DISABLE_REFUSAL_RETRY = "1";
+  env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK = "1";
   env.DISABLE_TELEMETRY = "1";
   env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   env.ENABLE_TOOL_SEARCH = "false";
@@ -303,8 +306,10 @@ export function claudeAdapter(host: HostServices = {}, injected?: ClaudeSdk): SD
     const session = worker(api, spec, {
       UserPromptSubmit: hook(async (input, _, { signal }) => {
         const turn = active, data = record(input);
+        // The pinned worker passes the whole prompt trimmed to UserPromptSubmit. Do not
+        // normalize the hook payload, change the submitted text, or ignore interior whitespace.
         if (!ready || !turn || turn.entered || !usable(turn, signal) || data?.hook_event_name !== "UserPromptSubmit"
-          || data.prompt !== turn.text || data.permission_mode !== "dontAsk" || !string(data.session_id) || !string(data.prompt_id)
+          || data.prompt !== turn.text.trim() || data.permission_mode !== "dontAsk" || !string(data.session_id) || !string(data.prompt_id)
           || data.agent_id !== undefined || data.agent_type !== undefined
           || (data.source !== undefined && data.source !== "sdk" && data.source !== "user")) return refuse(turn);
         turn.sessionId = string(data.session_id);

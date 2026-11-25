@@ -81,6 +81,7 @@ test("Claude SDK 0.3.332: native conversation, loopback-only provider", { timeou
   const unexpected: string[] = [];
   let respond = (_request: WireRequest, _index: number): ToolCall[] => [];
   let httpError: number | undefined;
+  let textStop: { index: number; reason: string } | undefined;
   let wireID = 0;
   const recorder = createServer(async (req, res) => {
     try {
@@ -106,8 +107,14 @@ test("Claude SDK 0.3.332: native conversation, loopback-only provider", { timeou
         event("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
         event("content_block_stop", { index });
       });
+      const stop = textStop?.index === requests.length ? textStop.reason : undefined;
+      if (textStop && !calls.length) {
+        event("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+        event("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Native stop probe response." } });
+        event("content_block_stop", { index: 0 });
+      }
       await sleep(20);
-      event("message_delta", { delta: { stop_reason: calls.length ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: 12 } });
+      event("message_delta", { delta: { stop_reason: stop ?? (calls.length ? "tool_use" : "end_turn"), stop_sequence: null }, usage: { output_tokens: 12 } });
       event("message_stop"); res.end();
     } catch { unexpected.push("invalid provider request"); res.writeHead(500).end(); }
   });
@@ -133,6 +140,8 @@ test("Claude SDK 0.3.332: native conversation, loopback-only provider", { timeou
       CLAUDE_CODE_MANAGED_SETTINGS_PATH: managed,
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: env.CLAUDE_CODE_DISABLE_AUTO_MEMORY,
       CLAUDE_CODE_MAX_RETRIES: env.CLAUDE_CODE_MAX_RETRIES,
+      CLAUDE_CODE_DISABLE_REFUSAL_RETRY: env.CLAUDE_CODE_DISABLE_REFUSAL_RETRY,
+      CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK: env.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK,
       DISABLE_TELEMETRY: env.DISABLE_TELEMETRY,
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
       ENABLE_TOOL_SEARCH: env.ENABLE_TOOL_SEARCH, CLAUDE_CODE_ENTRYPOINT: env.CLAUDE_CODE_ENTRYPOINT,
@@ -174,6 +183,8 @@ test("Claude SDK 0.3.332: native conversation, loopback-only provider", { timeou
       spec: { name: "x", cwd, system, tools, log: (line) => logs.push(line), observe: telemetry.sink("x") } }), logs, admissions, row: telemetry.rows.get("x")! };
   }
   const openSpec = (signal: AbortSignal): SessionSpec => ({ id: "direct", name: "direct", cwd, runtime, system, tools, signal, emit() {} });
+  const oneShot = (admissions: number[]): NonNullable<SessionSpec["admitRequest"]> => async () =>
+    admissions.push(requests.length) === 1 ? { allowed: true } : { allowed: false, reason: "fixture allows one request" };
   await t.test("empty input readiness, catalog and isolated managed file detection", async () => {
     const versionFile = join(dirname(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))), "package.json");
     const { version } = JSON.parse(await readFile(versionFile, "utf8"));
@@ -193,6 +204,48 @@ test("Claude SDK 0.3.332: native conversation, loopback-only provider", { timeou
       await writeFile(path, secret);
       assert.equal(await managedFilesProblem(managed), `machine policy provides ${file}`);
       await rm(path);
+    }
+  });
+  await t.test("binds the trimmed hook prompt and disables native refusal retry", async () => {
+    const before = requests.length, ran = executed;
+    const prompt = " \tProbe.\r\n\r\n Leading and trailing space  ";
+    const admissions: number[] = [];
+    let turns = 0;
+    textStop = { index: before + 1, reason: "refusal" };
+    const handle = await adapter.open({ ...openSpec(new AbortController().signal),
+      admitRequest: oneShot(admissions),
+      emit(event) { if (event.type === "turn") turns++; },
+    });
+    try {
+      assert.equal(await handle.prompt(prompt, AbortSignal.timeout(4000)), "failed");
+    } finally { handle.dispose(); await exited(); textStop = undefined; }
+    assert.deepEqual(admissions, [before]);
+    assert.equal(requests.length, before + 1);
+    assert.equal(turns, 1);
+    assert.equal(executed, ran);
+    assert.equal(requests[before].messages[0].content.at(-1)?.text, prompt);
+  });
+  await t.test("characterizes blocking pin defect: output-limit and malformed-tool recovery bypass admission", async () => {
+    for (const reason of ["max_tokens", "tool_use"]) {
+      const before = requests.length, ran = executed;
+      const admissions: number[] = [];
+      let turns = 0;
+      textStop = { index: before + 1, reason };
+      const handle = await adapter.open({ ...openSpec(new AbortController().signal),
+        admitRequest: oneShot(admissions),
+        emit(event) { if (event.type === "turn") turns++; },
+      });
+      try { assert.equal(await handle.prompt("Probe.", AbortSignal.timeout(4000)), "completed"); }
+      finally { handle.dispose(); await exited(); textStop = undefined; }
+      // This records the unsafe behavior of 0.3.332; it is not a conformance test.
+      assert.deepEqual(admissions, [before]);
+      assert.equal(requests.length, before + 2);
+      assert.equal(turns, 2);
+      assert.equal(executed, ran);
+      assert.equal(requests[before + 1].model, requests[before].model);
+      const first = JSON.stringify(requests[before].messages), next = JSON.stringify(requests[before + 1].messages);
+      assert.notEqual(next, first, "native repair rewrites provider input");
+      assert.equal(next.includes("Native stop probe response."), reason === "max_tokens");
     }
   });
   await t.test("real MCP echo and submit, no further send or sibling after submit", async () => {
