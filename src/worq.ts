@@ -1,5 +1,6 @@
 import { Agent, type AgentEvent, type AgentState, type Attachment, type NotifyMode } from "./agent.ts";
 import { Block } from "./contracts.ts";
+import { EXPLORE_LIMITS, exploreRepo, repoStateKey, type ExploreSnapshot } from "./explore.ts";
 import { formatGateLines, type GateSpec } from "./gate.ts";
 import { MAIN, type Config } from "./runtime/config.ts";
 import type { Kind } from "./runtime/workflows.ts";
@@ -23,6 +24,8 @@ export interface WorqDeps {
   notify(event: AgentEvent): void;
   /** Operator-only notice (obsolete settings). */
   warn?(text: string): void;
+  /** Override Tier 1 parallel group warmup stagger (ms); 0 disables. */
+  exploreStaggerMs?: number;
 }
 /** One launch, from any route. Absent runtime fields inherit; see resolveRuntime. */
 export interface LaunchRequest extends RuntimeRequest {
@@ -82,6 +85,8 @@ export class Worq {
   private readonly starting = new Set<PendingLaunch>();
   private readonly agents = new Map<string, Agent>();
   private readonly groups = new Map<string, GroupState>();
+  private readonly exploreCache = new Map<string, Promise<ExploreSnapshot>>();
+  private readonly tier1Warmup = new Map<string, { ready: Promise<void>; done: () => void; warmed: boolean; until: number; expires: number }>();
   /** Every live controllable session (owners, PQs, reviews), keyed by telemetry row key. */
   readonly sessions: Sessions = new Map();
   private readonly semaphore: Semaphore;
@@ -182,6 +187,7 @@ export class Worq {
         const root = await repository(this.deps.cwd, preflight);
         if (kind.access === "write") await baselineProject(root, preflight);
         const attachments = await this.attachments(root, request.attach ?? []);
+        const explore = kind.explore !== "none" ? await this.explore(root, kind.explore, preflight) : undefined;
         signal.throwIfAborted();
         const { ref, dir } = await reserveName(root, this.deps.state, base);
         signal.throwIfAborted();
@@ -193,11 +199,12 @@ export class Worq {
           }
           this.deps.notify(tagged);
         };
+        const { startDelay, onWarm } = this.tier1Schedule(group?.id, kind.name, explore);
         const agent = new Agent({
           runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root,
           semaphore: this.semaphore, notify: agentNotify, sessions: this.sessions,
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
-        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates });
+        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, startDelay, onWarm });
         this.agents.set(ref, agent);
         if (group) {
           group.members.push(ref);
@@ -215,6 +222,81 @@ export class Worq {
         else this.maybeSettle(group);
       }
     }
+  }
+  /** Cached per-repo-state deterministic exploration snapshot shared across parallel spawns. */
+  private async explore(root: string, mode: "auto" | "map", signal: AbortSignal): Promise<ExploreSnapshot | undefined> {
+    try {
+      const stateKey = await repoStateKey(root, signal);
+      const cacheKey = `${root}\0${stateKey}\0${mode}`;
+      let pending = this.exploreCache.get(cacheKey);
+      if (!pending) {
+        const scanSignal = AbortSignal.any([this.admissions.signal, AbortSignal.timeout(10_000)]);
+        pending = exploreRepo(root, mode, scanSignal, { key: stateKey }).catch((error) => {
+          if (this.exploreCache.get(cacheKey) === pending) this.exploreCache.delete(cacheKey);
+          throw error;
+        });
+        if (this.exploreCache.size >= 16) {
+          const oldest = this.exploreCache.keys().next().value;
+          if (oldest !== undefined) this.exploreCache.delete(oldest);
+        }
+        this.exploreCache.set(cacheKey, pending);
+      }
+      let onAbort: (() => void) | undefined;
+      try {
+        return await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            onAbort = () => reject(signal.reason);
+            if (signal.aborted) onAbort();
+            else signal.addEventListener("abort", onAbort, { once: true });
+          }),
+        ]);
+      } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      }
+    } catch (error) {
+      if (signal.aborted) throw error;
+      return undefined;
+    }
+  }
+  /** Stagger parallel Tier 1 group launches so the first scout populates the prompt cache before siblings fire. */
+  private tier1Schedule(groupId: string | undefined, kindName: string, snapshot: ExploreSnapshot | undefined): { startDelay?: Promise<void>; onWarm?: () => void } {
+    const staggerMs = this.deps.exploreStaggerMs ?? EXPLORE_LIMITS.tier1StaggerMs;
+    if (!groupId || !snapshot || snapshot.tier !== 1 || snapshot.bytes < EXPLORE_LIMITS.tier1WarmupThresholdBytes || staggerMs <= 0) {
+      return {};
+    }
+    const warmupKey = `${groupId}\0${snapshot.key}\0${kindName}`;
+    const now = Date.now();
+    const existing = this.tier1Warmup.get(warmupKey);
+    if (existing && now < existing.expires) {
+      if (existing.warmed || now >= existing.until) return {};
+      return { startDelay: existing.ready };
+    }
+    let resolveReady!: () => void;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const entry = {
+      ready: undefined as unknown as Promise<void>,
+      done: () => {
+        if (entry.warmed) return;
+        entry.warmed = true;
+        clearTimeout(timer);
+        resolveReady();
+      },
+      warmed: false,
+      until: now + staggerMs,
+      expires: now + 5 * 60_000,
+    };
+    entry.ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+      timer = setTimeout(() => entry.done(), staggerMs);
+      timer.unref?.();
+    });
+    if (this.tier1Warmup.size >= 32) {
+      const oldest = this.tier1Warmup.keys().next().value;
+      if (oldest !== undefined) this.tier1Warmup.delete(oldest);
+    }
+    this.tier1Warmup.set(warmupKey, entry);
+    return { onWarm: entry.done };
   }
   /** Parked agents hold no slot. Lightweight inline read kinds use their own capacity pool. */
   private capacity(kind: Kind) {
@@ -375,6 +457,7 @@ export class Worq {
       `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "not independently reviewed") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
+      a.explore && `Explore: tier ${a.explore.tier} (${a.explore.stats.sourceFiles} source file${a.explore.stats.sourceFiles === 1 ? "" : "s"}, ${(a.explore.bytes / 1024).toFixed(1)} KB)`,
       a.scope && `Write paths: ${a.scope.patterns.join(", ")}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,
       a.exhausted && `Parked without submission: ${a.exhausted}`,
@@ -463,6 +546,11 @@ export class Worq {
     await agent.cancel();
     return `${agent.ref} ${agent.state}${agent.work ? `; retained worktree ${agent.work}` : agent.branch ? `; branch ${agent.branch} kept` : ""}`;
   }
-  async shutdown() { this.admissions.abort(new Block('cancelled', 'Worq closed')); await this.cancel("all"); }
+  async shutdown() {
+    for (const entry of this.tier1Warmup.values()) entry.done();
+    this.tier1Warmup.clear();
+    this.admissions.abort(new Block('cancelled', 'Worq closed'));
+    await this.cancel("all");
+  }
 }
 export const isRef = (value: string) => REF.test(value);

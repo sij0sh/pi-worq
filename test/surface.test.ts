@@ -77,9 +77,12 @@ test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role
   assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan", "scout"]);
   assert.equal(KINDS.get("plan")!.access, "read");
   assert.equal(KINDS.get("plan")!.output, "plan");
+  assert.equal(KINDS.get("plan")!.explore, "map");
   assert.equal(KINDS.get("execute")!.access, "write");
+  assert.equal(KINDS.get("execute")!.explore, "none");
   assert.equal(KINDS.get("scout")!.access, "read");
   assert.equal(KINDS.get("scout")!.output, "inline");
+  assert.equal(KINDS.get("scout")!.explore, "auto");
   assert.deepEqual(KINDS.get("scout")!.limits, { turns: 16, minutes: 5, asks: 0 });
   assert.ok([...KINDS.values()].every((kind) => !kind.userOnly && kind.skill));
   assert.match(KINDS.get("execute")!.review!, /What consequential reason is there not to accept this result as-is\?/);

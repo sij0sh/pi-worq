@@ -4,6 +4,7 @@ import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Block, errorText, obj, PqAnswer, ReviewReport, Submission, text, type Verdict } from "./contracts.ts";
+import type { ExploreSnapshot } from "./explore.ts";
 import { runGates, type GateResult, type GateSpec } from "./gate.ts";
 import type { Limits } from "./runtime/config.ts";
 import { git } from "./process.ts";
@@ -66,6 +67,7 @@ export class Agent {
   readonly notifyMode: NotifyMode;
   readonly scope?: WriteScope;
   readonly gates: readonly GateSpec[];
+  readonly explore?: ExploreSnapshot;
   readonly owner = process.pid;
   state: AgentState = "starting";
   /** Main's feedback opened the final revision: the next submission is not reviewed and ends the agent. */
@@ -104,13 +106,15 @@ export class Agent {
   private fatal?: Block;
   private readonly controller = new AbortController();
   private readonly deps: AgentDeps;
+  private readonly startDelay?: Promise<void>;
+  private readonly onWarm?: () => void;
   private start!: () => void;
   private warning = (message: string) => {
     this.log(message);
     this.deps.notify({ type: "warning", ref: this.ref, text: `${this.headline} ${message}` });
   };
 
-  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; group?: string; notifyMode?: NotifyMode; scope?: WriteScope; gates?: readonly GateSpec[] }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; group?: string; notifyMode?: NotifyMode; scope?: WriteScope; gates?: readonly GateSpec[]; explore?: ExploreSnapshot; startDelay?: Promise<void>; onWarm?(): void }) {
     this.deps = deps;
     this.ref = input.ref;
     this.title = input.title ?? input.ref;
@@ -120,6 +124,9 @@ export class Agent {
     this.notifyMode = input.notifyMode ?? "each";
     this.scope = input.scope;
     this.gates = input.gates ?? [];
+    this.explore = input.explore;
+    this.startDelay = input.startDelay;
+    this.onWarm = input.onWarm;
     if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
@@ -177,6 +184,7 @@ export class Agent {
       ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, group: this.group, state: this.state, final: this.final, task: this.task,
       worktree: this.work, branch: this.branch, baseline: this.baseline, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
       writePaths: this.scope?.patterns, gates: this.gateResults.length ? this.gateResults : undefined,
+      explore: this.explore ? { tier: this.explore.tier, bytes: this.explore.bytes, sourceFiles: this.explore.stats.sourceFiles } : undefined,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
       review: this.review, started: this.started, finished: this.finished,
     };
@@ -264,10 +272,14 @@ export class Agent {
       const scopeHint = this.scope
         ? `\n\nAssigned writePaths (enforced on edit and submit): ${this.scope.patterns.join(", ")}. Do not modify files outside these paths.`
         : "";
+      const exploreBlock = this.explore ? `\n\n${this.explore.text}` : "";
+      if (this.explore) {
+        this.log(`explore tier ${this.explore.tier} (${this.explore.stats.sourceFiles} src, ${(this.explore.bytes / 1024).toFixed(1)}KB)`);
+      }
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs,
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}\n\n${this.kind.skill.body}${scopeHint}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}\n\n${this.kind.skill.body}${scopeHint}${exploreBlock}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
           description: `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : " Worq saves it to .agents/plans/."}`,
@@ -286,6 +298,22 @@ export class Agent {
           },
         },
       });
+      if (this.startDelay) {
+        let onAbort: (() => void) | undefined;
+        try {
+          await Promise.race([
+            this.startDelay,
+            new Promise<never>((_, reject) => {
+              onAbort = () => reject(signal.reason);
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+            }),
+          ]);
+        } finally {
+          if (onAbort) signal.removeEventListener("abort", onAbort);
+        }
+        signal.throwIfAborted();
+      }
       let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
       let done = false;
       while (message !== undefined) {
@@ -298,7 +326,9 @@ export class Agent {
             release = await this.deps.semaphore.acquire(signal);
           }
           this.set("running");
-          await this.submit(await this.conversation.run(message));
+          const submitted = await this.conversation.run(message);
+          this.onWarm?.();
+          await this.submit(submitted);
           if (this.final || !this.kind.review) { done = true; break; }
         } catch (error) {
           if (this.fatal) throw this.fatal;
@@ -322,6 +352,7 @@ export class Agent {
       if (signal.aborted) this.state = "cancelled";
       else { this.error = errorText(error); this.state = "failed"; }
     } finally {
+      this.onWarm?.();
       this.controller.abort(new Block("ended", "Agent ended"));
       this.deps.sessions?.delete(this.id);
       for (const d of this.delegations) if (d.state === "queued" || d.state === "running") d.state = "cancelled";

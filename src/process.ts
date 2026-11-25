@@ -38,7 +38,7 @@ function killGroup(pid: number, sig: NodeJS.Signals | 0): boolean {
 
 /** Own the whole process group (Linux) or Job Object (Windows). */
 export function launch(executable: string, args: string[], options: {
-  cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; report?: (value: Outcome) => void; stdout?: (chunk: Buffer) => void;
+  cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; limit?: number; report?: (value: Outcome) => void; stdout?: (chunk: Buffer) => void;
 }) {
   if (options.signal.aborted) observe(options.report, { kind: 'cancelled' });
   options.signal.throwIfAborted();
@@ -59,6 +59,7 @@ export function launch(executable: string, args: string[], options: {
   let cleanup: Promise<void> | undefined;
   let stdout: Buffer[] = [], stderr: Buffer[] = [];
   let outBytes = 0, errBytes = 0;
+  const limit = options.limit ?? LIMIT;
   const join = () => cleanup ??= (async () => {
     if (!child.pid) return;
     try {
@@ -100,13 +101,13 @@ export function launch(executable: string, args: string[], options: {
   });
   child.stdout!.on("data", (chunk: Buffer) => {
     outBytes += chunk.length;
-    if (outBytes > LIMIT) { stop(new Block("output-limit", `Output limit exceeded: ${executable}`)); return; }
+    if (outBytes > limit) { stop(new Block("output-limit", `Output limit exceeded: ${executable}`)); return; }
     if (!options.stdout) stdout.push(chunk);
     else { try { options.stdout(chunk); } catch (error) { stop(error); } }
   });
   child.stderr!.on("data", (chunk: Buffer) => {
     errBytes += chunk.length;
-    if (errBytes > LIMIT) stop(new Block("output-limit", `Output limit exceeded: ${executable}`));
+    if (errBytes > limit) stop(new Block("output-limit", `Output limit exceeded: ${executable}`));
     else stderr.push(chunk);
   });
   status?.on("data", (chunk: Buffer) => {
@@ -153,20 +154,24 @@ export function launch(executable: string, args: string[], options: {
   return { done, input: child.stdin!, stop };
 }
 
-export async function runProcess(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; report?: (value: Outcome) => void; stdin?: string }): Promise<ProcessResult> {
+export async function runProcess(executable: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; signal: AbortSignal; ms: number; limit?: number; report?: (value: Outcome) => void; stdin?: string }): Promise<ProcessResult> {
   const child = launch(executable, args, options);
   child.input.end(options.stdin ?? "");
   return child.done;
 }
 
-export async function gitRaw(cwd: string, signal: AbortSignal, ...args: string[]): Promise<ProcessResult> {
+export async function gitRawLimited(cwd: string, signal: AbortSignal, limit: number, ...args: string[]): Promise<ProcessResult> {
   if (!gitExe) throw new Block("launch", "Worq requires Git for Windows (git.exe on PATH)");
   return runProcess(gitExe, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
     ...args], {
-    cwd, signal, ms: 30_000,
+    cwd, signal, ms: 30_000, limit,
     env: { ...cleanEnv, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: windows ? "NUL" : "/dev/null", GIT_TERMINAL_PROMPT: "0",
       GIT_AUTHOR_NAME: "Worq", GIT_AUTHOR_EMAIL: "worq@localhost", GIT_COMMITTER_NAME: "Worq", GIT_COMMITTER_EMAIL: "worq@localhost" },
   });
+}
+
+export async function gitRaw(cwd: string, signal: AbortSignal, ...args: string[]): Promise<ProcessResult> {
+  return gitRawLimited(cwd, signal, LIMIT, ...args);
 }
 
 export async function git(cwd: string, signal: AbortSignal, ...args: string[]) {

@@ -3,6 +3,7 @@ name: scout
 description: fast read-only recon; returns cited inline findings without writing files or blocking Main
 access: read
 output: inline
+explore: auto
 max-turns: 16
 max-minutes: 5
 asks: 0

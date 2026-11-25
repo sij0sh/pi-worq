@@ -8,14 +8,16 @@ import { contained, readBounded, type Skill, exists, loadSkill, outsideCheckout 
 /**
  * The one agent catalog: skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write), `output` (`plan` or `inline`, read-only), optional caps
- * (`max-turns`, `max-minutes`, `asks`). Role files enable delegation, review, and pre-submit gates.
+ * `access` (`read` explicit; absent = write), `output` (`plan` or `inline`, read-only), `explore`
+ * (`auto`, `map`, or `none`), optional caps (`max-turns`, `max-minutes`, `asks`). Role files enable
+ * delegation, review, and pre-submit gates.
  * Plan, Execute and Scout ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
 export type OutputMode = "plan" | "inline";
+export type ExploreMode = "auto" | "map" | "none";
 export interface KindLimits { turns?: number; minutes?: number; asks?: number }
 export interface Kind {
-  name: string; access: "read" | "write"; output: OutputMode; description: string; userOnly: boolean; skill: Skill;
+  name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; description: string; userOnly: boolean; skill: Skill;
   pq?: string; review?: string; limits?: KindLimits; gates?: readonly GateSpec[];
 }
 function optionalInt(meta: Record<string, string>, key: string, min: number, max: number): number | string | undefined {
@@ -53,6 +55,8 @@ function load(root: string, path: string, name: string): Kind | string {
   if (access === "write" && meta.output !== undefined) return "output is only valid when access is read";
   const output = (meta.output ?? "plan") as OutputMode;
   if (output !== "plan" && output !== "inline") return "output must be plan or inline";
+  const explore = (meta.explore ?? "none") as ExploreMode;
+  if (explore !== "auto" && explore !== "map" && explore !== "none") return "explore must be auto, map or none";
   const disable = meta["disable-model-invocation"] ?? "false";
   if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
   const turns = optionalInt(meta, "max-turns", 1, 400);
@@ -68,7 +72,7 @@ function load(root: string, path: string, name: string): Kind | string {
     if (access !== "write") return "gates.json is only valid when access is write";
     gates = parse(GateList, json(readBounded(contained(path, gateFile), true), gateFile), gateFile);
   }
-  return { name, skill, access, output, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates };
+  return { name, skill, access, output, explore, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */

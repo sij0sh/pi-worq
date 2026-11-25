@@ -41,6 +41,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `disable-model-invocation` | no | `true`: user-only (`/worq`); refused from `worq_spawn`, socket and CLI. `false`/absent: also launchable by Main and the CLI. |
 | `access` | no | `read`: no worktree or write/process tools, result saved as a plan file (or returned inline). Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
 | `output` | no | Read kinds only. `plan` (default): writes `.agents/plans/plan-<ref>.md`. `inline`: returns cited summary directly without touching the repo; attachable by `ref` in the same session. |
+| `explore` | no | Deterministic pre-pass snapshot appended to the static system prompt for cross-swarm prompt caching. `none` (default): off. `auto`: Tier 1 inline source (`<= 40 KB` & `<= 40` source files), Tier 2 symbol map (`<= 1.5 MB` & `<= 600` source files), or Tier 3 structural skeleton. `map`: Tier 2 symbol map or Tier 3 skeleton (never full inline). Shipped defaults: `scout` uses `auto`, `plan` uses `map`, `execute` uses `none`. |
 | `max-turns` | no | Optional integer (`1..400`) clamping `limits.agentTurns` downward only. |
 | `max-minutes` | no | Optional integer (`1..600`) clamping `limits.agentMinutes` downward only. |
 | `asks` | no | Optional integer (`0..20`) clamping `limits.asks` downward only. `0` removes `ask_main` from the agent's tool list. |
@@ -81,6 +82,7 @@ Files under the folder (depth ≤4, ≤200, dotfiles skipped) are listed in the 
 | `description is required` | Add `description`. |
 | `disable-model-invocation must be true or false` | Fix the value. |
 | `access must be read or write` | Fix the value. |
+| `explore must be auto, map or none` | Fix the value. |
 | `SKILL.md body is blank` | Add instructions. |
 | `move to <dir>/<name>/SKILL.md` | Convert the old flat file. |
 | `symlinked workflows are not followed` | Copy the folder. |
