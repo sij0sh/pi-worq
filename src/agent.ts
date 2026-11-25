@@ -16,6 +16,7 @@ import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
 import { runSubagent, type Semaphore, type SubagentDeps, type Workspace } from "./subagent.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
 import { agentDirectory, baselineProject, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
+import { RunTimings } from "./timings.ts";
 import type { Revision, Telemetry } from "./telemetry.ts";
 
 /** parked: submitted (or out of budget), session and worktree retained until Main resumes or closes it. */
@@ -75,6 +76,7 @@ export class Agent {
   /** The one independent review of the first submission. */
   review?: ReviewRecord;
   started = Date.now();
+  readonly timings = new RunTimings(this.started);
   finished?: number;
   error?: string;
   /** Baseline commit when the write worktree was created. */
@@ -193,6 +195,7 @@ export class Agent {
       writePaths: this.scope?.patterns, gates: this.gateResults.length ? this.gateResults : undefined,
       explore: this.explore ? { tier: this.explore.tier, bytes: this.explore.bytes, sourceFiles: this.explore.stats.sourceFiles } : undefined,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
+      timings: this.timings.snapshot(),
       review: this.review, reviewedSha: this.reviewedSha, reviewedDigest: this.reviewedDigest, started: this.started, finished: this.finished,
     };
   }
@@ -282,6 +285,7 @@ export class Agent {
       }
       this.conversation = new Conversation({
         driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs, onFirstResponse: this.onWarm,
+        onEvent: (event) => this.timings.event(event), onTool: () => this.timings.tool(), onIdle: () => this.timings.endModel(),
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
         spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}${exploreBlock}\n\n${this.kind.skill.body}`, log: (line) => this.log(line) },
         finish: {
@@ -293,7 +297,7 @@ export class Agent {
               await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
             }
             if (write && effectiveGates.length && this.work && box) {
-              const results = await runGates(this.work, await box.env(), effectiveGates, validateSignal, (line) => this.log(line));
+              const results = await runGates(this.work, await box.env(), effectiveGates, validateSignal, (line) => this.log(line), () => this.timings.gate());
               // Re-check scope after gates in case a test command dropped untracked files outside writePaths.
               if (this.scope && this.project) {
                 await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
@@ -386,7 +390,7 @@ export class Agent {
       const interrupted = telemetry?.live.get(this.id);
       if (interrupted?.status === "reviewing") telemetry?.revision({ ...interrupted, status: "inconclusive" });
       telemetry?.changed();
-      this.finished = Date.now();
+      this.finished = this.timings.at.finishedAt = Date.now();
       this.log(`state ${this.state}`);
       this.publish();
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
@@ -398,14 +402,13 @@ export class Agent {
 
   /** Wait for Main: a message resumes the same session, close or idle expiry ends it. */
   private park(): Promise<string | undefined> {
-    this.set("parked");
-    this.deps.notify({ type: "parked", ref: this.ref, text: this.digest() });
-    this.deps.onSettled?.(this);
-    return new Promise((resolve) => {
+    this.timings.park();
+    const waiting = new Promise<string | undefined>((resolve) => {
       const done = (message: string | undefined) => {
         clearTimeout(timer);
         this.signal.removeEventListener("abort", abort);
         this.wakeParked = undefined;
+        this.timings.leavePark(message !== undefined);
         resolve(message);
       };
       const abort = () => done(undefined);
@@ -414,6 +417,10 @@ export class Agent {
       this.signal.addEventListener("abort", abort, { once: true });
       this.wakeParked = done;
     });
+    this.set("parked");
+    this.deps.notify({ type: "parked", ref: this.ref, text: this.digest() });
+    this.deps.onSettled?.(this);
+    return waiting;
   }
 
   private delegateTool(cwd: string): Tool {
@@ -451,17 +458,19 @@ export class Agent {
         const signal = AbortSignal.any([this.signal, toolSignal]);
         const conversation = this.conversation;
         conversation?.pause();
-        this.set("waiting");
+        const endWait = this.timings.waitMain();
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           return await new Promise<string>((resolve, reject) => {
             this.ask = { question, resolve };
+            this.set("waiting");
             timer = setTimeout(() => resolve(UNANSWERED), this.deps.limits.askMinutes * 60_000);
             timer.unref?.();
             signal.addEventListener("abort", () => reject(signal.reason), { once: true });
             this.deps.notify({ type: "ask", ref: this.ref, text: `${this.headline} asks:\n${question}\n\nAnswer with worq_send(ref "${this.ref}"). Answer yourself when this conversation or the repository settles it; during planning, defer unresolved preferences to plan approval using provisional assumptions or alternatives. Never assume permission.` });
           });
         } finally {
+          endWait();
           clearTimeout(timer);
           this.ask = undefined;
           if (this.state === "waiting") this.set("running");
@@ -498,11 +507,13 @@ export class Agent {
       this.submission = reportText(report);
       this.log(`candidate ${this.candidate.slice(0, 10)}`);
     }
+    this.timings.at.submittedAt ??= Date.now();
     if (this.final || !this.kind.review || this.review) return;
+    const endReview = this.timings.review();
     this.set("reviewing");
     const revision: Revision = { run: this.id, identity, status: "reviewing" };
     this.deps.telemetry?.revision(revision);
-    const review = await this.runReview();
+    const review = await this.runReview().finally(endReview);
     this.review = review;
     if ("sha" in identity) this.reviewedSha = identity.sha;
     else this.reviewedDigest = identity.digest;

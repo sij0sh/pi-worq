@@ -1,3 +1,4 @@
+import { timingLine } from "./timings.ts";
 import { Agent, type AgentEvent, type AgentState, type Attachment, type NotifyMode } from "./agent.ts";
 import { Block } from "./contracts.ts";
 import { EXPLORE_LIMITS, exploreRepo, repoStateKey, type ExploreSnapshot } from "./explore.ts";
@@ -454,6 +455,7 @@ export class Worq {
       `${a.headline} · ${a.state}`,
       a.group && `Group: ${a.group} (${a.notifyMode})`,
       `Task: ${a.task}`,
+      timingLine(a.timings.snapshot()),
       `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "submission complete") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,

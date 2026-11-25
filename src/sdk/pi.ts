@@ -142,7 +142,10 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
             spec.emit({ type: "tool-error", name: event.toolName, message: content?.flatMap((c) => c.type === "text" ? [c.text ?? ""] : []).join(" ") || "error" });
           }
         }
-        if (event.type === "message_start" && event.message.role === "assistant") started = performance.now();
+        if (event.type === "message_start" && event.message.role === "assistant") {
+          started = performance.now();
+          spec.emit({ type: "response-start" });
+        }
         if (event.type === "message_end" && event.message.role === "assistant" && !seen.has(event.message)) {
           seen.add(event.message);
           const { usage, stopReason } = event.message;

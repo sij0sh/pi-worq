@@ -75,6 +75,7 @@ export async function runGates(
   gates: readonly GateSpec[],
   signal: AbortSignal,
   log?: (line: string) => void,
+  onAttempt?: () => (durationMs: number) => void,
 ): Promise<GateResult[]> {
   const executables = await preflightGates(gates, cwd, env, signal);
   const results: GateResult[] = [];
@@ -83,11 +84,13 @@ export async function runGates(
     const name = labelOf(gate, i);
     const cmd = formatCmd(gate);
     const started = performance.now();
+    const end = onAttempt?.();
+    let durationMs: number | undefined;
     const ms = (gate.timeoutSeconds ?? 120) * 1000;
     log?.(`gate ${name}: ${one(cmd, 180)}`);
     try {
       const out = await runProcess(executables[i], gate.args, { cwd, env, signal: live, ms });
-      const durationMs = Math.round(performance.now() - started);
+      durationMs = Math.round(performance.now() - started);
       if (out.code === 0) {
         log?.(`gate ${name}: pass (${durationMs}ms)`);
         return { name, command: cmd, passed: true, code: 0, durationMs };
@@ -101,7 +104,7 @@ export async function runGates(
       const msg = errorText(error);
       log?.(`gate ${name}: error (${one(msg, 180)})`);
       throw new Block("gate-failed", `Pre-submit gate "${name}" failed: ${one(msg, 460)}`);
-    }
+    } finally { end?.(durationMs ?? Math.round(performance.now() - started)); }
   };
   for (let start = 0; start < gates.length;) {
     let end = start + 1;

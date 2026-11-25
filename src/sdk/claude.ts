@@ -514,6 +514,7 @@ export function claudeAdapter(host: HostServices = {}, injected?: ClaudeSdk): SD
         const usage = record(message?.usage);
         turn.sample = { start: performance.now(), input: number(usage?.input_tokens), read: number(usage?.cache_read_input_tokens),
           write: number(usage?.cache_creation_input_tokens), ended: false };
+        emit({ type: "response-start" });
         emit({ type: "turn" });
         report({ turn: true });
       } else if (event.type === "message_delta" && turn.sample) {

@@ -78,6 +78,12 @@ All configured executables are checked before any gate launches. Package gates p
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
 - Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.
 
+## Run timings
+
+`worq_list(ref)` and `record.json` report owner timing in both interactive and headless runs. `submittedAt` is the first durable submission; park/resume timestamps are the latest of each, and `parkedMs` is cumulative. Review time includes the review session's setup and teardown. Owner model and tool counts exclude child review and PQ sessions.
+
+Measured work excludes requester waits, review, parked time, and unmeasured overhead. Known requester waits never count as work, even during a model response. Remaining overlap is attributed once (model, gates, then tools): `workModelMs`, `activeGateMs`, and `workToolMs`. Observed `activeModelMs` and `waitMainMs` retain their full intervals; `toolMs` sums individual tool durations and `gateMs` sums individual gate attempts, including failures. Do not add the observed totals to estimate wall time. Model time measures observed assistant-message intervals, not provider-side latency; an interrupted stream ends at observed prompt settlement if it has no end event. Cache tokens are only summed when reported, and the ratio is unavailable when the SDK omits usage needed to compute it.
+
 ## Problems
 
 | Message | Fix |

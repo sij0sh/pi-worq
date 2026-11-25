@@ -54,6 +54,9 @@ export interface ConversationOptions<T extends TSchema> {
   /** Open work (delegations) the session must wait for before it may stop. */
   pending?: () => number;
   onFirstResponse?: () => void;
+  onEvent?: (event: SessionEvent) => void;
+  onTool?: () => () => void;
+  onIdle?: () => void;
   /** A fatal, backend-neutral runtime invalidation. Wakes a parked owner; the session can never run again. */
   invalidated?(error: Block): void;
 }
@@ -210,7 +213,7 @@ export class Conversation<T extends TSchema> {
   private async prompt(handle: CoreHandle, text: string, signal: AbortSignal) {
     this.prompting = true;
     try { return await handle.prompt(text, signal); }
-    finally { this.prompting = false; }
+    finally { this.prompting = false; this.options.onIdle?.(); }
   }
 
   private finishTool(): Tool {
@@ -247,9 +250,12 @@ export class Conversation<T extends TSchema> {
   /** The core validates every tool call against its schema, so adapters only dispatch. */
   private wrap(target: Tool): Tool {
     return {
-      ...target, run: (params, signal, report) => {
+      ...target, run: async (params, signal, report) => {
         if (!this.active || this.gate.aborted) throw new Block("fenced", "Tool dispatch is closed");
-        return target.run(parse(target.parameters, params, target.name), signal, report);
+        const value = parse(target.parameters, params, target.name);
+        const end = this.options.onTool?.();
+        try { return await target.run(value, signal, report); }
+        finally { end?.(); }
       },
     };
   }
@@ -260,7 +266,9 @@ export class Conversation<T extends TSchema> {
   }
   private event(event: SessionEvent) {
     const { spec } = this.options;
+    if (this.active) this.options.onEvent?.(event);
     switch (event.type) {
+      case "response-start": return;
       case "response": if (event.completed) this.firstResponse(); return;
       case "telemetry":
         if ("cache" in event.value) this.firstResponse();
@@ -408,6 +416,7 @@ export class Conversation<T extends TSchema> {
       throw gate.aborted ? gate.reason : error;
     } finally {
       this.active = false;
+      this.options.onIdle?.();
       this.pause();
     }
   }
