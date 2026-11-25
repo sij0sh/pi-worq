@@ -186,6 +186,22 @@ export async function linkDependencies(root: string, checkout: string, signal: A
     return false;
   }
 }
+/** Detached checkout of `commit` (no branch), with the repository's dependencies linked. */
+export async function detachedWorktree(root: string, dir: string, commit: string, signal: AbortSignal) {
+  const work = join(dir, "work");
+  await git(root, signal, "worktree", "add", "--detach", work, commit);
+  const checkout = await realpath(work);
+  await linkDependencies(root, checkout, signal);
+  return checkout;
+}
+/** Commit `tree` on top of `base` and fast-forward the clean checkout `work` (at `base`) to it. */
+export async function integrateTree(work: string, base: string, tree: string, message: string, signal: AbortSignal) {
+  if (await git(work, signal, "rev-parse", "--verify", "HEAD^{commit}") !== base) throw new Block("integrate", "Worktree moved off the wave base");
+  if (await git(work, signal, "status", "--porcelain=v1", "--untracked-files=all")) throw new Block("integrate", "Worktree has uncommitted changes");
+  const commit = await git(work, signal, "commit-tree", tree, "-p", base, "-m", message);
+  await git(work, signal, "merge", "--ff-only", "--quiet", commit);
+  return commit;
+}
 export async function removeWorktree(root: string, work: string) {
   await git(root, AbortSignal.timeout(30_000), "worktree", "remove", "--force", work);
 }

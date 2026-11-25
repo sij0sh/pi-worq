@@ -19,6 +19,8 @@ export interface KindLimits { turns?: number; minutes?: number; asks?: number }
 export interface Kind {
   name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; description: string; userOnly: boolean; skill: Skill;
   pq?: string; review?: string; limits?: KindLimits; gates?: readonly GateSpec[];
+  /** EDIT.md (write kinds only): enables `delegate_edit` workers with these instructions. */
+  edit?: string;
 }
 function optionalInt(meta: Record<string, string>, key: string, min: number, max: number): number | string | undefined {
   const raw = meta[key];
@@ -49,7 +51,7 @@ function load(root: string, path: string, name: string): Kind | string {
   if (meta.name !== undefined && meta.name !== name) return `name "${meta.name}" must match the folder name "${name}"`;
   if (!meta.description?.trim()) return "description is required (shown by /worq and worq_spawn)";
   if (!skill.body) return "SKILL.md body is blank";
-  skill.files = skill.files.filter(file => file !== "PQ.md" && file !== "REVIEW.md" && file !== "gates.json");
+  skill.files = skill.files.filter(file => file !== "PQ.md" && file !== "REVIEW.md" && file !== "EDIT.md" && file !== "gates.json");
   const access = meta.access ?? "write";
   if (access !== "read" && access !== "write") return "access must be read or write";
   if (access === "write" && meta.output !== undefined) return "output is only valid when access is read";
@@ -73,7 +75,9 @@ function load(root: string, path: string, name: string): Kind | string {
     if (access !== "write") return "gates.json is only valid when access is write";
     gates = parse(GateList, json(readBounded(contained(path, gateFile), true), gateFile), gateFile);
   }
-  return { name, skill, access, output, explore, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates };
+  const edit = optional(path, "EDIT.md");
+  if (edit !== undefined && access !== "write") return "EDIT.md is only valid when access is write";
+  return { name, skill, access, output, explore, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates, ...(edit !== undefined ? { edit } : {}) };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */

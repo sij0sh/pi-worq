@@ -44,7 +44,7 @@ Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/
 - `disable-model-invocation: true` → user-only: launched by `/worq` alone, refused from `worq_spawn` and the CLI.
 - absent/`false` → also a `worq_spawn` kind (and control socket/CLI).
 - `access: read` → no worktree, no write/process tools; result saved to `.agents/plans/plan-<ref>.md`. Absent → write: own clean-baseline worktree, pins `worq/<ref>`, never merges.
-- Package-root `REVIEW.md` opts into one independent review. Remove it from a provisioned package to opt out; `done` then needs no substitute review. `PQ.md` enables delegation (shipped Plan only). Before upgrading existing profiles, see the manual migration in docs/workflows.md.
+- Package-root `REVIEW.md` opts into one independent review. Remove it from a provisioned package to opt out; `done` then needs no substitute review. `PQ.md` enables delegation (shipped Plan only). `EDIT.md` (write kinds; shipped Execute) enables `delegate_edit` contract-first parallel edit waves. Before upgrading existing profiles, see the manual migration in docs/workflows.md.
 - Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
 
 See `docs/workflows.md`.
@@ -103,12 +103,12 @@ Select it with `worq_spawn { kind, sdk: "claude-code", model? }`, `worq spawn <k
     "agents": 4, "inlineAgents": 12, "subagents": 6, "parallel": 4, "asks": 3, "idleMinutes": 60,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
     "agentMinutes": 30, "subagentMinutes": 5, "reviewerMinutes": 10, "askMinutes": 15,
-    "services": 2
+    "services": 2, "edits": 6, "editTurns": 40, "editMinutes": 15
   }
 }
 ```
 
-Each launch defaults to the current Pi session's model and thinking level; a launch request (`sdk`/`model`/`thinking`, CLI flags or the `/worq` runtime step) overrides it. PQs and reviews inherit their agent's runtime. The removed `plan`, `execute` and `review` presets block new launches (not management) until removed; `launch` is ignored with a warning. See `docs/configuration.md`.
+Each launch defaults to the current Pi session's model and thinking level; a launch request (`sdk`/`model`/`thinking`, CLI flags or the `/worq` runtime step) overrides it. PQs and reviews inherit their agent's runtime. Optional `<agentDir>/worq/RUNTIMES.md` sets soft per-role model/thinking/turn hints (hot-reloaded; starter in `docs/examples/RUNTIMES.md`). The removed `plan`, `execute` and `review` presets block new launches (not management) until removed; `launch` is ignored with a warning. See `docs/configuration.md`.
 
 `AGENTS.md` and skills are **not** per role or per harness: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
 

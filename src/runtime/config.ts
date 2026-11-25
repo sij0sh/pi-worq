@@ -11,6 +11,7 @@ const Limits = obj({
   agentTurns: int(1, 400), subagentTurns: int(1, 100), reviewerTurns: int(1, 200),
   agentMinutes: int(1, 600), subagentMinutes: int(1, 120), reviewerMinutes: int(1, 240), askMinutes: int(1, 1440),
   idleMinutes: int(1, 1440), services: int(0, 8),
+  edits: int(0, 32), editTurns: int(1, 200), editMinutes: int(1, 120),
 });
 const ConfigSchema = obj({ limits: Type.Optional(Limits) });
 export const DEFAULT_LIMITS = {
@@ -18,6 +19,7 @@ export const DEFAULT_LIMITS = {
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
   agentMinutes: 30, subagentMinutes: 5, reviewerMinutes: 10, askMinutes: 15,
   idleMinutes: 60, services: 2,
+  edits: 6, editTurns: 40, editMinutes: 15,
 } satisfies Required<Static<typeof Limits>>;
 export type Limits = typeof DEFAULT_LIMITS;
 

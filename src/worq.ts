@@ -4,6 +4,7 @@ import { Block } from "./contracts.ts";
 import { EXPLORE_LIMITS, exploreRepo, repoStateKey, type ExploreSnapshot } from "./explore.ts";
 import { formatGateLines, type GateSpec } from "./gate.ts";
 import { MAIN, type Config } from "./runtime/config.ts";
+import { chains, matchHint, type RuntimeHints } from "./runtime/hints.ts";
 import type { Kind } from "./runtime/workflows.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
 import { modelChoices, resolveRuntime, type ModelChoice, type RuntimeRequest } from './runtime/launch.ts';
@@ -27,6 +28,8 @@ export interface WorqDeps {
   warn?(text: string): void;
   /** Override Tier 1 parallel group warmup stagger (ms); 0 disables. */
   exploreStaggerMs?: number;
+  /** RUNTIMES.md loader (hot-reloaded); absent means no hints. */
+  hints?(): RuntimeHints;
 }
 /** One launch, from any route. Absent runtime fields inherit; see resolveRuntime. */
 export interface LaunchRequest extends RuntimeRequest {
@@ -93,6 +96,7 @@ export class Worq {
   private readonly semaphore: Semaphore;
   private readonly deps: WorqDeps;
   private warned = false;
+  private readonly hintNotices = new Set<string>();
   constructor(deps: WorqDeps) {
     this.deps = deps;
     this.semaphore = new Semaphore(deps.config.limits.parallel);
@@ -116,13 +120,33 @@ export class Worq {
     if (config.ignored?.length && !this.warned) { this.warned = true; this.deps.warn?.(config.ignored.join("\n")); }
     if (config.migration) throw new Block("config", config.migration);
   }
-  /** The runtime a launch with no explicit fields would use, for the /worq picker. */
-  defaults(signal: AbortSignal = this.admissions.signal): Promise<Runtime> {
-    return resolveRuntime(this.deps.driver, {}, signal);
+  /** Operator notice, once per distinct text (hint problems and fallbacks). */
+  private hintWarn = (text: string) => {
+    if (this.hintNotices.has(text)) return;
+    if (this.hintNotices.size > 256) this.hintNotices.clear();
+    this.hintNotices.add(text);
+    this.deps.warn?.(text);
+  };
+  /** Current RUNTIMES.md (re-read when modified); its problems are warned once per file version. */
+  private hints(): RuntimeHints | undefined {
+    const hints = this.deps.hints?.();
+    if (hints?.problems.length) this.hintWarn(hints.problems.join("\n"));
+    return hints;
   }
-  /** Picker information; never needed for a launch. */
-  launchChoices(initial: Runtime): Promise<ModelChoice[]> {
-    return modelChoices(this.deps.driver, initial);
+  /** The runtime a launch with no explicit fields would use, for the /worq picker (hinted for `kind`). */
+  defaults(signal: AbortSignal = this.admissions.signal, kind?: string): Promise<Runtime> {
+    const hint = kind ? matchHint(this.hints(), chains.agent(kind)) : undefined;
+    return resolveRuntime(this.deps.driver, {}, signal, hint ? { hint, role: kind!, warn: this.hintWarn } : undefined);
+  }
+  /** Picker information; never needed for a launch. `extra` adds hinted defaults missing from the catalog. */
+  async launchChoices(initial: Runtime, extra: readonly Runtime[] = []): Promise<ModelChoice[]> {
+    const choices = await modelChoices(this.deps.driver, initial);
+    for (const runtime of extra) {
+      if (choices.some((c) => c.sdk === runtime.sdk && c.model === runtime.model)) continue;
+      try { choices.push({ sdk: runtime.sdk, model: runtime.model, levels: this.deps.driver.capabilities("agent", { ...runtime, thinking: undefined }).thinking, thinking: runtime.thinking }); }
+      catch { /* not runnable */ }
+    }
+    return choices;
   }
   /** Convenience for Main-authority launches. */
   spawn(kind: string, task: string | undefined, opts: Omit<LaunchRequest, "kind" | "task"> = {}, signal?: AbortSignal): Promise<Agent> {
@@ -177,7 +201,9 @@ export class Worq {
 
     try {
       signal.throwIfAborted();
-      const runtime = await resolveRuntime(this.deps.driver, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal);
+      const hint = matchHint(this.hints(), chains.agent(kind.name));
+      const runtime = await resolveRuntime(this.deps.driver, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal,
+        hint ? { hint, role: kind.name, warn: this.hintWarn } : undefined);
       this.capacity(kind);
       if (kind.access === "write") this.assertDisjointScope(scope, request.group);
       const inline = kind.access === "read" && kind.output === "inline";
@@ -204,8 +230,9 @@ export class Worq {
         const agent = new Agent({
           runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root,
           semaphore: this.semaphore, notify: agentNotify, sessions: this.sessions,
+          ...(this.deps.hints ? { hints: { get: () => this.hints() ?? { path: "", rows: new Map(), problems: [] }, warn: this.hintWarn } } : {}),
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
-        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, startDelay, onWarm });
+        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, hint, startDelay, onWarm });
         this.agents.set(ref, agent);
         if (group) {
           group.members.push(ref);
@@ -472,6 +499,7 @@ export class Worq {
       a.kind.output === "inline" && a.submission && `Submission:\n${a.submission}`,
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
+      a.editWaves.length && ["Edit waves:", ...a.editWaves.map((w) => `  ${w.n}: ${w.base.slice(0, 10)} → ${w.integrated?.slice(0, 10) ?? "not integrated"} · ${w.workers.map((x) => `${x.name ?? x.id} ${x.state}${x.forked ? " (fork)" : ""}`).join(", ")}${w.error ? ` · ${one(w.error, 160)}` : ""}`)].join("\n"),
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.state}: ${d.question}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
       a.reviewedSha && `Reviewed SHA: ${a.reviewedSha}`,
       a.reviewedDigest && `Reviewed digest: ${a.reviewedDigest}`,

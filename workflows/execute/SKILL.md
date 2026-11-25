@@ -15,6 +15,10 @@ Attached plans (`attachments`) are guides, not contracts: diverge on tactics whe
 
 A private, ready toolchain: this checkout has the repository's `node_modules` when it is installed, `node` is on PATH, and TMPDIR is short. Do not install dependencies or hunt for an interpreter; report a missing tool instead.
 
+Batch independent reads: issue every `read_file`/`search`/`list_files` call you already know you need in one turn; they run in parallel. Read the plan's target files together before the first edit.
+
 Run the focused check that shows the change works with `run_command`. Do not write throwaway validation scripts into the product. Keep the diff small enough to read in one pass.
+
+**Contract-first parallel edits (optional):** for tasks touching 1–2 files or one tightly coupled module, edit directly; do not delegate. For tasks spanning 3+ files across 2+ independent areas, first apply shared types, interfaces and exports yourself, then issue every `delegate_edit` slice in one turn with disjoint `writePaths` (pair each module with its unit test) and `fork: true`, and end your turn. After the `[EDIT WAVE]` report, fix cross-slice glue or failed slices, run the full verification once, then submit.
 
 Submit `summary` and a Markdown `report` with: changes, checks run (command and outcome), assumptions and concerns.

@@ -164,6 +164,7 @@ export async function createDriver(host: HostServices, resources: Resources = EM
         get streaming() { return handle.streaming; },
         get runtime() { return current; },
         abort: () => handle.abort(),
+        ...(handle.snapshot ? { snapshot: () => handle.snapshot!() } : {}),
         check(change) { check(change); },
         async configure(change) {
           const next = check(change);

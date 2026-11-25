@@ -23,9 +23,22 @@ No config. Every launch resolves the same way, from `/worq`, `worq_spawn` or `wo
 - `thinking`: explicit, else the adapter default (Pi: Main's level) when the model supports it; an unsupported inherited level is dropped, an unsupported explicit one refused (`capability`).
 - Then the adapter's local preflight (`validateRuntime`) rejects malformed/unknown models before admission. Account, network and provider-side failures can still surface at open; the agent then fails with the existing cleanup.
 
-PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included). The CLI `worq configure` and the dock change a live session; the harness stays locked.
+PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included), then apply any `RUNTIMES.md` hint for their role. The CLI `worq configure` and the dock change a live session; the harness stays locked.
 
 `/worq` shows a runtime step (harness, model, thinking) with Main's selection preselected. Enter launches, Esc cancels; no countdown. Changing harness resets model and thinking to that harness's defaults. Tool and CLI launches never open it.
+
+## Runtime hints (`RUNTIMES.md`)
+
+Optional `<agentDir>/worq/RUNTIMES.md`: one Markdown table of soft per-role defaults (`role | sdk | model | thinking | max-turns | max-minutes`). Starter: `docs/examples/RUNTIMES.md`. Missing file = behaviour above, unchanged.
+
+- Hot reload: re-read when mtime/size changes; next spawn or child launch uses it. Running sessions keep their runtime.
+- Precedence: explicit launch field > hint > Main/adapter default. Explicit values stay fail-closed; hints never throw.
+- `thinking`: `level` (exact, snaps down) or `<=level` (cap, never upgrades). No level control → dropped.
+- `model`/`sdk`: ignored when the launch names another sdk; an unavailable model warns once and falls back.
+- `max-turns`/`max-minutes`: override workflow frontmatter; clamped by `limits`.
+- Roles: `*`, `<kind>`; children `pq`, `<kind>.pq[.<name>]`, `review`, `<kind>.review`, `edit`, `<kind>.edit[.<name>]`. Fields merge broad → specific.
+- `/worq` preselects hinted values per kind (`· RUNTIMES.md`). `worq list <ref>` shows `via: RUNTIMES.md (<role>)`.
+- Safety: same as shared resources (outside Git checkouts, no symlink escape, ≤ 256 KiB). Bad rows/cells skip with one warning per file version.
 
 ## Migration
 
@@ -64,7 +77,11 @@ Subagents are read-only sessions answering one probing question. The delegating 
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-The name labels the child; it runs on its agent's runtime. Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
+The name labels the child; it runs on its agent's runtime (plus `RUNTIMES.md` hints). Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
+
+- `fork: true`: on a `contextFork` harness (Pi) the child continues the parent's conversation (same system, tools, model; seeded history), so it skips re-reading and hits the prompt cache. Its `delegate`/`ask_main`/write handlers refuse. A `RUNTIMES.md` hint naming another model, or a harness without `contextFork`, falls back to a fresh PQ. Forked answers use the parent's `submit` schema (`summary` starting `Basis: …`).
+- Coalesced wake: while PQs are open, their answers queue and wake the parent once, together (`---`-separated). Main messages still wake it at once.
+- `record.json`: `delegations[].forked`, `delegations[].cache` (first response), `delegationPeak` (most concurrent).
 
 A workflow with `REVIEW.md` gets exactly one review subagent, on its first submission and on the agent's runtime. Main's feedback then opens one final, unreviewed revision; the agent ends as `done`. `verify:false` is refused. `worq list <ref>` prints each session's resolved runtime.
 
@@ -87,7 +104,7 @@ Every value is optional; absent keys use these defaults.
 | `agents` | 4 | Active (non-parked) non-inline agents; spawn or resume fails as `at-capacity` |
 | `inlineAgents` | 12 | Active inline read-only agents (e.g. `scout`); concurrent execution remains bounded by `parallel` |
 | `subagents` | 6 | PQs per agent (`pq-limit`) |
-| `parallel` | 4 | Concurrent subagents (PQs and reviews) |
+| `parallel` | 4 | Concurrent subagents (PQs, reviews and edit workers) |
 | `asks` | 3 | `ask_main` calls per session |
 | `agentTurns` | 80 | Turns per agent invocation (spawn or resume) |
 | `subagentTurns` | 16 | Turns in one subagent session |
@@ -98,6 +115,9 @@ Every value is optional; absent keys use these defaults.
 | `askMinutes` | 15 | How long `ask_main` waits before returning "unanswered" |
 | `idleMinutes` | 60 | How long a parked agent keeps its session and worktree before closing |
 | `services` | 2 | Services a write-kind review may start (`service-limit`) |
+| `edits` | 6 | `delegate_edit` workers per agent (`edit-limit`); concurrency shares `parallel` |
+| `editTurns` | 40 | Turns in one edit worker session |
+| `editMinutes` | 15 | Wall clock for one edit worker session |
 
 Budgets are per invocation and hard. Exhausting one parks the agent unreviewed with its last response and a pinned partial commit; `worq send <ref> <text>` resumes it with a fresh budget (same phase, no extra review). Per-session warnings are visible but do not wake Main.
 

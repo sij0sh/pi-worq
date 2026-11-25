@@ -38,6 +38,8 @@ export interface ConversationSpec {
   tools: Tool[];
   /** Session-specific skill packages (a workflow's own). */
   skills?: readonly Skill[];
+  /** Forked history from a parent `Conversation.snapshot()` on the same adapter. */
+  seed?: readonly unknown[];
   log(line: string): void;
   observe?(value: Observation): void;
 }
@@ -72,7 +74,8 @@ export class Conversation<T extends TSchema> {
   private closed = false;
   private result?: Static<T>;
   private rejected?: string;
-  private readonly inbox: string[] = [];
+  /** `coalesce`: a child result; while children are open these wait and wake the session once, together. */
+  private readonly inbox: { text: string; coalesce?: boolean }[] = [];
   private wake?: () => void;
   private turns = 0;
   private prepaid = false;
@@ -303,6 +306,7 @@ export class Conversation<T extends TSchema> {
     this.awaitAdmission = caps.requestAdmission === "awaited";
     const handle = await driver.open({
       id: this.id, runtime: spec.runtime, name: spec.name, cwd: spec.cwd, system: spec.system, skills: spec.skills, signal: this.options.signal,
+      ...(spec.seed?.length ? { seed: spec.seed } : {}),
       tools: [this.finishTool(), ...spec.tools].map((t) => this.wrap(t)),
       emit: (event) => this.event(event),
       ...(this.awaitAdmission
@@ -314,19 +318,33 @@ export class Conversation<T extends TSchema> {
     this.handle = handle;
     return handle;
   }
-  /** Deliver a message: steers a streaming session, otherwise queues it for the next prompt. */
-  deliver(text: string) {
+  /** The live session's forkable history, when the adapter supports contextFork. */
+  snapshot(): readonly unknown[] | undefined { return this.handle?.snapshot?.(); }
+  /**
+   * Deliver a message: steers a streaming session, otherwise queues it for the next prompt.
+   * `coalesce` (child results): while open children remain, queued results wait and are delivered as one prompt.
+   */
+  deliver(text: string, options: { coalesce?: boolean } = {}) {
     const handle = this.handle;
+    const item = { text, ...(options.coalesce ? { coalesce: true } : {}) };
     if (handle?.streaming && handle.steer) void handle.steer(text).catch(() => {
       this.options.spec.log("message queued: the harness cannot steer it into the running turn");
-      this.inbox.push(text);
+      this.inbox.push(item);
       this.poke();
     });
     else {
       if (handle?.streaming) this.options.spec.log("message queued: the harness cannot steer it into the running turn");
-      this.inbox.push(text); this.poke();
+      this.inbox.push(item); this.poke();
     }
   }
+  /** Next prompt from the inbox: the first direct message, else every queued child result joined. */
+  private take(): string | undefined {
+    const direct = this.inbox.findIndex((m) => !m.coalesce);
+    if (direct >= 0) return this.inbox.splice(direct, 1)[0].text;
+    if (!this.inbox.length) return undefined;
+    return this.inbox.splice(0).map((m) => m.text).join("\n\n---\n\n");
+  }
+  private get urgent() { return this.inbox.some((m) => !m.coalesce); }
   poke() { const wake = this.wake; this.wake = undefined; wake?.(); }
   /** Pause the time budget (e.g. while Main answers). */
   pause() { clearTimeout(this.softTimer); if (!this.timer) return; clearTimeout(this.timer); this.timer = undefined; this.remaining = Math.max(1, this.remaining - (Date.now() - this.since)); }
@@ -388,11 +406,12 @@ export class Conversation<T extends TSchema> {
         if (outcome === "failed" || outcome === "preflight-failed") {
           throw new Block("model", `${this.options.spec.name}: ${outcome === "preflight-failed" ? "model prompt rejected before request" : "model request failed"}`);
         }
-        const queued = this.inbox.shift();
-        if (queued !== undefined) { next = queued; continue; }
-        if ((this.options.pending?.() ?? 0) > 0) {
-          await Promise.race([new Promise<void>((resolve) => { this.wake = resolve; }), aborted]);
-          next = this.inbox.shift() ?? "Continue.";
+        const open = () => (this.options.pending?.() ?? 0) > 0;
+        // Direct messages go now; child results wait for their siblings so one wake carries them all.
+        if (this.urgent || (this.inbox.length && !open())) { next = this.take()!; continue; }
+        if (open()) {
+          while (open() && !this.urgent && !this.closed) await Promise.race([new Promise<void>((resolve) => { this.wake = resolve; }), aborted]);
+          next = this.take() ?? "Continue.";
           continue;
         }
         const retry = `Your submit call was rejected: ${this.rejected}\nCorrect it and call submit again.`;

@@ -46,6 +46,8 @@ export interface FakeOptions {
   requests?: { n: number };
   /** The adapter settles a terminal submit as part of the tool call, so there is no live turn to abort. */
   earlyTerminate?: boolean;
+  /** contextFork: what Handle.snapshot returns for a session (by spec). */
+  snapshot?: (spec: Spec) => unknown[];
 }
 export const FULL_CAPS: Capabilities = {
   switchModel: true,
@@ -138,6 +140,7 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
         controller.abort();
         if (options.abort !== "dangle") { stopRequested = true; release?.(); }
       },
+      ...(options.snapshot ? { snapshot: () => options.snapshot!(spec) } : {}),
       dispose() {},
     };
     return handle;

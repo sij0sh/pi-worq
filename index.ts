@@ -15,7 +15,8 @@ import { errorText } from "./src/contracts.ts";
 import { createDriver, discoverAdapters } from "./src/sdk/registry.ts";
 import { loadCatalog, type Kind } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
-import type { Driver } from "./src/sdk/contract.ts";
+import type { Driver, Runtime } from "./src/sdk/contract.ts";
+import { hintLoader } from "./src/runtime/hints.ts";
 import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
 
@@ -32,7 +33,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. If the package includes REVIEW.md, Worq runs one automatic review on first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
-      "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Stay free after spawning; wait for the single barrier notice instead of polling `worq_list`. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
+      "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Default to a 2–4 `scout` barrier wave (one turn) whenever a request requires locating or cross-checking behavior across 2+ areas of the repo before launching `plan` or `execute`. Stay free after spawning; wait for the single barrier notice instead of polling `worq_list`. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
     ],
   },
   worq_list: {
@@ -132,7 +133,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host, main: () => ({ model: host.model && `${host.model.provider}/${host.model.id}`, thinking: host.thinkingLevel }) }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify,
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify, hints: hintLoader(dir),
           warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;
@@ -175,10 +176,13 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         catalog.get("execute"),
         ...[...catalog.values()].filter((kind) => kind.name !== "plan" && kind.name !== "execute"),
       ].filter((kind) => kind !== undefined);
-      const initial = await worq.defaults();
-      const result = await launchPanel(ctx.ui, { kinds, initial, choices: await worq.launchChoices(initial) });
+      const fallback = await worq.defaults();
+      const initials = new Map<string, Runtime>();
+      for (const kind of kinds) initials.set(kind.name, await worq.defaults(undefined, kind.name).catch(() => fallback));
+      const result = await launchPanel(ctx.ui, { kinds, initial: fallback, initials, choices: await worq.launchChoices(fallback, [...initials.values()]) });
       if (!result || closing) return;
       const { kind, instructions: extra, runtime } = result;
+      const initial = initials.get(kind.name) ?? fallback;
       const explicit = runtime.sdk !== initial.sdk || runtime.model !== initial.model || runtime.thinking !== initial.thinking
         ? { sdk: runtime.sdk, ...(runtime.model !== undefined ? { model: runtime.model } : {}), ...(runtime.thinking !== undefined ? { thinking: runtime.thinking } : {}) }
         : {};

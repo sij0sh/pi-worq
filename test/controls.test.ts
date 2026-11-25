@@ -211,12 +211,14 @@ test("controls: cancelling one PQ leaves its siblings and parent running; cancel
   const owner = worq.session(agent.ref);
   assert.equal(owner.role, "agent.plan");
   await pqs[0].cancel();
-  await until(() => answers.length === 1);
-  assert.match(answers[0], /^\[PQ cancelled\] First question\?[\s\S]*cancelled by Main/, "the parent is told");
-  assert.equal(agent.delegations[0].state, "cancelled");
+  await until(() => agent.delegations[0].state === "cancelled");
   assert.equal(agent.delegations[1].state, "running", "the sibling keeps running");
   assert.ok(!agent.ended, "the parent keeps running");
+  assert.equal(answers.length, 0, "child results wait for open siblings (one coalesced wake)");
   assert.ok(!worq.sessions.has(pqs[0].key), "unregistered on disposal");
+  await pqs[1].cancel();
+  await until(() => answers.length === 1);
+  assert.match(answers[0], /^\[PQ cancelled\] First question\?[\s\S]*cancelled by Main[\s\S]*\[PQ cancelled\] Second question\?/, "the parent is told once, about both");
   await assert.rejects(worq.configure(agent.ref, { thinking: "high" }), /cannot change a live session/, "a harness without configure refuses instead of dropping the change");
   await owner.cancel();
   assert.equal(agent.state, "cancelled");

@@ -46,6 +46,11 @@ export interface Capabilities {
    * model request and releases nothing until allowed. `turn` events are observational only for core charging.
    */
   requestAdmission?: "awaited";
+  /**
+   * The adapter can seed a new session with another live session's history (`Handle.snapshot` → `Spec.seed`).
+   * Absent/false: forked children fall back to a fresh session plus a brief.
+   */
+  contextFork?: boolean;
 }
 
 /** One normalized event stream from adapter to core. */
@@ -83,6 +88,8 @@ export interface Spec {
   admitRequest?(signal: AbortSignal): Promise<RequestDecision>;
   /** Aborts session opening; an adapter must not leave a live session behind it. */
   signal: AbortSignal;
+  /** Opaque history from `Handle.snapshot` of a session on the same adapter (contextFork only). */
+  seed?: readonly unknown[];
 }
 /** Fully resolved session request: what an adapter receives. */
 export interface SessionSpec extends Spec {
@@ -110,6 +117,8 @@ export interface Handle {
   readonly selection?: RuntimeChange;
   /** Mechanics only: apply model and/or thinking to the live session, keeping its history. The core decides when and to what. */
   configure?(change: RuntimeChange): Promise<void>;
+  /** contextFork: opaque copy of completed history, up to the last turn boundary with every tool call answered. */
+  snapshot?(): readonly unknown[];
   dispose(): void;
 }
 export interface CoreHandle extends Omit<Handle, "configure" | "selection"> {

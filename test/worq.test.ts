@@ -76,8 +76,8 @@ test("duplicate PQ questions retain independent answers while queued", async (t)
     "agent.plan": async (turn) => {
       if (turn.text.startsWith("[PQ]")) {
         assert.ok(turn.text.startsWith(`[PQ] ${question}`));
-        answers.push(turn.text);
-        if (answers.length === 2) await turn.tool("submit", planSubmission);
+        answers.push(...turn.text.split("\n\n---\n\n"));
+        await turn.tool("submit", planSubmission);
         return;
       }
       for (let i = 0; i < 2; i++) assert.match(await turn.tool("delegate", { question, why: "independent evidence" }), /Delegated PQ:/);

@@ -8,6 +8,8 @@ disable-model-invocation: false
 Recursive question: **What unresolved decision could materially change how we proceed?**
 Completion: consequential decisions resolved or surfaced.
 
+Batch independent reads: issue every `read_file`/`search`/`list_files` call you already know you need in one turn; they run in parallel. Read the files the repository map points to up front, then reason; avoid one-file-per-turn exploration.
+
 Check intent first: could another reasonable reading of the task change what success means? Settle it from the task and repository; ask Main only if it stays material.
 
 ## Question tree
@@ -21,6 +23,8 @@ Resolve all open questions whose prerequisites are settled. Integrate each answe
 ## Delegation
 
 Delegate independent, bounded investigations that benefit from separate reading. Include the purpose and settled prerequisites; the subagent lacks your findings. Subagents investigate; you decide.
+
+**Swarm lenses (optional):** once you have read the core files, if the task spans 3+ files or has competing design tradeoffs, issue 2–3 `delegate` calls in one turn with `fork: true` and distinct `name`s (e.g. `minimal`, `failure-modes`, `perf-test`), each asking that lens's strongest recommendation and risk, then end your turn: all answers arrive together. Synthesize the strongest points and record resolved tradeoffs under Decisions. Skip lenses for small or single-file tasks.
 
 Launch ready PQs before waiting; continue other ready work. End your turn to wait only when no useful work remains. If a PQ fails or the limit is reached, investigate directly or report the gap. Do not `submit` while PQs are open.
 

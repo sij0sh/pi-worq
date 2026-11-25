@@ -9,6 +9,7 @@ Every agent kind is an operator-installed **skill package**: own SDK session, `a
   SKILL.md          frontmatter + body (the kind prompt)
   PQ.md             optional: enables delegate; child instructions
   REVIEW.md         optional: mandatory first-submission review instructions
+  EDIT.md           optional (write kinds only): enables delegate_edit; edit worker instructions
   gates.json        optional (write kinds only): deterministic pre-submit commands
   references/…      optional supporting files
   scripts/…
@@ -74,6 +75,21 @@ All configured executables are checked before any gate launches. Package gates p
 - **One review.** With `REVIEW.md`, the first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
 - Main accepts with `worq_cancel`, or sends filtered feedback once with `worq_send`. The agent revises, submits its final result without another review, and ends as `done` (worktree removed, branch/plan kept).
 - Remove `REVIEW.md` from a provisioned package to opt out of review. The submission ends as `done`, with no substitute reviewer needed.
+
+## Edit waves (`EDIT.md`)
+
+Contract-first parallel edits inside one write agent. Main still sees one branch, one candidate, one review.
+
+1. Parent applies shared types/interfaces/exports, then calls `delegate_edit` per slice (`task`, `writePaths`, optional `name`, `context`, `fork`) in one turn.
+2. First call pins the parent worktree (`edit wave N base`). Each worker gets a detached worktree from that commit (`<state>/<ref>/edits/<id>/work`), dependencies linked.
+3. Workers edit only within both their `writePaths` and the parent's (edit + submit audit), run slice-local checks, submit; Worq commits each slice. Parent writes and `run_command` are fenced; `submit` refuses while workers are open.
+4. When all settle: `git merge-tree` accumulates clean slices onto the base, `commit-tree` + `merge --ff-only` lands one commit on `worq/<ref>`, worktrees are removed, and the parent wakes once with `[EDIT WAVE N]` (per-slice status, diffstat, conflict/partial SHAs to cherry-pick).
+5. Parent fixes glue, runs the full gates once, submits (one review if `REVIEW.md`).
+
+- Guards: slices in one wave must be disjoint (`scope-conflict`); slices must overlap the parent's own `writePaths`; `limits.edits` workers per agent (`edit-limit`); a failed slice never blocks clean siblings.
+- `fork: true` (contextFork harnesses): worker continues the parent's context with its tool definitions rebound to the worker's worktree; other handlers refuse. Else fresh session with `EDIT.md` + slice + attached plans.
+- Runtime: owner's, plus `RUNTIMES.md` roles `edit`, `<kind>.edit[.<name>]` (forks keep the parent's model). Budgets: `limits.editTurns` / `editMinutes`.
+- Delete `EDIT.md` to disable. `record.json`: `editWaves[]` (base, integrated, workers with state, sha, forked).
 - Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
 - Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.

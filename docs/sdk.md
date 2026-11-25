@@ -71,6 +71,7 @@ interface SessionSpec {
   beforeRequest?(signal: AbortSignal): Promise<void>; // legacy safe boundary
   admitRequest?(signal): Promise<{ allowed: true } | { allowed: false; reason }>; // awaited admission
   signal: AbortSignal;            // aborts opening
+  seed?: readonly unknown[];      // contextFork: another handle's snapshot() to continue from
 }
 interface Handle {
   prompt(text, signal?): Promise<"completed" | "preflight-failed" | "failed" | "aborted">;
@@ -79,6 +80,7 @@ interface Handle {
   abort(): Promise<void>;
   readonly selection?: { model?: string; thinking?: string }; // effective SDK settings
   configure?(change: { model?; thinking? }): Promise<void>;  // keeps history; harness stays locked
+  snapshot?(): readonly unknown[]; // contextFork: completed history up to the last balanced turn
   dispose(): void;
 }
 type SessionEvent =
@@ -114,6 +116,9 @@ Pure data; `assertRuntime(runtime, caps)` judges the resolved runtime. Not a sub
 | `context` | `replace` + no ambient instructions required | Anything else refuses the session |
 | `turnUnit` | `request` (one `turn` per model request) or `prompt` | Informational; logged at open |
 | `requestAdmission` | `"awaited"` opts into the pre-request gate; `turn` events are observational only | None; the adapter must call it |
+| `contextFork` | `Handle.snapshot()` / `SessionSpec.seed` work: a new session can continue another's history | Absent/`false`: `fork: true` children start fresh with a brief |
+
+Forked children reuse the parent's exact `system`, tool definitions (disallowed handlers fenced) and model, so the provider prompt cache hits on the seeded prefix. Snapshots are opaque to the core and only seed sessions on the same adapter.
 
 ## Turn accounting
 
@@ -140,7 +145,8 @@ Claude uses the SDK's native in-process MCP server (`createSdkMcpServer`) scoped
 - `src/sdk/pi.ts` → `piAdapter(host)`.
 - Refs `<provider>/<model>`; malformed or not in Main's model registry → `model`, at preflight; no Main model and none requested → `model`.
 - Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and providers match Main. No extensions are loaded.
-- Capabilities: `switchModel: true`, thinking from the model, `turnUnit: "request"`, isolated context.
+- Capabilities: `switchModel: true`, thinking from the model, `turnUnit: "request"`, isolated context, `contextFork: true`.
+- Fork: `snapshot()` copies `session.messages` (user/assistant/toolResult only) up to the last point where every tool call has its result, excluding the in-flight turn; `seed` is appended to a fresh in-memory `SessionManager` before `createAgentSession`.
 - `configure` uses `session.setModel` / `setThinkingLevel`. Pi clamps an incompatible level on a model-only switch; the adapter reports the effective level.
 - Live changes apply at once when idle, or before the next request, even inside the same prompt. The adapter awaits `beforeRequest` before resolving provider inputs, never interrupting a running tool. For adapters without that hook, the core applies queued changes when the prompt settles.
 

@@ -22,16 +22,17 @@ function cycle<T>(values: readonly T[], value: T | undefined, delta: number) {
   return values[(start + values.length + delta) % values.length];
 }
 
-export interface LaunchRequest { kinds: Kind[]; initial: Runtime; choices: ModelChoice[] }
+/** `initials`: per-kind defaults (RUNTIMES.md hints applied); `initial` otherwise. */
+export interface LaunchRequest { kinds: Kind[]; initial: Runtime; choices: ModelChoice[]; initials?: ReadonlyMap<string, Runtime> }
 type LaunchResult = { kind: Kind; instructions: string; runtime: Runtime };
 const titleCase = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial, choices }: LaunchRequest): Promise<LaunchResult | undefined> {
+export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallback, choices, initials }: LaunchRequest): Promise<LaunchResult | undefined> {
   return new Promise(resolve => ui.setWidget('worq-launch', (tui, theme) => {
     // Pi 1.6 main and fullscreen TUIs both extend TuiBase.
     const screen = tui as typeof tui & { getFocusedComponent(): Component | null };
     const previous = screen.getFocusedComponent();
     const editor = new Editor(tui, { borderColor: s => theme.fg('border', s), selectList: getSelectListTheme() });
-    let step = 0, agent = 0, field = 0, selected = { ...initial }, closed = false;
+    let step = 0, agent = 0, field = 0, initial = fallback, selected = { ...initial }, closed = false;
     const finish = (result?: LaunchResult) => { resolve(result); ui.setWidget('worq-launch', undefined); };
     const paste = async () => {
       const text = await readClipboardText();
@@ -60,8 +61,9 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial, choice
           while (lines.length < 3) lines.push(' '.repeat(w));
           body = lines.map(line => theme.bg('customMessageBg', line));
         } else {
-          const model = selected.sdk === initial.sdk && selected.model === initial.model && initial.model ? "Main's model" : selected.model ?? 'SDK default';
-          const values = [selected.sdk === 'pi' ? 'Pi' : selected.sdk, model, titleCase(selected.thinking ?? 'SDK default')];
+          const model = selected.sdk === fallback.sdk && selected.model === fallback.model && fallback.model ? "Main's model" : selected.model ?? 'SDK default';
+          const hinted = initial.via.includes('RUNTIMES.md') && selected.sdk === initial.sdk && selected.model === initial.model && selected.thinking === initial.thinking ? ' · RUNTIMES.md' : '';
+          const values = [selected.sdk === 'pi' ? 'Pi' : selected.sdk, `${model}${hinted && (initial.model !== fallback.model || initial.sdk !== fallback.sdk) ? hinted : ''}`, `${titleCase(selected.thinking ?? 'SDK default')}${hinted}`];
           body = values.map((value, i) => row(align(`${i === field ? '›' : ' '} ${['Harness', 'Model', 'Thinking'][i]}`, `‹ ${clean(value)} ›`), i === field));
         }
         const hint = ['↑↓ Select · Enter Continue','Shift+Enter New line · Enter Continue','↑↓ Select · ←→ Change · Enter Launch'][step];
@@ -74,6 +76,7 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial, choice
         if (matchesKey(data,'escape')) return finish();
         if (matchesKey(data,'enter') && !(step === 1 && data === '\n')) {
           if (step === 2) return finish({ kind: kinds[agent], instructions: editor.getExpandedText(), runtime: selected });
+          if (step === 0) { initial = initials?.get(kinds[agent].name) ?? fallback; selected = { ...initial }; }
           step++;
         } else if (step === 1) {
           if (matchesKey(data,'ctrl+v')) void paste();

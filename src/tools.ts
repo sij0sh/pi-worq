@@ -97,8 +97,10 @@ export function readTools(cwd: string): Tool[] {
 }
 
 /** File edits inside an execute agent's worktree. */
-export function writeTools(cwd: string, scope?: WriteScope): Tool[] {
-  const allow = (p: string) => scope?.assertAllowed(p);
+/** `scopes`: every one must allow a path (an edit worker obeys its parent's and its own). `fence` may refuse any write. */
+export function writeTools(cwd: string, scope?: WriteScope | readonly WriteScope[], fence?: () => void): Tool[] {
+  const scopes = scope === undefined ? [] : Array.isArray(scope) ? scope as readonly WriteScope[] : [scope as WriteScope];
+  const allow = (p: string) => { fence?.(); for (const s of scopes) s.assertAllowed(p); };
   return [
     tool("write_file", "Create or replace a complete UTF-8 file", obj({ path, content: Type.String({ maxLength: 80_000 }) }), async ({ path, content }) => {
       allow(path);
@@ -145,7 +147,7 @@ export function writeTools(cwd: string, scope?: WriteScope): Tool[] {
  * Process-running tools (commands, services, terminals) with owned cleanup.
  * `verify` adds services, terminal observation and artifact saving for execute reviewers.
  */
-export function processTools(cwd: string, runtime: string, options: { projectRoot?: string; verify?: { artifacts: string; services: number }; signal: AbortSignal }) {
+export function processTools(cwd: string, runtime: string, options: { projectRoot?: string; verify?: { artifacts: string; services: number }; signal: AbortSignal; fence?: () => void }) {
   const running = new Set<Promise<unknown>>();
   let cleanupError: CleanupError | undefined;
   const track = <T>(pending: Promise<T>) => {
@@ -159,6 +161,7 @@ export function processTools(cwd: string, runtime: string, options: { projectRoo
   const tools: Tool[] = [
     tool("run_command", "Run a trusted local command in this checkout; no shell parsing. Returns exit code and output tails.",
       obj({ ...command, stdin: Type.Optional(Type.String({ maxLength: 8192 })) }), async ({ executable, args, stdin }, signal, report) => {
+        options.fence?.();
         const out = await track(runProcess(executable, args, { cwd, env: (await environment()).env, signal: sig(signal), ms: 120_000, stdin, report }));
         report?.({ kind: 'exit', code: out.code, stdout: !!out.stdout, stderr: !!out.stderr });
         return `Exit ${out.code}\nstdout:\n${out.stdout.slice(-6000)}\nstderr:\n${out.stderr.slice(-6000)}`;

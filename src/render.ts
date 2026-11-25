@@ -66,3 +66,33 @@ export function reviewLines(review: ReviewRecord | undefined, caps: ReviewCaps =
     ...(review.artifacts ?? []).map((a) => `  artifact: ${a}`),
   ];
 }
+
+/** One `delegate_edit` slice. `conflict`: its commit did not merge cleanly onto the wave. */
+export interface EditWorker {
+  id: string; name?: string; task: string; writePaths: readonly string[];
+  state: "queued" | "running" | "done" | "integrated" | "conflict" | "failed" | "cancelled";
+  forked?: boolean; sha?: string; recoverySha?: string; files?: string[]; summary?: string; error?: string;
+}
+/** Parallel edit slices from one pinned base, integrated together. */
+export interface EditWave { n: number; base: string; workers: EditWorker[]; integrated?: string; error?: string }
+
+/** The parent's single wake after a wave settles. */
+export function editWaveMessage(wave: EditWave, diffstat = "") {
+  const tag = (w: EditWorker) => `${w.name ?? w.id} (${w.writePaths.join(", ")})`;
+  const merged = wave.workers.filter((w) => w.state === "integrated").length;
+  const lines = wave.workers.map((w) => {
+    switch (w.state) {
+      case "integrated": return `- [integrated] ${tag(w)}: ${one(w.summary ?? "done", 400)}`;
+      case "done": return `- [no changes] ${tag(w)}: ${one(w.summary ?? "done", 300)}`;
+      case "conflict": return `- [conflict] ${tag(w)} @ ${w.sha}: ${one(w.error ?? "", 300)}. Not merged; apply it yourself (git cherry-pick ${w.sha}) or redo it.`;
+      default: return `- [${w.state}] ${tag(w)}: ${one(w.error ?? "no result", 300)}${w.recoverySha ? `. Partial commit ${w.recoverySha} (unverified; git cherry-pick to reuse)` : ""}`;
+    }
+  });
+  return [
+    `[EDIT WAVE ${wave.n}] ${merged}/${wave.workers.length} slices integrated from ${wave.base.slice(0, 10)}${wave.integrated ? ` → ${wave.integrated.slice(0, 10)} (your branch is fast-forwarded)` : "; your worktree is unchanged"}`,
+    ...lines,
+    ...(wave.error ? [`Integration error: ${one(wave.error, 400)}`] : []),
+    ...(diffstat ? [diffstat] : []),
+    "Your edits and commands are unfenced. Fix cross-slice glue and any failed slice, run the full verification once, then submit.",
+  ].join("\n");
+}

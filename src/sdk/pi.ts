@@ -49,6 +49,30 @@ function sdkTool(tool: Tool, outcomes: Map<string, Outcome>) {
   });
 }
 
+type Message = { role: string; content?: unknown; toolCallId?: string };
+const FORKABLE = new Set(["user", "assistant", "toolResult"]);
+/**
+ * Completed history up to the last boundary where every tool call has its result: the prefix the provider
+ * already cached. An in-flight assistant turn (e.g. the one calling `delegate`) is excluded.
+ */
+export function balanced(messages: readonly Message[]): Message[] {
+  const pending = new Set<string>();
+  let cut = 0;
+  messages.forEach((m, i) => {
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      for (const part of m.content as { type?: string; id?: string }[]) if (part?.type === "toolCall" && part.id) pending.add(part.id);
+    }
+    if (m.role === "toolResult" && m.toolCallId) pending.delete(m.toolCallId);
+    if (!pending.size && FORKABLE.has(m.role)) cut = i + 1;
+  });
+  return messages.slice(0, cut).filter((m) => FORKABLE.has(m.role)).map((m) => ({ ...m }));
+}
+function seeded(cwd: string, seed: readonly unknown[] | undefined) {
+  const manager = SessionManager.inMemory(cwd);
+  for (const message of seed ?? []) manager.appendMessage(message as Parameters<SessionManager["appendMessage"]>[0]);
+  return manager;
+}
+
 /** Pi SDK sessions in memory, one per Worq conversation. Runtime model, else Main's model. */
 export function piAdapter(host: PiHost | undefined): SDKAdapter {
   if (!host) throw new Block("config", "The pi sdk needs a Pi host (Main's model registry)");
@@ -71,7 +95,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
     capabilities(runtime): Capabilities {
       return {
         switchModel: true, thinking: thinkingLevels(primary(runtime)), turnUnit: "request",
-        context: { system: "replace", ambientInstructions: false },
+        context: { system: "replace", ambientInstructions: false }, contextFork: true,
       };
     },
     /** Registry lookup only: no session, request or credential probe. */
@@ -97,7 +121,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         tools: tools.map((t) => t.name), customTools: tools,
         ...(host.agentDir ? { agentDir: host.agentDir } : {}),
         ...(modelRuntime ? { modelRuntime: modelRuntime as never } : {}),
-        sessionManager: SessionManager.inMemory(spec.cwd),
+        sessionManager: seeded(spec.cwd, spec.seed),
         settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
       });
       const beforeRequest = spec.beforeRequest;
@@ -183,6 +207,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
         get streaming() { return session.isStreaming; },
         abort: () => session.abort(),
         get selection() { return selection(); },
+        snapshot: () => balanced(session.messages as unknown as Message[]),
         async configure(change) {
           const next = change.model !== undefined ? find(change.model, at(runtime)) : undefined;
           const level = (change.thinking ?? session.thinkingLevel) as Level;

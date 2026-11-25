@@ -6,4 +6,6 @@ Report consequential findings, most consequential first, at most five. Lead each
 
 Verdict: `pass` (no consequential findings), `findings`, or `inconclusive` (you could not establish the result).
 
+Batch independent reads: issue every `read_file`/`search`/`list_files` call you already know you need in one turn; they run in parallel.
+
 Do not modify the candidate or initiate another review. Stop when further investigation is unlikely to change acceptance.

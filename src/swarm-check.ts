@@ -40,6 +40,8 @@ export interface SwarmCheckResult {
   pairwiseConflicts: PairwiseConflict[];
   sharedCleanFiles: { file: string; branches: string[] }[];
   mergeCommands: string[];
+  /** Tree of target plus every clean branch, accumulated in order (the target commit when none merged). */
+  mergedTree: string;
 }
 
 interface MergeTreeResult {
@@ -164,7 +166,8 @@ export async function checkSwarm(
     ? branches.filter((b) => b.sha && b.filesChanged.length > 0).map((b) => `git merge --no-ff ${b.sha} -m "Merge ${b.branch}"`)
     : [];
 
-  return { targetRef, targetSha, clean, branches, pairwiseConflicts, sharedCleanFiles, mergeCommands };
+  const mergedTree = accTree === targetSha ? await git(root, options.signal, "rev-parse", `${targetSha}^{tree}`) : accTree;
+  return { targetRef, targetSha, clean, branches, pairwiseConflicts, sharedCleanFiles, mergeCommands, mergedTree };
 }
 
 export function formatSwarmCheck(result: SwarmCheckResult): string {
