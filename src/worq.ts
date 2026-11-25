@@ -168,7 +168,7 @@ export class Worq {
     return [
       `${a.headline} · ${a.state}`,
       `Task: ${a.task}`,
-      `Phase: ${a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "not independently reviewed") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
+      `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "not independently reviewed") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,
@@ -177,10 +177,11 @@ export class Worq {
       a.branch && `Branch: ${a.branch}${a.candidate ? ` @ ${a.candidate}` : ""}`,
       a.recoverySha && `Recovery SHA ${a.recoverySha}: UNVERIFIED / not merge-ready`,
       a.diffstat && a.diffstat,
+      a.kind.access === "write" && a.submission && `Writer submission:\n${a.submission}`,
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.delegations.length && ["PQs:", ...a.delegations.map((d) => `  ${d.state}: ${d.question}${d.answer ? `\n     → ${one(d.answer.answer, 300)}` : d.error ? `\n     → ${one(d.error, 200)}` : ""}`)].join("\n"),
-      (a.plan || a.candidate) && [`Review: ${reviewStatus(a.review)}`, ...reviewLines(a.review)].join("\n"),
+      a.review && [`Review: ${reviewStatus(a.review)}`, ...reviewLines(a.review)].join("\n"),
       ["Recent activity:", ...a.tail(20).map((h) => `  ${h.line}`)].join("\n"),
     ].filter(Boolean).join("\n");
   }

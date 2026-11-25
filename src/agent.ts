@@ -440,7 +440,7 @@ export class Agent {
       `worq_send resumes with a fresh budget; worq_cancel closes it.`,
     ].join("\n");
     const where = this.kind.access === "write" ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    if (this.state === "done" && !this.review) return `${this.headline} done · not independently reviewed\n${where}`;
+    if (this.state === "done" && !this.review) return `${this.headline} done · not independently reviewed\n${where}\nSubmission details: worq_list(${this.ref}).`;
     if (this.state === "done") return [`${this.headline} done · final revision submitted after review; not re-reviewed`, where,
       `Verify the exact candidate before reporting success or merging. worq_list(${this.ref}) has the review.`].join("\n");
     return [`${this.headline} parked · ${reviewStatus(this.review)}`, where,

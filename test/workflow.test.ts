@@ -240,19 +240,25 @@ test("read package: plan artifact and exactly one review", async (t) => {
   const { kinds } = userKinds(agentDirPath);
   let system = "";
   let finish = "";
+  let reviewingDetail = "";
   const { worq, next, seen } = setup(root, state, {
     "agent.documentation": async (turn) => {
       system = turn.system;
       finish = turn.spec.tools.find((tool) => tool.name === "submit")!.description;
       await turn.tool("submit", planSubmission);
     },
-    review: async (turn) => { await turn.tool("submit", pass); },
+    review: async (turn) => {
+      reviewingDetail = worq.list("documentation-run");
+      await turn.tool("submit", pass);
+    },
   }, {}, undefined, kinds);
   const agent = await userLaunch(worq, "documentation");
   const ready = await next("parked", agent.ref);
   assert.match(system, /Inspect the repository/);
   assert.match(finish, /^Submit your result\. Worq saves it to \.agents\/plans\/\./);
   assert.equal(seen.filter((spec) => spec.name === "review").length, 1);
+  assert.match(reviewingDetail, /Phase: independent review in progress/);
+  assert.doesNotMatch(reviewingDetail, /No review ran|not independently reviewed|Phase: initial work/i);
   assert.equal(agent.review?.verdict, "pass");
   assert.match(ready.text, /parked · no review issues reported/);
   assert.equal(agent.plan?.path, ".agents/plans/plan-documentation-run.md");
@@ -272,7 +278,7 @@ test("write package pins worq/<ref>, never merges, and ends without review", asy
       system = turn.system;
       finish = turn.spec.tools.find((tool) => tool.name === "submit")!.description;
       await turn.tool("write_file", { path: "app.py", content: "print('CHANGED')\n" });
-      await turn.tool("submit", { summary: "Changed the greeting", report: "Changes: app.py" });
+      await turn.tool("submit", { summary: "Changed the greeting", report: "Checks: CLI output changed.\nBlocker: integration service unavailable." });
     },
     review: async (turn) => { await turn.tool("submit", pass); },
   }, {}, undefined, kinds);
@@ -284,6 +290,10 @@ test("write package pins worq/<ref>, never merges, and ends without review", asy
   assert.match(finish, /^Submit your result\. Ends your turn\.$/);
   assert.equal(seen.filter((spec) => spec.name === "review").length, 0);
   assert.match(ready.text, /not independently reviewed/);
+  assert.match(ready.text, /worq_list\(change-log-run\)/);
+  const detail = worq.list(agent.ref);
+  assert.match(detail, /Phase: not independently reviewed/);
+  assert.match(detail, /Writer submission:\nChanged the greeting\n\nChecks: CLI output changed\.\nBlocker: integration service unavailable\./);
   assert.match(ready.text, new RegExp(`Branch worq/${agent.ref}`));
   assert.equal(await readFile(join(root, "app.py"), "utf8"), "print('hello')\n", "no merge");
   assert.equal(agent.state, "done");
