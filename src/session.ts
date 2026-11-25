@@ -45,7 +45,7 @@ export interface ConversationOptions<T extends TSchema> {
   driver: Driver;
   spec: ConversationSpec;
   /** The one finish tool, `submit`, with this assignment's schema. */
-  finish: { description: string; schema: T; validate?: (value: Static<T>) => void };
+  finish: { description: string; schema: T; validate?: (value: Static<T>, signal: AbortSignal) => void | Promise<void> };
   /** Budget per invocation of `run`. */
   turns: number;
   minutes: number;
@@ -213,11 +213,12 @@ export class Conversation<T extends TSchema> {
 
   private finishTool(): Tool {
     const { description, schema, validate } = this.options.finish;
-    return tool("submit", `${description} Ends your turn.`, schema, (params) => {
+    return tool("submit", `${description} Ends your turn.`, schema, async (params, signal) => {
       try {
-        this.gate.throwIfAborted();
+        const live = AbortSignal.any([this.gate, signal]);
+        live.throwIfAborted();
         const value = parse(schema, params, "submit");
-        validate?.(value);
+        await validate?.(value, live);
         this.result = value;
         this.rejected = undefined;
         return { text: "Submitted.", terminate: true };

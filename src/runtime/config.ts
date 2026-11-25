@@ -7,14 +7,14 @@ import type { Runtime } from "../sdk/contract.ts";
 const int = (minimum: number, maximum: number) => Type.Optional(Type.Integer({ minimum, maximum }));
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
 const Limits = obj({
-  agents: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), asks: int(0, 20),
+  agents: int(1, 32), scouts: int(1, 32), subagents: int(0, 64), parallel: int(1, 16), asks: int(0, 20),
   agentTurns: int(1, 400), subagentTurns: int(1, 100), reviewerTurns: int(1, 200),
   agentMinutes: int(1, 600), subagentMinutes: int(1, 120), reviewerMinutes: int(1, 240), askMinutes: int(1, 1440),
   idleMinutes: int(1, 1440), services: int(0, 8),
 });
 const ConfigSchema = obj({ limits: Type.Optional(Limits) });
 export const DEFAULT_LIMITS = {
-  agents: 4, subagents: 6, parallel: 4, asks: 3,
+  agents: 4, scouts: 12, subagents: 6, parallel: 4, asks: 3,
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
   agentMinutes: 30, subagentMinutes: 5, reviewerMinutes: 10, askMinutes: 15,
   idleMinutes: 60, services: 2,

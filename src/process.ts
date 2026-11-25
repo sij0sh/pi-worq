@@ -159,14 +159,18 @@ export async function runProcess(executable: string, args: string[], options: { 
   return child.done;
 }
 
-export async function git(cwd: string, signal: AbortSignal, ...args: string[]) {
+export async function gitRaw(cwd: string, signal: AbortSignal, ...args: string[]): Promise<ProcessResult> {
   if (!gitExe) throw new Block("launch", "Worq requires Git for Windows (git.exe on PATH)");
-  const result = await runProcess(gitExe, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
+  return runProcess(gitExe, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
     ...args], {
     cwd, signal, ms: 30_000,
     env: { ...cleanEnv, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: windows ? "NUL" : "/dev/null", GIT_TERMINAL_PROMPT: "0",
       GIT_AUTHOR_NAME: "Worq", GIT_AUTHOR_EMAIL: "worq@localhost", GIT_COMMITTER_NAME: "Worq", GIT_COMMITTER_EMAIL: "worq@localhost" },
   });
+}
+
+export async function git(cwd: string, signal: AbortSignal, ...args: string[]) {
+  const result = await gitRaw(cwd, signal, ...args);
   if (result.code) throw new Block("git", `git ${args[0]}: ${result.stderr.trim().slice(0, 700) || `exit ${result.code}`}`);
   return result.stdout.trim();
 }

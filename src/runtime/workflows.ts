@@ -1,18 +1,30 @@
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Block, errorText } from "../contracts.ts";
+import { Block, errorText, json, parse } from "../contracts.ts";
+import { GateList, type GateSpec } from "../gate.ts";
 import { contained, readBounded, type Skill, exists, loadSkill, outsideCheckout } from "./skills.ts";
 
 /**
  * The one agent catalog: skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write). Role files enable delegation and review.
- * Plan and Execute ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
+ * `access` (`read` explicit; absent = write), `output` (`plan` or `inline`, read-only), optional caps
+ * (`max-turns`, `max-minutes`, `asks`). Role files enable delegation, review, and pre-submit gates.
+ * Plan, Execute and Scout ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
+export type OutputMode = "plan" | "inline";
+export interface KindLimits { turns?: number; minutes?: number; asks?: number }
 export interface Kind {
-  name: string; access: "read" | "write"; description: string; userOnly: boolean; skill: Skill;
-  pq?: string; review?: string;
+  name: string; access: "read" | "write"; output: OutputMode; description: string; userOnly: boolean; skill: Skill;
+  pq?: string; review?: string; limits?: KindLimits; gates?: readonly GateSpec[];
+}
+function optionalInt(meta: Record<string, string>, key: string, min: number, max: number): number | string | undefined {
+  const raw = meta[key];
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) return `${key} must be an integer (${min}..${max})`;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < min || n > max) return `${key} must be between ${min} and ${max}`;
+  return n;
 }
 function optional(root: string, file: string) {
   const path = join(root, file);
@@ -35,12 +47,28 @@ function load(root: string, path: string, name: string): Kind | string {
   if (meta.name !== undefined && meta.name !== name) return `name "${meta.name}" must match the folder name "${name}"`;
   if (!meta.description?.trim()) return "description is required (shown by /worq and worq_spawn)";
   if (!skill.body) return "SKILL.md body is blank";
-  skill.files = skill.files.filter(file => file !== "PQ.md" && file !== "REVIEW.md");
+  skill.files = skill.files.filter(file => file !== "PQ.md" && file !== "REVIEW.md" && file !== "gates.json");
   const access = meta.access ?? "write";
   if (access !== "read" && access !== "write") return "access must be read or write";
+  if (access === "write" && meta.output !== undefined) return "output is only valid when access is read";
+  const output = (meta.output ?? "plan") as OutputMode;
+  if (output !== "plan" && output !== "inline") return "output must be plan or inline";
   const disable = meta["disable-model-invocation"] ?? "false";
   if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
-  return { name, skill, access, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md") };
+  const turns = optionalInt(meta, "max-turns", 1, 400);
+  if (typeof turns === "string") return turns;
+  const minutes = optionalInt(meta, "max-minutes", 1, 600);
+  if (typeof minutes === "string") return minutes;
+  const asks = optionalInt(meta, "asks", 0, 20);
+  if (typeof asks === "string") return asks;
+  const limits = turns !== undefined || minutes !== undefined || asks !== undefined ? { turns, minutes, asks } : undefined;
+  let gates: GateSpec[] | undefined;
+  const gateFile = join(path, "gates.json");
+  if (exists(gateFile)) {
+    if (access !== "write") return "gates.json is only valid when access is write";
+    gates = parse(GateList, json(readBounded(contained(path, gateFile), true), gateFile), gateFile);
+  }
+  return { name, skill, access, output, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */

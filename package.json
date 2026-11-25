@@ -1,6 +1,6 @@
 {
   "name": "pi-worq",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Plan and execute Pi SDK agents with probing-question subagents and independent review, managed from the main Pi session",
@@ -16,7 +16,8 @@
     ]
   },
   "bin": {
-    "worq": "./bin/worq.mjs"
+    "worq": "./bin/worq.mjs",
+    "worq-check-swarm": "./bin/worq-check-swarm.mjs"
   },
   "files": [
     "index.ts",

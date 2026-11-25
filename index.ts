@@ -20,7 +20,11 @@ import { statePath } from "./src/workspace.ts";
 import { Worq } from "./src/worq.ts";
 
 export const TOOLS = ["worq_spawn", "worq_list", "worq_send", "worq_cancel"] as const;
-const actionable = (type: AgentEvent["type"] | undefined) => type === "ask" || type === "failed" || type === "parked" || type === "done";
+const actionable = (event: Partial<AgentEvent> | undefined) => {
+  if (!event) return false;
+  if (event.wake !== undefined) return event.wake;
+  return event.type === "ask" || event.type === "failed" || event.type === "parked" || event.type === "done" || event.type === "barrier";
+};
 
 const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string; guidelines: string[] }> = {
   worq_spawn: {
@@ -28,11 +32,12 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
     description: "Start a background SDK agent from an installed package (kind). Returns an exact readable name. REVIEW.md requires one independent review of the first submission. Runs on Main's model and thinking unless sdk, model or thinking is set.",
     guidelines: [
       "Answer bounded factual lookups directly with primary-source citations unless delegation is explicit. For substantive plans and execution spawn the requested kind with a descriptive 2–4 word title and the original request. Attach plans using attach (exact plan names or repo-relative .agents/plans paths), never inline mentions. Do not infer write permission from a bare request. Set sdk/model/thinking only when the user asks for them.",
+      "For multi-area codebase recon or parallel independent tasks, spawn `scout` (or other kinds) in a shared `group` with `notify: \"barrier\"` and `expect` set to the exact count you launch in that turn. Stay free after spawning; wait for the single barrier notice instead of polling `worq_list`. Pass inline scout `ref`s in `attach` when launching follow-up `plan` or `execute` agents. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`.",
     ],
   },
   worq_list: {
     op: "list",
-    description: "List Worq agents (no ref) or show one agent in full: plan path, branch, PQs, reviews and recent activity.",
+    description: "List Worq agents (no args), inspect one group (group, including merge-tree verification for write branches), or show one agent in full: plan path, branch, gates, PQs, reviews and recent activity.",
     guidelines: [
       "Drive asks and parked agents without polling. Surface unresolved user choices with the plan.",
       "Even for ‘plan and execute’, present the plan and its review status before execution. Offer execute only (verified candidate, no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
@@ -48,7 +53,7 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
   },
   worq_cancel: {
     op: "cancel",
-    description: "Close a parked agent or cancel a running one (or all): stops it, its PQ subagents and review, removes its worktree and keeps its branch.",
+    description: "Close a parked agent or cancel a running one (ref, group:<id>, or all): stops it, its PQ subagents and review, removes its worktree and keeps its branch.",
     guidelines: [
       "Worq never merges. If the user authorized landing, verify the candidate before merging it by hand; close or cancel with worq_cancel.",
     ],
@@ -111,7 +116,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     };
     const notify = (event: AgentEvent) => {
       if (closing) return;
-      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, actionable(event.type)
+      pi.sendMessage({ customType: "worq", content: event.text, display: true, details: event }, actionable(event)
         ? { triggerTurn: true, deliverAs: "followUp" }
         : { triggerTurn: false });
       status();
@@ -188,8 +193,8 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     pi.on("context", (event) => {
       const messages = event.messages.filter((message) => {
         if (message.role !== "custom" || message.customType !== "worq") return true;
-        const type = (message.details as Partial<AgentEvent> | undefined)?.type;
-        return actionable(type);
+        const details = message.details as Partial<AgentEvent> | undefined;
+        return actionable(details);
       });
       if (messages.length !== event.messages.length) return { messages };
     });
@@ -241,8 +246,15 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
     pi.registerMessageRenderer("worq", (message, options, theme) => {
       const body = clean(typeof message.content === "string" ? message.content : message.content.map((c) => c.type === "text" ? c.text : "").join(""));
       const [head = "", ...rest] = body.split("\n");
-      const type = (message.details as Partial<AgentEvent> | undefined)?.type;
-      const tone = type === 'failed' ? 'error' : actionable(type) || type === 'warning' ? 'warning' : 'accent';
+      const details = message.details as Partial<AgentEvent> | undefined;
+      const type = details?.type;
+      const tone = type === "failed"
+        ? "error"
+        : type === "barrier"
+          ? (/\[(failed|parked)\]/.test(body) ? "warning" : "accent")
+          : actionable(details) || type === "warning"
+            ? "warning"
+            : "accent";
       const line = `${theme.fg(tone, "◆")} ${theme.fg(tone, head.replace(/^\[worq ([0-9a-f]{4})\] /, "worq $1 · "))}`;
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });

@@ -73,10 +73,14 @@ test("config: defaults, removed keys become migration findings, invalid keys nam
   assert.throws(() => loadConfig(dir), /pi-worq\.json/);
 });
 
-test("shipped Plan and Execute are ordinary packages; workflow-owned role files", () => {
-  assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan"]);
+test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role files", () => {
+  assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan", "scout"]);
   assert.equal(KINDS.get("plan")!.access, "read");
+  assert.equal(KINDS.get("plan")!.output, "plan");
   assert.equal(KINDS.get("execute")!.access, "write");
+  assert.equal(KINDS.get("scout")!.access, "read");
+  assert.equal(KINDS.get("scout")!.output, "inline");
+  assert.deepEqual(KINDS.get("scout")!.limits, { turns: 16, minutes: 5, asks: 0 });
   assert.ok([...KINDS.values()].every((kind) => !kind.userOnly && kind.skill));
   assert.match(KINDS.get("execute")!.review!, /What consequential reason is there not to accept this result as-is\?/);
 });
@@ -274,7 +278,7 @@ test("dispatch validates arguments against the shared schema", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const { worq } = setup(root, state, {});
   const table = ops();
-  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "kind", "model", "sdk", "task", "thinking", "title"]);
+  assert.deepEqual(Object.keys(table.spawn.properties).sort(), ["attach", "expect", "gates", "group", "kind", "model", "notify", "sdk", "task", "thinking", "title", "writePaths"]);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "review", title: "Surface test", task: "x" }), /Unknown kind review/);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: "no" }), /verify|additional/i);
   await assert.rejects(dispatch(worq, table, "spawn", { kind: "plan", title: "Surface test", task: "x", verify: false }), /verify|additional/i);

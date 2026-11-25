@@ -3,11 +3,15 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { Type, type Static, type TSchema } from "typebox";
-import { Block, errorText, obj, parse, text } from "./contracts.ts";
+import { array, Block, errorText, obj, parse, text } from "./contracts.ts";
+import { GateList } from "./gate.ts";
 import { controlExtension, controlPipe, windows } from "./platform.mjs";
-import { KIND_PATTERN, REF_PATTERN, type Worq } from "./worq.ts";
+import { formatSwarmCheck } from "./swarm-check.ts";
+import { GROUP_PATTERN, KIND_PATTERN, REF_PATTERN, type Worq } from "./worq.ts";
 
 const ref = Type.String({ pattern: REF_PATTERN, description: "Exact agent name from worq_spawn or worq_list" });
+const group = Type.String({ minLength: 1, maxLength: 32, pattern: GROUP_PATTERN, description: "Optional swarm/batch group id" });
+const groupTarget = Type.String({ pattern: `^group:${GROUP_PATTERN.slice(1)}`, description: "Cancel all live agents in a group" });
 /** One schema for the Pi tools and the worq CLI. Kind is checked against the live catalog, not an enum. */
 export function ops() {
   return {
@@ -15,14 +19,19 @@ export function ops() {
       kind: Type.String({ minLength: 1, maxLength: 64, pattern: KIND_PATTERN, description: "Installed agent package name" }),
       task: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver; omit to run the package as written. At-sign mentions are literal." })),
       title: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Optional 2–4 word title; generated when omitted" })),
-      attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names or repo-relative paths under .agents/plans/" })),
+      attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names, inline agent refs, or repo-relative paths under .agents/plans/" })),
+      group: Type.Optional(group),
+      notify: Type.Optional(Type.Union([Type.Literal("each"), Type.Literal("barrier")])),
+      expect: Type.Optional(Type.Integer({ minimum: 1, maximum: 16, description: "Expected member count for a barrier group" })),
+      writePaths: Type.Optional(array(text(256), 32, 1)),
+      gates: Type.Optional(GateList),
       sdk: Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z][a-z0-9-]*$", description: "Harness id; defaults to pi" })),
       model: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Model ref for the harness; defaults to Main's model (pi) or the harness default" })),
       thinking: Type.Optional(Type.String({ minLength: 1, maxLength: 32, pattern: "^[a-z]+$", description: "Thinking level; defaults to Main's when the model supports it" })),
     }),
-    list: obj({ ref: Type.Optional(ref) }),
+    list: obj({ ref: Type.Optional(ref), group: Type.Optional(group) }),
     send: obj({ ref, text: text(6000) }),
-    cancel: obj({ ref: Type.Union([ref, Type.Literal("all")]) }),
+    cancel: obj({ ref: Type.Union([ref, Type.Literal("all"), groupTarget]) }),
     /** Change a live agent's model and/or thinking level; keeps its session. */
     configure: obj({ ref, model: Type.Optional(text(200)), thinking: Type.Optional(text(32)) }),
     /** CLI only: activity after a sequence number. */
@@ -42,9 +51,23 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown,
       const request = args as Static<Ops["spawn"]>;
       const agent = await worq.launch(request, { caller: "main", signal });
       const attached = agent.attachments.length ? ` with ${agent.attachments.map((a) => a.path).join(", ")} attached` : "";
-      return { text: `Spawned ${request.kind} agent ${agent.title} (${agent.ref})${attached}. It runs in the background; its questions and submission notices arrive as Worq notifications.`, data: { ref: agent.ref } };
+      const grouped = agent.group ? ` in group ${agent.group}` : "";
+      return {
+        text: `Spawned ${request.kind} agent ${agent.title} (${agent.ref})${grouped}${attached}. It runs in the background; its questions and submission notices arrive as Worq notifications.`,
+        data: agent.group ? { ref: agent.ref, group: agent.group } : { ref: agent.ref },
+      };
     }
-    case "list": return { text: worq.list((args as Static<Ops["list"]>).ref) };
+    case "list": {
+      const { ref, group } = args as Static<Ops["list"]>;
+      if (ref && group) throw new Block("invalid-payload", "Pass either ref or group, not both");
+      if (!group) return { text: worq.list(ref) };
+      let text = worq.list(undefined, group);
+      if (worq.hasGroupWriters(group)) {
+        const check = await worq.checkGroup(group, "HEAD", signal);
+        text = `${text}\n\n${formatSwarmCheck(check)}`;
+      }
+      return { text };
+    }
     case "send": { const { ref, text } = args as Static<Ops["send"]>; return { text: worq.send(ref, text) }; }
     case "cancel": return { text: await worq.cancel((args as Static<Ops["cancel"]>).ref) };
     case "configure": { const { ref, model, thinking } = args as Static<Ops["configure"]>; return { text: await worq.configure(ref, { model, thinking }) }; }

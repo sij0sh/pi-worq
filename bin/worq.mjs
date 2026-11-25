@@ -8,12 +8,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const usage = `Usage: worq [--pid N] <command>
   sessions                    Pi sessions with Worq loaded
-  list [ref]                  agents, or one agent in full
+  list [ref | --group <id>]   agents, one group, or one agent in full
   log <ref> [-f]              agent activity (-f follows)
-  spawn <kind> [--title "Short title"] [--attach <plan>]... [--sdk id] [--model ref] [--thinking level] [--] [task]
+  spawn <kind> [--title "Short title"] [--attach <plan>]... [--group <id>] [--notify each|barrier] [--expect N] [--sdk id] [--model ref] [--thinking level] [--] [task]
                               start an agent (task omitted: run the package as written)
   send <ref> <text>           steer, answer, or resume a parked agent
-  cancel <ref|all>            close or cancel; branch kept
+  cancel <ref|group:<id>|all> close or cancel; branch kept
   configure <ref> [--model provider/id] [--thinking level]   change a live agent's runtime`;
 const ctl = join(statePath(), "ctl");
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== "ESRCH"; } };
@@ -63,33 +63,58 @@ async function main(argv) {
   if (!pid) throw new Error(live.length ? `Several sessions (${live.join(", ")}); pass --pid` : "No Pi session with Worq is running");
   const print = async (op, args) => console.log((await call(pid, op, args)).text);
   switch (command) {
-    case "list": return print("list", first ? { ref: first } : {});
+    case "list": {
+      if (first === "--group") {
+        const value = rest[0];
+        if (!value || value.startsWith("--")) throw new Error("--group requires a value");
+        return print("list", { group: value });
+      }
+      return print("list", first ? { ref: first } : {});
+    }
     case "spawn": {
       if (!first || first.startsWith("-")) throw new Error("spawn requires a kind");
       let title;
+      let group;
+      let notify;
+      let expect;
       const attach = [];
       const runtime = {};
       while (rest[0]?.startsWith("--")) {
         const flag = rest.shift();
         if (flag === "--") break;
-        if (!["--title", "--attach", "--sdk", "--model", "--thinking"].includes(flag)) throw new Error(`Unknown spawn option ${flag}`);
+        if (!["--title", "--attach", "--group", "--notify", "--expect", "--sdk", "--model", "--thinking"].includes(flag)) throw new Error(`Unknown spawn option ${flag}`);
         const value = rest.shift();
         if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
         if (flag === "--title") title = value;
         else if (flag === "--attach") attach.push(value);
+        else if (flag === "--group") group = value;
+        else if (flag === "--notify") notify = value;
+        else if (flag === "--expect") {
+          if (!/^\d+$/.test(value)) throw new Error("--expect requires a positive integer");
+          expect = Number(value);
+        }
         else runtime[flag.slice(2)] = value;
       }
       const task = rest.join(" ");
-      // Legacy shape (title and task given, no runtime flags) is sent exactly as older releases did.
-      const modern = !title || !task || Object.keys(runtime).length > 0;
+      // Legacy shape (title and task given, no runtime/swarm flags) is sent exactly as older releases did.
+      const modern = !title || !task || Object.keys(runtime).length > 0 || group !== undefined || notify !== undefined || expect !== undefined;
       const args = modern
-        ? { kind: first, ...(title ? { title } : {}), ...(attach.length ? { attach } : {}), ...runtime, ...(task ? { task } : {}) }
+        ? {
+          kind: first,
+          ...(title ? { title } : {}),
+          ...(attach.length ? { attach } : {}),
+          ...(group !== undefined ? { group } : {}),
+          ...(notify !== undefined ? { notify } : {}),
+          ...(expect !== undefined ? { expect } : {}),
+          ...runtime,
+          ...(task ? { task } : {}),
+        }
         : { kind: first, title, attach, task };
       try { return await print("spawn", args); }
       catch (error) {
-        // An older host's strict schema rejects omitted title/task and runtime fields. Never retried.
-        if (modern && /^spawn: \/(?:title|task|sdk|model|thinking)? /.test(error.message)) {
-          error.message += `\nThe running Worq may be older than this CLI: omitting --title or the task, and --sdk/--model/--thinking, need a matching upgrade. With an older Worq use: worq spawn <kind> --title "Short title" [--attach <plan>] <task>`;
+        // An older host's strict schema rejects omitted title/task and runtime/swarm fields. Never retried.
+        if (modern && /^spawn: \/(?:title|task|group|notify|expect|sdk|model|thinking)? /.test(error.message)) {
+          error.message += `\nThe running Worq may be older than this CLI: omitting --title or the task, and --group/--notify/--expect/--sdk/--model/--thinking, need a matching upgrade. With an older Worq use: worq spawn <kind> --title "Short title" [--attach <plan>] <task>`;
         }
         throw error;
       }

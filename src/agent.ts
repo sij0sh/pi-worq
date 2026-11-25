@@ -4,10 +4,12 @@ import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Block, errorText, obj, PqAnswer, ReviewReport, Submission, text, type Verdict } from "./contracts.ts";
+import { runGates, type GateResult, type GateSpec } from "./gate.ts";
 import type { Limits } from "./runtime/config.ts";
 import { git } from "./process.ts";
 import type { Kind } from "./runtime/workflows.ts";
 import { clean, DIGEST, one, planMarkdown, pqMessage, reportText, reviewLines, reviewStatus, type ReviewRecord } from "./render.ts";
+import { auditWriteScope, type WriteScope } from "./scope.ts";
 import { Conversation, type Sessions } from "./session.ts";
 import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
 import { runSubagent, type Semaphore, type SubagentDeps, type Workspace } from "./subagent.ts";
@@ -18,8 +20,16 @@ import type { Revision, Telemetry } from "./telemetry.ts";
 /** parked: submitted (or out of budget), session and worktree retained until Main resumes or closes it. */
 export type AgentState = "starting" | "running" | "waiting" | "reviewing" | "parked" | "done" | "closed" | "cancelled" | "failed";
 export const ENDED: AgentState[] = ["done", "closed", "cancelled", "failed"];
+export type NotifyMode = "each" | "barrier";
 /** done: the agent submitted its terminal result. */
-export interface AgentEvent { type: "parked" | "ask" | "warning" | "failed" | "done"; ref: string; text: string }
+export interface AgentEvent {
+  type: "parked" | "ask" | "warning" | "failed" | "done" | "barrier";
+  ref: string;
+  group?: string;
+  /** Explicit wake override; false renders passively and strips from Main's LLM context. */
+  wake?: boolean;
+  text: string;
+}
 export interface Attachment { path: string; text: string }
 export interface Delegation { role: string; id: string; question: string; why: string; state: "queued" | "running" | "answered" | "failed" | "cancelled"; answer?: PqAnswer; error?: string }
 export const UNANSWERED = "Main did not answer in time. Missing authorization is not approval. Stop the affected work and report the unresolved decision.";
@@ -32,6 +42,8 @@ export interface AgentDeps {
   root: string;
   semaphore: Semaphore;
   notify(event: AgentEvent): void;
+  /** Invoked whenever the agent enters parked or any ENDED state (including cancel/close). */
+  onSettled?(agent: Agent): void;
   /** The admitted runtime; PQ and review children inherit the owner's effective runtime. */
   runtime?: Runtime;
   /** Live controllable sessions, keyed by telemetry row key. */
@@ -50,6 +62,10 @@ export class Agent {
   readonly attachments: Attachment[];
   readonly title: string;
   readonly branch?: string;
+  readonly group?: string;
+  readonly notifyMode: NotifyMode;
+  readonly scope?: WriteScope;
+  readonly gates: readonly GateSpec[];
   readonly owner = process.pid;
   state: AgentState = "starting";
   /** Main's feedback opened the final revision: the next submission is not reviewed and ends the agent. */
@@ -59,6 +75,8 @@ export class Agent {
   started = Date.now();
   finished?: number;
   error?: string;
+  /** Baseline commit when the write worktree was created. */
+  baseline?: string;
   /** Pinned commit of the latest submission. */
   candidate?: string;
   /** Unreviewed commit of work left by budget exhaustion or close. */
@@ -68,7 +86,9 @@ export class Agent {
   diffstat?: string;
   plan?: { path: string; text: string };
   work?: string;
+  summary?: string;
   submission?: string;
+  gateResults: GateResult[] = [];
   readonly delegations: Delegation[] = [];
   readonly launches: { role: string; runtime: Runtime; label?: string }[] = [];
   ask?: { question: string; resolve(answer: string): void };
@@ -90,12 +110,16 @@ export class Agent {
     this.deps.notify({ type: "warning", ref: this.ref, text: `${this.headline} ${message}` });
   };
 
-  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[] }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; group?: string; notifyMode?: NotifyMode; scope?: WriteScope; gates?: readonly GateSpec[] }) {
     this.deps = deps;
     this.ref = input.ref;
     this.title = input.title ?? input.ref;
     this.dir = input.dir;
     this.kind = input.kind;
+    this.group = input.group;
+    this.notifyMode = input.notifyMode ?? "each";
+    this.scope = input.scope;
+    this.gates = input.gates ?? [];
     if (deps.runtime) this.launches.push({ role: `agent.${input.kind.name}`, runtime: deps.runtime });
     this.task = input.task;
     this.attachments = input.attachments;
@@ -104,6 +128,7 @@ export class Agent {
     this.done = begun.then(() => this.run());
   }
   get headline() { return `${this.title} (${this.ref}) · ${this.kind.name}`; }
+  get lightweight() { return this.kind.access === "read" && this.kind.output === "inline"; }
   get signal() { return this.controller.signal; }
   get ended() { return ENDED.includes(this.state); }
   /** Idle sessions hold no execution slot. */
@@ -149,8 +174,9 @@ export class Agent {
   }
   view() {
     return {
-      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, state: this.state, final: this.final, task: this.task,
-      worktree: this.work, branch: this.branch, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, group: this.group, state: this.state, final: this.final, task: this.task,
+      worktree: this.work, branch: this.branch, baseline: this.baseline, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      writePaths: this.scope?.patterns, gates: this.gateResults.length ? this.gateResults : undefined,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error }) => ({ question, state, error })),
       review: this.review, started: this.started, finished: this.finished,
     };
@@ -217,23 +243,47 @@ export class Agent {
       const write = this.kind.access === "write";
       if (write) {
         this.project = await baselineProject(root, signal);
+        this.baseline = this.project.baseline;
         this.work = await worktree(this.project, this.dir, this.branch!, signal);
         this.log(`worktree on ${this.branch} from ${this.project.baseline.slice(0, 10)}`);
       }
       const cwd = this.work ?? root;
-      const tools: Tool[] = [...readTools(cwd), ...(this.kind.pq ? [this.delegateTool(cwd)] : []), this.askTool()];
+      const maxTurns = Math.min(limits.agentTurns, this.kind.limits?.turns ?? limits.agentTurns);
+      const maxMinutes = Math.min(limits.agentMinutes, this.kind.limits?.minutes ?? limits.agentMinutes);
+      const maxAsks = Math.min(limits.asks, this.kind.limits?.asks ?? limits.asks);
+      const effectiveGates = [...(this.kind.gates ?? []), ...this.gates];
+      const tools: Tool[] = [
+        ...readTools(cwd),
+        ...(this.kind.pq ? [this.delegateTool(cwd)] : []),
+        ...(maxAsks > 0 ? [this.askTool(maxAsks)] : []),
+      ];
       if (write) {
         box = processTools(cwd, join(this.dir, "runtime"), { signal });
-        tools.push(...writeTools(cwd), ...box.tools);
+        tools.push(...writeTools(cwd, this.scope), ...box.tools);
       }
+      const scopeHint = this.scope
+        ? `\n\nAssigned writePaths (enforced on edit and submit): ${this.scope.patterns.join(", ")}. Do not modify files outside these paths.`
+        : "";
       this.conversation = new Conversation({
-        driver, signal, warning: this.warning, turns: limits.agentTurns, minutes: limits.agentMinutes, pending: () => this.openPqs,
+        driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs,
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
-        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}\n\n${this.kind.skill.body}`, log: (line) => this.log(line) },
+        spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system: `${AUTHORITY}\n\n${this.kind.skill.body}${scopeHint}`, log: (line) => this.log(line) },
         finish: {
           schema: Submission,
-          description: `Submit your result.${write ? "" : " Worq saves it to .agents/plans/."}`,
-          validate: () => { if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "queued" || d.state === "running").map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`); },
+          description: `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : " Worq saves it to .agents/plans/."}`,
+          validate: async (_value, validateSignal) => {
+            if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "queued" || d.state === "running").map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`);
+            if (write && this.scope && this.work && this.project) {
+              await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
+            }
+            if (write && effectiveGates.length && this.work && box) {
+              this.gateResults = await runGates(this.work, await box.env(), effectiveGates, validateSignal, (line) => this.log(line));
+              // Re-check scope after gates in case a test command dropped untracked files outside writePaths.
+              if (this.scope && this.project) {
+                await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
+              }
+            }
+          },
         },
       });
       let message: string | undefined = JSON.stringify({ task: this.task, kind: this.kind.name, ...(this.attachments.length ? { attachments: this.attachments } : {}) }, null, 2);
@@ -241,8 +291,13 @@ export class Agent {
       while (message !== undefined) {
         if (this.fatal) throw this.fatal;
         this.exhausted = this.recoverySha = undefined;
-        this.set("running");
+        let release: (() => void) | undefined;
         try {
+          if (this.lightweight) {
+            this.deps.telemetry?.state(this.id, "queued");
+            release = await this.deps.semaphore.acquire(signal);
+          }
+          this.set("running");
           await this.submit(await this.conversation.run(message));
           if (this.final || !this.kind.review) { done = true; break; }
         } catch (error) {
@@ -252,6 +307,9 @@ export class Agent {
           this.exhausted = errorText(error);
           const partial = this.work && await pin(this.work, signal, `worq ${this.ref}: partial (unreviewed)`);
           if (partial && partial !== this.candidate) this.recoverySha = partial;
+        } finally {
+          release?.();
+          release = undefined;
         }
         const wasExhausted = this.exhausted !== undefined;
         message = await this.park();
@@ -295,6 +353,7 @@ export class Agent {
       // After cleanup, so Main sees the final state (worktree gone, progress pinned on the branch).
       if (this.state === "done") this.deps.notify({ type: "done", ref: this.ref, text: this.digest() });
       if (this.state === "failed") this.deps.notify({ type: "failed", ref: this.ref, text: `${this.headline} failed: ${this.error}${this.work ? `\nWorktree retained at ${this.work}.` : this.branch ? `\nProgress kept on ${this.branch}.` : ""}\nLast activity:\n${this.tail(10).map((h) => h.line).join("\n")}` });
+      this.deps.onSettled?.(this);
     }
   }
 
@@ -302,6 +361,7 @@ export class Agent {
   private park(): Promise<string | undefined> {
     this.set("parked");
     this.deps.notify({ type: "parked", ref: this.ref, text: this.digest() });
+    this.deps.onSettled?.(this);
     return new Promise((resolve) => {
       const done = (message: string | undefined) => {
         clearTimeout(timer);
@@ -344,11 +404,11 @@ export class Agent {
     this.log(`← PQ ${d.state}: ${d.question}`);
     this.conversation?.deliver(pqMessage(d.question, d.answer, d.error, d.state === "cancelled"));
   }
-  private askTool(): Tool {
+  private askTool(limit: number): Tool {
     return tool("ask_main",
       "Ask Main (the user's Pi session) one concise question about user-owned intent, scope or permission that the task and repository cannot settle. Blocks until answered.",
       obj({ question: text(1200) }), async ({ question }, toolSignal) => {
-        if (++this.asks > this.deps.limits.asks) return "Ask limit reached. Do not assume authorization. Report the unresolved decision.";
+        if (++this.asks > limit) return "Ask limit reached. Do not assume authorization. Report the unresolved decision.";
         const signal = AbortSignal.any([this.signal, toolSignal]);
         const conversation = this.conversation;
         conversation?.pause();
@@ -375,14 +435,22 @@ export class Agent {
   private async submit(report: Submission) {
     const signal = this.signal;
     let identity: Revision["identity"];
+    this.summary = report.summary;
     if (this.kind.access === "read") {
-      const path = `.agents/plans/plan-${this.ref}.md`;
-      const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, final: this.final, reviewRequired: !!this.kind.review, task: this.task, report });
-      await writeScoped(this.deps.root, path, markdown, { create: !this.plan });
-      identity = { digest: createHash("sha256").update(markdown, "utf8").digest("hex") };
-      this.plan = { path, text: markdown };
-      this.submission = markdown;
-      this.log(`plan saved to ${path}`);
+      if (this.kind.output === "inline") {
+        const text = reportText(report);
+        identity = { digest: createHash("sha256").update(text, "utf8").digest("hex") };
+        this.submission = text;
+        this.log("inline submission recorded");
+      } else {
+        const path = `.agents/plans/plan-${this.ref}.md`;
+        const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, final: this.final, reviewRequired: !!this.kind.review, task: this.task, report });
+        await writeScoped(this.deps.root, path, markdown, { create: !this.plan });
+        identity = { digest: createHash("sha256").update(markdown, "utf8").digest("hex") };
+        this.plan = { path, text: markdown };
+        this.submission = markdown;
+        this.log(`plan saved to ${path}`);
+      }
     } else {
       this.candidate = await pin(this.work!, signal, `worq ${this.ref}: ${this.final ? "final" : "submission"}`);
       identity = { sha: this.candidate };
@@ -421,7 +489,7 @@ export class Agent {
       payload: JSON.stringify({
         request: this.task, kind: this.kind.name, submission: this.submission,
         ...(this.attachments.length ? { plans: this.attachments } : {}),
-        ...(this.kind.access === "write" ? { commit: candidate, diffstat: this.diffstat } : {}),
+        ...(this.kind.access === "write" ? { commit: candidate, diffstat: this.diffstat, ...(this.gateResults.length ? { gates: this.gateResults } : {}) } : {}),
       }, null, 2),
       cwd: root, signal: this.signal, log: (line) => this.log(`  review ${line}`), workspace,
     });
@@ -439,8 +507,21 @@ export class Agent {
       ...(this.recoverySha ? [`Partial commit ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []),
       `worq_send resumes with a fresh budget; worq_cancel closes it.`,
     ].join("\n");
-    const where = this.kind.access === "write" ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}` : `Plan: ${this.plan?.path}`;
-    if (this.state === "done" && !this.review) return `${this.headline} done · not independently reviewed\n${where}\nSubmission details: worq_list(${this.ref}).`;
+    const where = this.kind.access === "write"
+      ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}`
+      : this.plan
+        ? `Plan: ${this.plan.path}`
+        : "Output: inline";
+    if (this.state === "done" && !this.review) {
+      if (this.kind.output === "inline") {
+        return [
+          `${this.headline} done`,
+          one(this.summary ?? "(no summary)", 1200),
+          `Full report: worq_list(${this.ref}).`,
+        ].join("\n");
+      }
+      return `${this.headline} done · not independently reviewed\n${where}\nSubmission details: worq_list(${this.ref}).`;
+    }
     if (this.state === "done") return [`${this.headline} done · final revision submitted after review; not re-reviewed`, where,
       `Verify the exact candidate before reporting success or merging. worq_list(${this.ref}) has the review.`].join("\n");
     return [`${this.headline} parked · ${reviewStatus(this.review)}`, where,

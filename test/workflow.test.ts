@@ -175,7 +175,7 @@ test("model-invocable workflows spawn like kinds; user-only ones and review opti
     "agent.documentation": async (turn) => { skills = (turn.spec.skills ?? []).map((s) => s.name); await turn.tool("submit", planSubmission); },
   }, {}, undefined, kinds);
   await assert.rejects(worq.spawn("private", "x", { title: "Write docs" }), /user-only[\s\S]*\/worq/);
-  await assert.rejects(worq.spawn("nope", "x", { title: "Write docs" }), /Unknown kind nope; installed: execute \| plan \| documentation/);
+  await assert.rejects(worq.spawn("nope", "x", { title: "Write docs" }), /Unknown kind nope; installed: execute \| plan \| scout \| documentation/);
   const agent = await worq.spawn("documentation", "Write the CLI docs", { title: "Write docs" });
   assert.equal(agent.ref, "write-docs");
   await next("done", agent.ref);
@@ -340,34 +340,34 @@ test("an invalid workflow file does not affect a successful plan spawn", async (
   assert.equal(worq.list(plan.ref).includes("closed"), true);
 });
 
-test("defaults: first use installs Plan and Execute once; edits and deletions survive reloads", async (t) => {
+test("defaults: first use installs Plan, Execute and Scout once; edits and deletions survive reloads", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "worq-seed-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const first = loadCatalog(dir);
   assert.deepEqual(first.problems, []);
-  assert.deepEqual([...first.kinds.keys()], ["execute", "plan"]);
+  assert.deepEqual([...first.kinds.keys()], ["execute", "plan", "scout"]);
   assert.equal(await readFile(join(dir, "workflows", "plan", "SKILL.md"), "utf8"), await readFile(join(SEEDS, "plan", "SKILL.md"), "utf8"));
   assert.ok(existsSync(join(dir, "workflows", SEEDED)));
   assert.ok(!readdirSync(join(dir, "workflows")).some((entry) => entry.startsWith(".seed-")), "no staging left behind");
   await writeFile(join(dir, "workflows", "plan", "SKILL.md"), "---\ndescription: My plan\naccess: read\n---\nMine.\n");
   await rm(join(dir, "workflows", "execute"), { recursive: true });
   const again = loadCatalog(dir);
-  assert.deepEqual([...again.kinds.keys()], ["plan"], "a deleted package stays deleted");
+  assert.deepEqual([...again.kinds.keys()], ["plan", "scout"], "a deleted package stays deleted");
   assert.equal(again.kinds.get("plan")!.description, "My plan", "edits survive");
   await rm(join(dir, "workflows"), { recursive: true });
-  assert.deepEqual([...loadCatalog(dir).kinds.keys()], ["execute", "plan"], "a fresh profile is seeded again");
+  assert.deepEqual([...loadCatalog(dir).kinds.keys()], ["execute", "plan", "scout"], "a fresh profile is seeded again");
 });
 
 test("defaults: a differing folder with a shipped name is withheld until resolved; identical ones count as installed", async (t) => {
   const dir = await agentDir(t, { plan: skillFile({ description: "Someone else's plan", access: "write" }), custom: skillFile({ description: "Custom" }) });
   const conflicted = loadCatalog(dir);
-  assert.deepEqual([...conflicted.kinds.keys()], ["custom", "execute"], "other folders still load");
+  assert.deepEqual([...conflicted.kinds.keys()], ["custom", "execute", "scout"], "other folders still load");
   assert.match(conflicted.problems.find((p) => p.path.endsWith(`${sep}plan`))?.message ?? "", /differs from the shipped "plan" package[\s\S]*Move it aside/);
   assert.ok(!existsSync(join(dir, "workflows", SEEDED)), "not marked complete");
   assert.match(await readFile(join(dir, "workflows", "plan", "SKILL.md"), "utf8"), /Someone else's plan/, "never overwritten");
   await rename(join(dir, "workflows", "plan"), join(dir, "plan-mine"));
   const resolved = loadCatalog(dir);
-  assert.deepEqual([...resolved.kinds.keys()], ["custom", "execute", "plan"]);
+  assert.deepEqual([...resolved.kinds.keys()], ["custom", "execute", "plan", "scout"]);
   assert.deepEqual(resolved.problems, []);
   assert.ok(existsSync(join(dir, "workflows", SEEDED)));
 
@@ -376,7 +376,7 @@ test("defaults: a differing folder with a shipped name is withheld until resolve
   t.after(() => rm(copy, { recursive: true, force: true }));
   await cp(join(SEEDS, "plan"), join(copy, "workflows", "plan"), { recursive: true });
   provision(copy); provision(copy);
-  assert.deepEqual([...loadCatalog(copy).kinds.keys()], ["execute", "plan"]);
+  assert.deepEqual([...loadCatalog(copy).kinds.keys()], ["execute", "plan", "scout"]);
   assert.ok(existsSync(join(copy, "workflows", SEEDED)));
 });
 

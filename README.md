@@ -10,7 +10,7 @@ pi install /path/to/pi-worq
 
 Main can use the four Worq tools by default. Ask Main directly or launch an agent yourself.
 
-First use installs the shipped `plan` and `execute` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace.
+First use installs the shipped `plan`, `execute` and `scout` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace. Existing seeded profiles (`.worq-seeded`) are not modified on upgrade; copy `workflows/scout/` into `<agentDir>/workflows/scout/` once if upgrading.
 
 ### Windows (native)
 
@@ -65,10 +65,10 @@ See `docs/workflows.md`.
 
 | Tool | Params | Effect |
 |---|---|---|
-| `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan names or repo-relative plan paths; runtime defaults to Main's (`sdk` pi) |
-| `worq_list` | `ref?` | all agents, or one in full (PQs, reviews, activity) |
+| `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `group?`, `notify?`, `expect?`, `writePaths?`, `gates?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan names, inline agent refs, or repo-relative plan paths; `group`/`notify: "barrier"`/`expect` coalesce multi-agent waves into one wake-up; `writePaths` and `gates` enforce disjoint write scopes and pre-submit checks for write kinds; runtime defaults to Main's (`sdk` pi) |
+| `worq_list` | `ref?` or `group?` | all agents, one group (with `git merge-tree` check for write branches), or one agent in full (gates, PQs, reviews, activity) |
 | `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked after review → feedback for the one final revision (no further review; ends as `done`) · parked out of budget → resume with a fresh budget |
-| `worq_cancel` | `ref` or `all` | parked → close · live → cancel; kills subagents, review, processes; removes worktree; keeps branch |
+| `worq_cancel` | `ref`, `group:<id>`, or `all` | parked → close · live → cancel; kills subagents, review, processes; removes worktree; keeps branch |
 
 States: `starting · running · waiting · reviewing · parked · done · closed · cancelled · failed`. `done` = final revision after review or first submission without review: verify the exact candidate before reporting success or merging.
 
@@ -100,7 +100,7 @@ Select it with `worq_spawn { kind, sdk: "claude-code", model? }`, `worq spawn <k
 ```json
 {
   "limits": {
-    "agents": 4, "subagents": 6, "parallel": 4, "asks": 3, "idleMinutes": 60,
+    "agents": 4, "scouts": 12, "subagents": 6, "parallel": 4, "asks": 3, "idleMinutes": 60,
     "agentTurns": 80, "subagentTurns": 16, "reviewerTurns": 40,
     "agentMinutes": 30, "subagentMinutes": 5, "reviewerMinutes": 10, "askMinutes": 15,
     "services": 2
@@ -115,8 +115,9 @@ Each launch defaults to the current Pi session's model and thinking level; a lau
 ## CLI
 
 ```sh
-worq sessions | list [ref] | log <ref> [-f] | send <ref> <text> | cancel <ref|all>   [--pid N]
-worq spawn <kind> [--title "Short title"] [--attach <plan>]... [--sdk id] [--model ref] [--thinking level] [--] [task]
+worq sessions | list [ref | --group <id>] | log <ref> [-f] | send <ref> <text> | cancel <ref|group:<id>|all>   [--pid N]
+worq spawn <kind> [--title "Short title"] [--attach <plan>]... [--group <id>] [--notify each|barrier] [--expect N] [--sdk id] [--model ref] [--thinking level] [--] [task]
+node bin/worq-check-swarm.mjs [--base HEAD] [--group <id>] [--json] [branch-or-ref ...]
 ```
 
 Legacy `spawn <kind> --title … <task>` works against older and newer hosts. Omitting the title or task, or the runtime flags, needs a host of the same release; an older host's schema refusal is reported with an upgrade hint, never retried.

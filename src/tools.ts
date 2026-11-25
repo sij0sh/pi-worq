@@ -8,6 +8,7 @@ import { windows } from "./platform.mjs";
 import { observePty } from "./pty.ts";
 import { one } from "./render.ts";
 import { tool, type Tool } from "./sdk/contract.ts";
+import type { WriteScope } from "./scope.ts";
 import { readSmall, runtimeEnv, scoped, writeScoped, type Runtime } from "./workspace.ts";
 
 const path = text(1024);
@@ -89,13 +90,16 @@ export function readTools(cwd: string): Tool[] {
 }
 
 /** File edits inside an execute agent's worktree. */
-export function writeTools(cwd: string): Tool[] {
+export function writeTools(cwd: string, scope?: WriteScope): Tool[] {
+  const allow = (p: string) => scope?.assertAllowed(p);
   return [
     tool("write_file", "Create or replace a complete UTF-8 file", obj({ path, content: Type.String({ maxLength: 80_000 }) }), async ({ path, content }) => {
+      allow(path);
       await writeScoped(cwd, path, content);
       return `Wrote ${path}`;
     }),
     tool("edit_file", "Replace one exact, unique text region in a file (parameters: path, old, replacement)", obj({ path, old: text(25_000), replacement: Type.String({ maxLength: 40_000 }) }), async ({ path, old, replacement }) => {
+      allow(path);
       const before = await readSmall(await scoped(cwd, path), 256 * 1024);
       // read_file renders CRLF as lines. Match LF input against a CRLF file without changing its EOL style.
       if (before.includes("\r\n") && !before.replaceAll("\r\n", "").includes("\n")) {
@@ -109,6 +113,7 @@ export function writeTools(cwd: string): Tool[] {
       return `Edited ${path}`;
     }),
     tool("delete_file", "Remove one regular file", obj({ path }), async ({ path }) => {
+      allow(path);
       const target = await scoped(cwd, path);
       if (!(await lstat(target)).isFile()) throw new Block("delete", "Only regular files can be removed");
       await unlink(target);
@@ -191,6 +196,7 @@ export function processTools(cwd: string, runtime: string, options: { verify?: {
   return {
     tools,
     saved,
+    env: () => environment().then((r) => r.env),
     /** Wait for every owned process; rethrow if one could not be confirmed stopped. */
     async close() {
       await Promise.allSettled(running);

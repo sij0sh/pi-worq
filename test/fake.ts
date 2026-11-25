@@ -73,9 +73,10 @@ export function fakeDriver(scripts: Record<string, Script>, seen: Spec[] = [], c
     let stopRequested = false;
     let release: (() => void) | undefined;
     let failures = options.failures ?? 0;
-    const controller = new AbortController();
+    let controller = new AbortController();
     const handle: CoreHandle = {
       async prompt(first, promptSignal) {
+        controller = new AbortController();
         const signal = promptSignal ?? controller.signal;
         if (options.calls) options.calls.n++;
         if (options.prompts) options.prompts.push(first);

@@ -9,6 +9,7 @@ Every agent kind is an operator-installed **skill package**: own SDK session, `a
   SKILL.md          frontmatter + body (the kind prompt)
   PQ.md             optional: enables delegate; child instructions
   REVIEW.md         optional: mandatory first-submission review instructions
+  gates.json        optional (write kinds only): deterministic pre-submit commands
   references/…      optional supporting files
   scripts/…
   assets/…
@@ -23,7 +24,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 
 ## Shipped packages
 
-`plan` (read, reviewed) and `execute` (write, reviewed) ship in this package's `workflows/` and are copied into `<agentDir>/workflows/` on first use, then marked done (`.worq-seeded`). Worq never seeds that profile again or overwrites anything: edit, delete or replace them freely; deleting the whole `workflows/` folder reseeds.
+`plan` (read, reviewed), `execute` (write, reviewed) and `scout` (read, inline, unreviewed, `asks: 0`) ship in this package's `workflows/` and are copied into `<agentDir>/workflows/` on first use, then marked done (`.worq-seeded`). Worq never seeds that profile again or overwrites anything: edit, delete or replace them freely; deleting the whole `workflows/` folder reseeds. Existing seeded installs can copy `workflows/scout/` into `<agentDir>/workflows/scout/` once manually.
 
 - A pre-existing **different** `plan`/`execute` folder at first use is withheld (warning) and the profile is not marked done. Move it aside and restart Pi to install the shipped one, then replace that folder deliberately if you want yours.
 - Unwritable profile: warning; copy `workflows/<name>/` by hand. Controls keep working.
@@ -38,7 +39,11 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `name` | no | Must equal the folder name if present. |
 | `description` | yes | Shown in the `/worq` menu and the `worq_spawn` kind list. |
 | `disable-model-invocation` | no | `true`: user-only (`/worq`); refused from `worq_spawn`, socket and CLI. `false`/absent: also launchable by Main and the CLI. |
-| `access` | no | `read`: no worktree or write/process tools, result saved as a plan file. Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
+| `access` | no | `read`: no worktree or write/process tools, result saved as a plan file (or returned inline). Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
+| `output` | no | Read kinds only. `plan` (default): writes `.agents/plans/plan-<ref>.md`. `inline`: returns cited summary directly without touching the repo; attachable by `ref` in the same session. |
+| `max-turns` | no | Optional integer (`1..400`) clamping `limits.agentTurns` downward only. |
+| `max-minutes` | no | Optional integer (`1..600`) clamping `limits.agentMinutes` downward only. |
+| `asks` | no | Optional integer (`0..20`) clamping `limits.asks` downward only. `0` removes `ask_main` from the agent's tool list. |
 
 Unknown keys are ignored, including a legacy `review`. The body has no required sections; the agent also receives the `submit` tool.
 
