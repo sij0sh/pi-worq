@@ -139,7 +139,7 @@ export interface Driver {
   /** Import one SDK's adapter by id; required before its sync methods. Rejects unknown ids. */
   load?(sdk: string): Promise<void>;
   /** Picker information: each loadable SDK's models. A failing SDK is skipped. */
-  catalog?(): Promise<ReadonlyMap<string, readonly string[]>>;
+  catalog?(sdk?: string): Promise<ReadonlyMap<string, readonly string[]>>;
   defaultModel?(sdk: string): string | undefined;
   defaultThinking?(sdk: string): string | undefined;
   capabilities(role: string, runtime?: Runtime): Capabilities;

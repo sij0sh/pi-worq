@@ -170,7 +170,7 @@ async function run(name: string, caps: Capabilities, make: (caps: Capabilities) 
     await until(() => c.streaming);
     c.deliver("main");
     assert.deepEqual(await running, { value: "ok" });
-    assert.equal(logs.filter((line) => line.includes("message queued")).length, 0, `${name}: a steered message is not queued`);
+    assert.equal(logs.filter((line) => line.includes("message queued")).length, options.steer === "none" ? 1 : 0, `${name}: delivery uses the harness's supported boundary`);
   }
 
 

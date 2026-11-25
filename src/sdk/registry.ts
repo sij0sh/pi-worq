@@ -106,14 +106,13 @@ export async function createDriver(host: HostServices, resources: Resources = EM
   return {
     sdks: installed,
     async load(sdk) { await load(sdk); },
-    async catalog() {
-      const catalog = new Map<string, readonly string[]>();
-      for (const sdk of installed()) {
-        // Picker information only: one failing adapter must not hide the others.
-        try { await load(sdk); catalog.set(sdk, await adapter(sdk).models()); }
-        catch { if (adapters.has(sdk)) catalog.set(sdk, []); }
-      }
-      return catalog;
+    async catalog(only) {
+      const entries = await Promise.all(installed().filter((sdk) => only === undefined || sdk === only).map(async (sdk) => {
+        // Picker information only: failures are isolated; live lookup starts only the locked harness.
+        try { return [sdk, await (await load(sdk)).models()] as const; }
+        catch { return adapters.has(sdk) ? [sdk, []] as const : undefined; }
+      }));
+      return new Map(entries.filter((entry) => entry !== undefined));
     },
     defaultModel(sdk) { return adapter(sdk).defaultModel?.(); },
     defaultThinking(sdk) { return adapter(sdk).defaultThinking?.(); },

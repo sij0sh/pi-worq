@@ -48,7 +48,7 @@ export async function modelChoices(driver: Driver, current: Runtime, sdk?: strin
       choices.push({ sdk: name, model, levels: supported.thinking, thinking });
     } catch { /* not runnable */ }
   };
-  for (const [name, models] of await driver.catalog()) {
+  for (const [name, models] of await driver.catalog(sdk)) {
     if (sdk !== undefined && name !== sdk) continue;
     let fallback: string | undefined;
     try { fallback = driver.defaultModel?.(name); } catch { /* none */ }
