@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { ops } from "../src/control.ts";
-import { hintLoader, parseHints } from "../src/runtime/hints.ts";
 import { loadResources } from "../src/runtime/resources.ts";
+import { routingLoader } from "../src/runtime/routing.ts";
 import { loadSpawnGuidance } from "../src/runtime/spawn-guidance.ts";
 import { provisionTemplates, TEMPLATES, TEMPLATE_SEEDS } from "../src/runtime/templates.ts";
 
-const FILES = ["AGENTS.md", "RUNTIMES.md", "SPAWN-GUIDANCE.md"];
+const FILES = ["AGENTS.md", "SPAWN-GUIDANCE.md", "routing.json", "ROUTING.md"];
 const seed = (name: string) => readFileSync(join(TEMPLATE_SEEDS, name), "utf8");
 
 async function scratch(t: TestContext) {
@@ -45,13 +45,10 @@ test("resource templates are inert: no instructions, no hint rows, no guidance r
   // Spawn guidance: the only table is commented out, so the parser reports nothing at all.
   assert.deepEqual(loadSpawnGuidance(agent, ops().spawn), {});
 
-  // Runtime hints: comments are stripped, so zero rows and zero problems both ways in.
-  const hints = parseHints(readFileSync(join(worq, "RUNTIMES.md"), "utf8"));
-  assert.equal(hints.rows.size, 0);
-  assert.deepEqual(hints.problems, []);
-  const loaded = hintLoader(agent)();
-  assert.equal(loaded.rows.size, 0);
-  assert.deepEqual(loaded.problems, []);
+  // Routing config: valid JSON with zero roles and zero problems.
+  const routing = routingLoader(agent)();
+  assert.deepEqual(routing.problems, []);
+  assert.deepEqual(routing.config?.roles, {});
 
   // Shared resources: the comment reaches the prompt as text, and nothing else changes.
   const resources = await loadResources(agent);
@@ -73,11 +70,11 @@ test("resource templates: a later load never overwrites operator edits, existing
   assert.equal(readFileSync(join(worq, "AGENTS.md"), "utf8"), edited, "an operator edit is never replaced");
   assert.equal(readFileSync(join(worq, "SPAWN-GUIDANCE.md"), "utf8"), seed("SPAWN-GUIDANCE.md"), "a deleted file is recreated, per file");
 
-  await rm(join(worq, "RUNTIMES.md"));
-  await mkdir(join(worq, "RUNTIMES.md"));
+  await rm(join(worq, "routing.json"));
+  await mkdir(join(worq, "routing.json"));
   assert.deepEqual(provisionTemplates(agent).problems, [], "a directory in the way is skipped, not replaced");
-  assert.ok(lstatSync(join(worq, "RUNTIMES.md")).isDirectory());
-  assert.deepEqual(readdirSync(join(worq, "RUNTIMES.md")), []);
+  assert.ok(lstatSync(join(worq, "routing.json")).isDirectory());
+  assert.deepEqual(readdirSync(join(worq, "routing.json")), []);
 });
 
 test("resource templates: a symlinked file or worq directory is reported and never followed", async t => {
@@ -100,7 +97,7 @@ test("resource templates: a symlinked file or worq directory is reported and nev
   if (hasFileLink) {
     assert.match(problems.find((problem) => problem.path === join(agent, "worq", "AGENTS.md"))?.message ?? "", /symlink/);
     assert.equal(readFileSync(sentinel, "utf8"), "Outside instructions\n", "the link target is untouched");
-    assert.equal(readFileSync(join(agent, "worq", "RUNTIMES.md"), "utf8"), seed("RUNTIMES.md"), "an unlinked sibling is still installed");
+    assert.equal(readFileSync(join(agent, "worq", "routing.json"), "utf8"), seed("routing.json"), "an unlinked sibling is still installed");
   } else {
     assert.deepEqual(problems, []);
   }

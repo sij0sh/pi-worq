@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "defaults": {
+    "strategy": "highest-remaining",
+    "window": "5h",
+    "unknownQuota": "skip",
+    "refreshTimeoutMs": 2000
+  },
+  "roles": {
+    "scout": {
+      "rules": [
+        {
+          "name": "primary-50pct",
+          "when": { "window": "5h", "minRemainingPercent": 50 },
+          "candidates": [
+            { "sdk": "antigravity", "model": "gemini-4-hydrogen", "thinking": "low" },
+            { "sdk": "claude-code", "model": "sonnet", "thinking": "low" }
+          ]
+        },
+        {
+          "name": "fallback",
+          "strategy": "first-match",
+          "candidates": [
+            { "sdk": "pi", "model": "commandcode/deepseek/deepseek-v4.1-flash", "thinking": "high" }
+          ]
+        }
+      ]
+    },
+    "plan": {
+      "rules": [
+        {
+          "name": "primary-available",
+          "when": { "window": "5h", "notExhausted": true },
+          "candidates": [
+            { "sdk": "antigravity", "model": "gemini-4-neon", "thinking": "medium" },
+            { "sdk": "claude-code", "model": "claude-opus-5-5", "thinking": "medium" },
+            { "sdk": "antigravity", "model": "claude-opus-5-5", "thinking": "medium" }
+          ]
+        },
+        {
+          "name": "fallback",
+          "strategy": "first-match",
+          "candidates": [
+            { "sdk": "pi", "model": "commandcode/meta/muse-spark-1.3-contributor", "thinking": "max" }
+          ]
+        }
+      ]
+    },
+    "execute": {
+      "rules": [
+        {
+          "name": "primary-20pct",
+          "when": { "window": "5h", "minRemainingPercent": 20 },
+          "candidates": [
+            { "sdk": "antigravity", "model": "gemini-4-hydrogen", "thinking": "medium" },
+            { "sdk": "claude-code", "model": "claude-sonnet-5-5", "thinking": "medium" },
+            { "sdk": "antigravity", "model": "claude-sonnet-5-5", "thinking": "medium" }
+          ]
+        },
+        {
+          "name": "fallback",
+          "strategy": "first-match",
+          "candidates": [
+            { "sdk": "pi", "model": "commandcode/deepseek/deepseek-v4.1-flash", "thinking": "max" }
+          ]
+        }
+      ]
+    }
+  }
+}

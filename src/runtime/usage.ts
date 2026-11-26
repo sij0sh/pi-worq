@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type UsageProvider = "commandcode" | "codex" | "claude" | "antigravity";
+export const USAGE_PROVIDERS = ["commandcode", "codex", "claude", "antigravity"] as const;
+export type UsageProvider = (typeof USAGE_PROVIDERS)[number];
 
 export interface NormalizedWindow {
   /** 0-100 percentage used */
@@ -16,11 +17,18 @@ export interface NormalizedWindow {
   label?: string;
 }
 
+export interface QuotaPool {
+  fiveHour: NormalizedWindow | null;
+  weekly: NormalizedWindow | null;
+}
+
 export interface ProviderSnapshot {
   provider: UsageProvider;
   available: boolean;
   fiveHour: NormalizedWindow | null;
   weekly: NormalizedWindow | null;
+  /** Optional per-model-family quota pools (e.g. Antigravity "gemini" vs "claude"). */
+  pools?: Readonly<Record<string, QuotaPool>>;
   extraNotes?: string[];
   error?: string;
   fetchedAt: string;
@@ -399,6 +407,14 @@ function pickMostConstrained(current: NormalizedWindow | null, candidate: Normal
   return candidate.remainingPercent < current.remainingPercent ? candidate : current;
 }
 
+function classifyAntigravityPool(groupName: string, bucketHint: string): string {
+  const text = `${groupName} ${bucketHint}`.toLowerCase();
+  if (text.includes("claude") || text.includes("anthropic")) return "claude";
+  if (text.includes("gemini")) return "gemini";
+  if (text.includes("gpt") || text.includes("openai")) return "gpt";
+  return groupName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "default";
+}
+
 export async function pollAntigravity(options: PollOptions = {}): Promise<ProviderSnapshot> {
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
@@ -456,6 +472,7 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
 
   let fiveHour: NormalizedWindow | null = null;
   let weekly: NormalizedWindow | null = null;
+  const pools: Record<string, QuotaPool> = {};
 
   for (const group of allGroups) {
     const groupName = str(group.displayName) ?? "default";
@@ -471,18 +488,30 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
       const fraction = typeof rawFraction === "number" ? rawFraction : resetTime ? 0 : null;
       if (fraction === null) continue;
 
-      const label = `${groupName} (${str(b.bucketId) ?? str(b.displayName) ?? "bucket"})`;
+      const bucketName = str(b.bucketId) ?? str(b.displayName) ?? "bucket";
+      const label = `${groupName} (${bucketName})`;
       const normalized = fromRemainingFraction(fraction, resetTime, label);
       const hint = `${str(b.window) ?? ""} ${str(b.bucketId) ?? ""} ${str(b.displayName) ?? ""}`.toLowerCase();
+      const poolKey = classifyAntigravityPool(groupName, bucketName);
+      const pool = pools[poolKey] ?? (pools[poolKey] = { fiveHour: null, weekly: null });
       if (hint.includes("week") || hint.includes("7d")) {
         weekly = pickMostConstrained(weekly, normalized);
+        pool.weekly = pickMostConstrained(pool.weekly, normalized);
       } else {
         fiveHour = pickMostConstrained(fiveHour, normalized);
+        pool.fiveHour = pickMostConstrained(pool.fiveHour, normalized);
       }
     }
   }
 
-  return { provider: "antigravity", available: true, fiveHour, weekly, fetchedAt };
+  return {
+    provider: "antigravity",
+    available: true,
+    fiveHour,
+    weekly,
+    ...(Object.keys(pools).length ? { pools } : {}),
+    fetchedAt,
+  };
 }
 
 export async function pollAllProviders(options: PollOptions = {}): Promise<ProviderSnapshot[]> {
@@ -511,6 +540,18 @@ export function providerForRuntime(sdk: string, model?: string): UsageProvider |
   return undefined;
 }
 
+/** Infer the provider-specific quota pool for a runtime (e.g. Antigravity "gemini" vs "claude" vs "gpt"). */
+export function poolForRuntime(sdk: string, model?: string): string | undefined {
+  if (providerForRuntime(sdk, model) !== "antigravity") return undefined;
+  const raw = model?.trim().toLowerCase();
+  if (!raw) return undefined;
+  const bare = raw.replace(/^(?:google-antigravity|antigravity|google-gemini-cli)\//, "");
+  if (bare.startsWith("claude-")) return "claude";
+  if (bare.startsWith("gemini-")) return "gemini";
+  if (bare.startsWith("gpt-")) return "gpt";
+  return undefined;
+}
+
 export function hasQuotaInfo(snap: ProviderSnapshot): boolean {
   return snap.available && (snap.fiveHour !== null || snap.weekly !== null || Boolean(snap.extraNotes?.includes("limit_reached=true")));
 }
@@ -532,14 +573,15 @@ function fmtClock(iso: string | null): string | null {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-export function formatUsageTui(snap: ProviderSnapshot): string {
+export function formatUsageTui(snap: ProviderSnapshot, pool?: string): string {
+  const source = (pool && snap.pools?.[pool]) ? snap.pools[pool] : snap;
   const parts: string[] = [];
-  if (snap.fiveHour) {
-    const reset = fmtClock(snap.fiveHour.resetsAt);
-    parts.push(`5h ${Math.round(snap.fiveHour.remainingPercent)}% left${reset ? ` (${reset})` : ""}`);
+  if (source.fiveHour) {
+    const reset = fmtClock(source.fiveHour.resetsAt);
+    parts.push(`5h ${Math.round(source.fiveHour.remainingPercent)}% left${reset ? ` (${reset})` : ""}`);
   }
-  if (snap.weekly) {
-    parts.push(`7d ${Math.round(snap.weekly.remainingPercent)}% left`);
+  if (source.weekly) {
+    parts.push(`7d ${Math.round(source.weekly.remainingPercent)}% left`);
   }
   if (snap.extraNotes?.includes("limit_reached=true")) parts.push("limit reached");
   return parts.join(" · ") || "available";
@@ -549,7 +591,21 @@ export function formatUsageForPrompt(snapshot: UsageSnapshot | undefined): strin
   if (!snapshot) return undefined;
   const available = snapshot.providers.filter(hasQuotaInfo);
   if (!available.length) return undefined;
-  const lines = available.map((snap) => {
+  const lines: string[] = [];
+  for (const snap of available) {
+    const poolEntries = snap.pools ? Object.entries(snap.pools) : [];
+    if (poolEntries.length > 1) {
+      for (const [poolName, pool] of poolEntries) {
+        const parts: string[] = [];
+        if (pool.fiveHour) {
+          const reset = fmtClock(pool.fiveHour.resetsAt);
+          parts.push(`5h ${Math.round(pool.fiveHour.remainingPercent)}% left${reset ? ` (resets ${reset})` : ""}`);
+        }
+        if (pool.weekly) parts.push(`7d ${Math.round(pool.weekly.remainingPercent)}% left`);
+        if (parts.length) lines.push(`- ${snap.provider}/${poolName}: ${parts.join(", ")}`);
+      }
+      continue;
+    }
     const parts: string[] = [];
     if (snap.fiveHour) {
       const reset = fmtClock(snap.fiveHour.resetsAt);
@@ -559,8 +615,8 @@ export function formatUsageForPrompt(snapshot: UsageSnapshot | undefined): strin
       parts.push(`7d ${Math.round(snap.weekly.remainingPercent)}% left`);
     }
     if (snap.extraNotes?.includes("limit_reached=true")) parts.push("limit reached");
-    return `- ${snap.provider}: ${parts.join(", ")}`;
-  });
+    lines.push(`- ${snap.provider}: ${parts.join(", ")}`);
+  }
   return [
     "Provider usage snapshot (advisory; cached up to 5m — prefer providers with headroom when choices are otherwise comparable):",
     ...lines,
@@ -629,4 +685,42 @@ export function createUsageTracker(options: UsageTrackerOptions = {}): UsageTrac
       controller = undefined;
     },
   };
+}
+
+/**
+ * Return the current usage snapshot if already cached (triggering a background refresh when stale),
+ * or wait up to `timeoutMs` on a cold start without aborting the tracker's in-flight poll.
+ */
+export async function ensureUsageSnapshot(
+  tracker: UsageTracker | undefined,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<UsageSnapshot | undefined> {
+  if (!tracker) return undefined;
+  const cached = tracker.current();
+  if (cached) {
+    void tracker.refresh();
+    return cached;
+  }
+  if (signal?.aborted) return undefined;
+  const pending = tracker.refresh();
+  if (timeoutMs <= 0) return tracker.current();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      pending.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        if (signal) {
+          onAbort = () => resolve();
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+  return tracker.current();
 }

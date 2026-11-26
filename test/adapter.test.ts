@@ -175,10 +175,10 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   const workerMarker = "Fixture worker instruction.";
   await writeFile(join(agentDir, "workflows", "notes", "SKILL.md"), `---\ndescription: Examine notes\naccess: read\nexplore: none\n---\n${workerMarker}\n`);
   const guide = join(agentDir, "worq", "SPAWN-GUIDANCE.md");
-  const hints = join(agentDir, "worq", "RUNTIMES.md");
+  const routing = join(agentDir, "worq", "routing.json");
   const chosen = { sdk: "echo", model: "e/analysis", thinking: "high" };
   await writeFile(guide, `Unlisted prompt prose\n\n| sdk | model | thinking | use when |\n| --- | --- | --- | --- |\n| echo | ${chosen.model} | high | Difficult diagnosis |\n| echo | Bogus | low | Unavailable fixture choice |\n`);
-  await writeFile(hints, "| role | sdk | model | thinking |\n| --- | --- | --- | --- |\n| notes | echo | e/hinted | low |\n");
+  await writeFile(routing, JSON.stringify({ version: 1, roles: { notes: { rules: [{ candidates: [{ sdk: "echo", model: "e/hinted", thinking: "low" }] }] } } }));
 
   const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
   const sessionManager = SessionManager.inMemory(root);
@@ -328,7 +328,7 @@ test("scripted Main sends spawn guidance tuples through real Pi tools to native 
   const explicit = { sdk: "echo", model: "e/outside", thinking: "low" };
   await assertLaunch("User choice", explicit, explicit);
   await assertLaunch("Hinted default", {}, { sdk: "echo", model: "e/hinted", thinking: "low" });
-  await rm(hints);
+  await rm(routing);
   await assertLaunch("Main default", {}, { sdk: "pi", ...mainSelection });
   const unavailable = await launch("Unavailable choice", { sdk: "echo", model: "Bogus", thinking: "low" });
   assert.equal(unavailable.isError, true);

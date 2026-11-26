@@ -52,6 +52,7 @@ export async function loadResources(agentDir: string): Promise<Resources> {
   const ignored: string[] = [];
   if (exists(join(root, "instructions"))) ignored.push(`${join(root, "instructions")} is no longer read: move its content into ${file} and delete the folder.`);
   if (exists(join(root, "extensions"))) ignored.push(`${join(root, "extensions")} is ignored: native harness extensions were removed. Delete the folder.`);
+  if (exists(join(root, "RUNTIMES.md"))) ignored.push(`${join(root, "RUNTIMES.md")} is no longer read: move per-role defaults and budgets into ${join(root, "routing.json")} and delete RUNTIMES.md.`);
   return Object.freeze({ root, ...(agents ? { agents } : {}), skills, ignored });
 }
 

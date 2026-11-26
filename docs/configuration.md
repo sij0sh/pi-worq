@@ -14,29 +14,28 @@ Top-level key: `limits`.
 
 ## Runtime
 
-Every launch uses the same resolver, from `/worq`, `worq_spawn` or `worq spawn`. With no `RUNTIMES.md` hints:
+Every launch uses the same resolver, from `/worq`, `worq_spawn` or `worq spawn`. With no `routing.json` rules:
 
 - `sdk`: explicit, else `pi`. The adapter is imported on first use. `claude-code` (optional `@anthropic-ai/claude-agent-sdk` + `zod`) and `antigravity` (optional `agy` CLI over ACP) are lazy built-ins; a valid installed adapter with the same id wins. `pi` is the only reserved id.
 - `model`: explicit, else the adapter default (Pi: Main's current model).
 - `thinking`: explicit, else the adapter default (Pi: Main's level) when the model supports it; an unsupported inherited level is dropped, an unsupported explicit one refused (`capability`).
 - Then the adapter's local preflight (`validateRuntime`) rejects malformed/unknown models before admission. Account, network and provider-side failures can still surface at open; the agent then fails with the existing cleanup.
 
-PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included), then apply any `RUNTIMES.md` hint for their role. The CLI `worq configure` and the dock change a live session; the harness stays locked.
+PQ subagents and reviews inherit their agent's effective runtime at child launch (applied `configure` changes included), then apply any matching child entry in `routing.json`. The CLI `worq configure` and the dock change a live session; the harness stays locked.
 
 `/worq` shows a runtime step (harness, model, thinking) with Main's selection preselected. Enter launches, Esc cancels; no countdown. Changing harness resets model and thinking to that harness's defaults. Tool and CLI launches never open it.
 
-## Runtime hints (`RUNTIMES.md`)
+## Runtime routing (`routing.json`)
 
-Optional `<agentDir>/worq/RUNTIMES.md`: one Markdown table of soft per-role defaults (`role | sdk | model | thinking | max-turns | max-minutes`). Starter: `docs/examples/RUNTIMES.md`. Missing file = behaviour above, unchanged. The file Worq creates on first load is that example table inside an HTML comment, so it parses as zero rows; no table, or only commented rows, means no hints.
+Optional `<agentDir>/worq/routing.json`: automated, hot-reloaded quota- and condition-based runtime routing plus per-role thinking caps and turn/minute budgets. Starter example: [docs/examples/routing.json](examples/routing.json); full schema and condition reference: [docs/routing.md](routing.md) (also provisioned as an agent-facing guide at `<agentDir>/worq/ROUTING.md`). Missing file or empty `roles: {}` = behaviour above, unchanged.
 
-- Hot reload: re-read when mtime/size changes; next spawn or child launch uses it. Running sessions keep their runtime.
-- Precedence: explicit launch field > hint > Main/adapter default. Explicit values stay fail-closed; hints never throw.
-- `thinking`: `level` (exact, snaps down) or `<=level` (cap, never upgrades). No level control → dropped.
-- `model`/`sdk`: ignored when the launch names another sdk; an unavailable model warns once and falls back.
-- `max-turns`/`max-minutes`: override workflow frontmatter; clamped by `limits`.
-- Roles: `*`, `<kind>`; children `pq`, `<kind>.pq[.<name>]`, `review`, `<kind>.review`, `edit`, `<kind>.edit[.<name>]`. Fields merge broad → specific.
-- `/worq` preselects hinted values per kind (`· RUNTIMES.md`). `worq list <ref>` shows `via: RUNTIMES.md (<role>)`.
-- Safety: same as shared resources (outside Git checkouts, no symlink escape, ≤ 256 KiB). Bad rows/cells skip with one warning per file version.
+- **Hot reload:** re-read when mtime/size changes; applies on the next spawn or `/worq` open without restarting Pi.
+- **Precedence:** explicit launch field > `routing.json` > Main/adapter default.
+- **Quota & condition rules:** ordered `rules` per role with `highest-remaining` or `first-match` candidate ranking, 5h/7d remaining & used percentage thresholds (`minRemainingPercent`, `maxUsedPercent`, `notExhausted`), provider-specific pools (e.g. Antigravity `gemini` vs `claude` 5h limits), cross-provider `when.provider` + `when.pool`, logical `all`/`any`, and context qualifiers (`access`, `inGroup`, `hasAttachments`, `taskIncludes`).
+- **Per-role budgets & thinking caps:** optional `thinking` (`level` or `<=level`), `maxTurns` (`1..400`), and `maxMinutes` (`1..600`) on any role entry, merged broad → specific and clamped by `limits`.
+- **Fail-soft:** unsupported thinking levels (e.g. built-in `claude-code`) snap down or drop softly; unavailable adapters/models warn once and fall through to the next candidate or rule.
+- **Roles:** top-level `<kind>` → `*`; children `pq`, `<kind>.pq[.<name>]`, `review`, `<kind>.review`, `edit`, `<kind>.edit[.<name>]` (`rules` on children never fall back to `*` so parent inheritance and `fork: true` stay intact; budgets and thinking caps merge broad → specific).
+- `/worq` preselects routed values per kind (`· routing.json`). `worq list <ref>` shows `via: routing.json (<role>: <rule>)`.
 
 ## Main spawn guidance (`SPAWN-GUIDANCE.md`)
 
@@ -55,7 +54,7 @@ Worq checks subscription rolling-window quotas (5-hour and 7-day) in the backgro
 - **Claude Code:** `CLAUDE_OAUTH_TOKEN`, `$CLAUDE_CONFIG_DIR/.credentials.json` / `~/.claude/.credentials.json`, or macOS Keychain `"Claude Code-credentials"`
 - **Antigravity:** `ANTIGRAVITY_ACCESS_TOKEN`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, or macOS Keychain (`gemini` / `antigravity`)
 
-Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`, stale turns, and when opening `/worq`. Available provider headroom is displayed in `/worq` Step 3 (and the live runtime picker) and appended to `<worq_spawn_guidance>` when `SPAWN-GUIDANCE.md` is configured. Missing credentials or network errors are ignored silently.
+Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`, `before_agent_start`, and when opening `/worq` or the live runtime picker. Available provider headroom is displayed in `/worq` Step 3 (and the live runtime picker), evaluated automatically by `<agentDir>/worq/routing.json` when configured, and appended to `<worq_spawn_guidance>` when `SPAWN-GUIDANCE.md` is configured. Missing credentials or network errors are ignored silently.
 
 ## Migration
 
@@ -66,22 +65,24 @@ Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`
 | `launch` | removed (no countdown) | ignored; one warning per Pi session on first launch use |
 | `approveExtensions`, `worq/extensions/` | removed (harness-specific) | ignored; same warning |
 | `worq/instructions/*.md` | `worq/AGENTS.md` | not read; same warning |
+| `worq/RUNTIMES.md` | `worq/routing.json` | not read; same warning |
 
 Relying on a distinct reviewer model? Keep the older release until you accept inherited reviewer runtime; Worq never translates or silently drops it. Fix the file, then reload Pi.
 
 ## First-run files
 
-On first load Worq creates three operator files under `<agentDir>/worq/` when they are missing:
+On first load Worq creates four operator files under `<agentDir>/worq/` when they are missing:
 
 | File | Read by | Shipped content |
 |---|---|---|
 | `AGENTS.md` | every agent, PQ, review and edit system prompt | one HTML comment |
-| `RUNTIMES.md` | runtime hints (re-read when the file changes) | example table inside an HTML comment: zero rows |
 | `SPAWN-GUIDANCE.md` | Main's `worq_spawn` shortlist (read once at load) | example table inside an HTML comment: zero rows |
+| `routing.json` | automated runtime routing & per-role budgets (re-read when the file changes) | `{ "version": 1, "roles": {} }`: zero rules |
+| `ROUTING.md` | agent & operator guide for editing `routing.json` | schema, conditions and examples |
 
-Those templates are inert: the comments carry no instructions, and both table parsers ignore commented rows, so a fresh profile behaves exactly as if the files were absent. Add content by replacing a comment, or by deleting a commented table's `<!--` and `-->` lines and editing its rows.
+Those templates are inert: the comments carry no instructions, `SPAWN-GUIDANCE.md`'s parser ignores commented rows, and `routing.json` has zero roles, so a fresh profile behaves exactly as if the files were absent.
 
-These files are operator-owned data, not shipped assets. Extension updates and re-installs only create a missing file: an existing `AGENTS.md`, `RUNTIMES.md` or `SPAWN-GUIDANCE.md` is never written, moved or reformatted, whatever it contains. There is no marker file, so a deleted file comes back on the next load — **reset** one by deleting it and restarting Pi. The templates live in the installed package at `templates/worq/` if you want a current copy by hand.
+These files are operator-owned data, not shipped assets. Extension updates and re-installs only create a missing file: an existing `AGENTS.md`, `SPAWN-GUIDANCE.md`, `routing.json` or `ROUTING.md` is never written, moved or reformatted, whatever it contains. There is no marker file, so a deleted file comes back on the next load — **reset** one by deleting it and restarting Pi. The templates live in the installed package at `templates/worq/` if you want a current copy by hand.
 
 Provisioning is fail-soft: a profile inside a Git checkout is refused, a symlinked `worq/` directory or symlinked file is reported and never followed, and each failure is one warning (`Default resource not installed: …`). Loading continues without the missing file.
 
@@ -92,8 +93,9 @@ Installed once, identical for every role and every SDK (harness-neutral: plain M
 ```
 <agentDir>/worq/
 ├── AGENTS.md                  appended to every system prompt
-├── RUNTIMES.md                per-role runtime hints
 ├── SPAWN-GUIDANCE.md          Main's worq_spawn runtime shortlist
+├── routing.json               automated quota/condition runtime routing rules & budgets
+├── ROUTING.md                 agent-facing schema and editing guide for routing.json
 ├── skills/<name>/SKILL.md     indexed in the prompt; body read on demand via the `skill` tool
 └── skills/<name>.md
 ```

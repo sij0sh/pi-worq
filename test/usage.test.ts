@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   createUsageTracker,
+  ensureUsageSnapshot,
   formatUsageForPrompt,
   formatUsageTui,
   pollAntigravity,
   pollClaude,
   pollCodex,
   pollCommandCode,
+  poolForRuntime,
   providerForRuntime,
   usageTone,
   type ProviderSnapshot,
@@ -165,10 +167,13 @@ test("pollAntigravity merges prod and daily hosts, handles proto3 zero omission,
   assert.equal(snap.fiveHour?.remainingPercent, 0);
   assert.equal(snap.fiveHour?.label, "Claude (5h-claude)");
   assert.equal(snap.weekly?.remainingPercent, 50);
+  assert.equal(snap.pools?.gemini?.fiveHour?.remainingPercent, 60);
+  assert.equal(snap.pools?.claude?.fiveHour?.remainingPercent, 0);
+  assert.equal(snap.pools?.claude?.weekly?.remainingPercent, 50);
   assert.equal(usageTone(snap), "error");
 });
 
-test("providerForRuntime maps SDKs and Pi model prefixes", () => {
+test("providerForRuntime and poolForRuntime map SDKs, Pi model prefixes, and Antigravity model pools", () => {
   assert.equal(providerForRuntime("claude-code", "sonnet"), "claude");
   assert.equal(providerForRuntime("pi", "anthropic/claude-sonnet-4-5"), "claude");
   assert.equal(providerForRuntime("pi", "openai-codex/gpt-5.3-codex"), "codex");
@@ -176,6 +181,11 @@ test("providerForRuntime maps SDKs and Pi model prefixes", () => {
   assert.equal(providerForRuntime("pi", "command-code/default"), "commandcode");
   assert.equal(providerForRuntime("pi", "openai/gpt-4o"), undefined);
   assert.equal(providerForRuntime("echo", "e/analysis"), undefined);
+  assert.equal(poolForRuntime("antigravity", "gemini-4-neon"), "gemini");
+  assert.equal(poolForRuntime("antigravity", "claude-opus-5-5"), "claude");
+  assert.equal(poolForRuntime("antigravity", "gpt-oss-120b-medium"), "gpt");
+  assert.equal(poolForRuntime("pi", "google-antigravity/claude-sonnet-5-5"), "claude");
+  assert.equal(poolForRuntime("claude-code", "claude-opus-5-5"), undefined);
 });
 
 test("formatUsageForPrompt omits unavailable providers and escapes <", () => {
@@ -265,4 +275,30 @@ test("createUsageTracker caches within TTL, deduplicates in-flight polls, notifi
   slow.dispose();
   await pending;
   assert.equal(aborted, true);
+});
+
+test("ensureUsageSnapshot waits bounded on cold start without aborting background poll, and returns cached snapshot immediately", async () => {
+  let release!: () => void;
+  let polls = 0;
+  const tracker = createUsageTracker({
+    ttlMs: 60_000,
+    poll: async () => {
+      polls++;
+      if (polls === 1) await new Promise<void>((resolve) => { release = resolve; });
+      return [{ provider: "claude", available: true, fiveHour: { usedPercent: 25, remainingPercent: 75, resetsAt: null }, weekly: null, fetchedAt: "2026-11-25T15:00:00.000Z" }];
+    },
+  });
+
+  // Cold start times out quickly without aborting the in-flight poll
+  const timedOut = await ensureUsageSnapshot(tracker, 15);
+  assert.equal(timedOut, undefined);
+  assert.equal(polls, 1);
+
+  // Once the background poll completes, subsequent calls return cached immediately
+  release();
+  await tracker.refresh();
+  const cached = await ensureUsageSnapshot(tracker, 500);
+  assert.equal(cached?.providers[0]?.fiveHour?.remainingPercent, 75);
+  assert.equal(polls, 1);
+  tracker.dispose();
 });

@@ -10,7 +10,7 @@ const MAX_BYTES = 16 * 1024;
 const MAX_ROWS = 8;
 const MAX_NOTE = 200;
 
-export const spawnRuntimeRule = "For worq_spawn runtime, honor explicit user preferences first, even outside the shortlist. Otherwise, choose a suitable listed sdk and model together, with thinking only if listed. For a partial preference, never replace a requested field; fill in only from an unambiguous compatible choice if needed, otherwise leave fields unset or ask. Without a suitable choice, leave runtime fields unset: RUNTIMES.md defaults apply before Main/adapter defaults.";
+export const spawnRuntimeRule = "For worq_spawn runtime, honor explicit user preferences first, even outside the shortlist. Otherwise, omit runtime fields when automatic routing (<agentDir>/worq/routing.json; guide in <agentDir>/worq/ROUTING.md) is configured, or choose a suitable listed sdk and model together, with thinking only if listed. For a partial preference, never replace a requested field; fill in only from an unambiguous compatible choice if needed, otherwise leave fields unset or ask. Without a suitable choice, leave runtime fields unset: routing.json defaults apply before Main/adapter defaults.";
 
 function readGuidance(path: string) {
   const fd = openSync(path, "r");

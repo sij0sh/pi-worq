@@ -1,19 +1,28 @@
 import { errorText } from '../contracts.ts';
 import { assertRuntime, supportedThinking, type Driver, type Runtime } from '../sdk/contract.ts';
 import { MAIN } from './config.ts';
-import { hintThinking, type RuntimeHint } from './hints.ts';
+import { hintThinking, type RoutedCandidate } from './routing.ts';
 
 /** One pickable model; `thinking` is the SDK's default level for it, when supported. */
 export interface ModelChoice { sdk: string; model?: string; levels: readonly string[]; thinking?: string }
 /** Explicit runtime fields of one launch. Absent fields inherit: Pi from Main, other SDKs from their adapter. */
 export interface RuntimeRequest { sdk?: string; model?: string; thinking?: string }
 
+/** Prioritized routing.json candidates and/or soft thinking cap for one role, with where to report skipped ones. */
+export interface Routed {
+  candidates?: readonly RoutedCandidate[];
+  thinking?: string;
+  role: string;
+  warn?(message: string): void;
+}
+type Locked = { sdk?: boolean; model?: boolean; thinking?: boolean };
+
 /**
  * The single resolver for every launch route (/worq, worq_spawn, CLI). Loads only the requested adapter, applies
  * explicit fields first, inherits compatible defaults, then runs the adapter's local preflight. Never enumerates models.
  * Explicit unsupported values are refused; only an incompatible inherited thinking level is dropped.
  */
-export async function resolveRuntime(driver: Driver, request: RuntimeRequest, signal: AbortSignal, hinted?: Hinted): Promise<Runtime> {
+export async function resolveRuntime(driver: Driver, request: RuntimeRequest, signal: AbortSignal, routed?: Routed): Promise<Runtime> {
   signal.throwIfAborted();
   const sdk = request.sdk ?? MAIN.sdk;
   await driver.load?.(sdk);
@@ -29,48 +38,63 @@ export async function resolveRuntime(driver: Driver, request: RuntimeRequest, si
   if (inherited !== undefined) runtime.thinking = inherited;
   await driver.validate?.(runtime, signal);
   signal.throwIfAborted();
-  if (!hinted) return Object.freeze(runtime);
-  return applyHint(driver, runtime, hinted, signal, { sdk: request.sdk !== undefined, model: request.model !== undefined, thinking: request.thinking !== undefined });
+  const locked: Locked = { sdk: request.sdk !== undefined, model: request.model !== undefined, thinking: request.thinking !== undefined };
+  if (routed) {
+    const selected = await applyRouting(driver, runtime, routed, signal, locked);
+    if (selected) return selected;
+  }
+  return Object.freeze(runtime);
 }
 
-/** A RUNTIMES.md hint for one role, with where to report a skipped one. */
-export interface Hinted { hint?: RuntimeHint; role: string; warn?(message: string): void }
-type Locked = { sdk?: boolean; model?: boolean; thinking?: boolean };
-
 /**
- * Soft-apply a hint over an already-resolved runtime: only unlocked (non-explicit) fields change. A hint naming
- * another harness than an explicit sdk is ignored for sdk/model. A hinted model failing local preflight warns and
- * falls back to `base`'s model. Thinking hints never throw: unsupported levels snap down or drop.
+ * Soft-apply prioritized routing.json candidates (and/or a role-level soft thinking cap) over an already-resolved
+ * runtime: only unlocked fields change. Candidates conflicting with locked sdk/model are skipped. Candidates failing
+ * local adapter preflight warn once and fall through to the next candidate/rule. Thinking snaps down or drops softly.
  */
-export async function applyHint(driver: Driver, base: Runtime, hinted: Hinted, signal: AbortSignal, locked: Locked = {}): Promise<Runtime> {
-  const { hint, role, warn } = hinted;
-  if (!hint) return base;
-  const crossSdk = locked.sdk && (hint.sdk ?? MAIN.sdk) !== base.sdk;
-  const sdk = !locked.sdk && !locked.model && hint.sdk ? hint.sdk : base.sdk;
-  const model = !locked.model && !crossSdk && hint.model ? hint.model : sdk !== base.sdk ? undefined : base.model;
-  const moved = sdk !== base.sdk || model !== base.model;
-  const thinkingHint = locked.thinking ? undefined : hint.thinking;
-  if (!moved && thinkingHint === undefined) return base;
-  try {
-    if (moved) await driver.load?.(sdk);
+export async function applyRouting(driver: Driver, base: Runtime, routed: Routed, signal: AbortSignal, locked: Locked = {}): Promise<Runtime | undefined> {
+  if (locked.sdk && locked.model && locked.thinking) return undefined;
+  const { role, warn } = routed;
+  for (const candidate of routed.candidates ?? []) {
     signal.throwIfAborted();
-    const next: Runtime = { ...base, sdk, via: [base.via, `RUNTIMES.md (${role})`].filter(Boolean).join(' + ') };
-    const chosen = model ?? (sdk !== base.sdk ? driver.defaultModel?.(sdk) : undefined);
-    if (chosen !== undefined) next.model = chosen; else delete next.model;
-    const caps = driver.capabilities('agent', { ...next, thinking: undefined });
-    const inherited = locked.thinking ? base.thinking : base.thinking ?? driver.defaultThinking?.(sdk);
-    const thinking = locked.thinking ? base.thinking
-      : thinkingHint !== undefined ? hintThinking(thinkingHint, inherited, caps.thinking) : supportedThinking(inherited, caps.thinking);
+    if (locked.sdk && candidate.sdk !== base.sdk) continue;
+    if (locked.model && candidate.model !== base.model) continue;
+    const sdk = locked.sdk ? base.sdk : candidate.sdk;
+    const model = locked.model ? base.model : candidate.model;
+    const moved = sdk !== base.sdk || model !== base.model;
+    const tag = candidate.ruleName ? `routing.json (${role}: ${candidate.ruleName})` : `routing.json (${role})`;
+    const thinkingHint = candidate.thinking ?? routed.thinking;
+    try {
+      if (moved) await driver.load?.(sdk);
+      signal.throwIfAborted();
+      const next: Runtime = { ...base, sdk, via: [base.via, tag].filter(Boolean).join(' + ') };
+      if (model !== undefined) next.model = model; else delete next.model;
+      const caps = driver.capabilities('agent', { ...next, thinking: undefined });
+      const inherited = locked.thinking ? base.thinking : base.thinking ?? driver.defaultThinking?.(sdk);
+      const thinking = locked.thinking
+        ? base.thinking
+        : thinkingHint !== undefined
+          ? hintThinking(thinkingHint, inherited, caps.thinking)
+          : supportedThinking(inherited, caps.thinking);
+      if (thinking !== undefined) next.thinking = thinking; else delete next.thinking;
+      assertRuntime(next, caps);
+      if (moved) await driver.validate?.(next, signal);
+      signal.throwIfAborted();
+      return Object.freeze(next);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      warn?.(`${tag}: ${candidate.sdk} ${candidate.model} unavailable (${errorText(error)}); trying next candidate`);
+    }
+  }
+  if (!locked.thinking && routed.thinking !== undefined) {
+    const caps = driver.capabilities('agent', { ...base, thinking: undefined });
+    const inherited = base.thinking ?? driver.defaultThinking?.(base.sdk);
+    const thinking = hintThinking(routed.thinking, inherited, caps.thinking);
+    const next: Runtime = { ...base, via: [base.via, `routing.json (${role})`].filter(Boolean).join(' + ') };
     if (thinking !== undefined) next.thinking = thinking; else delete next.thinking;
     assertRuntime(next, caps);
-    if (moved) await driver.validate?.(next, signal);
-    signal.throwIfAborted();
     return Object.freeze(next);
-  } catch (error) {
-    if (signal.aborted || !moved) throw error;
-    warn?.(`RUNTIMES.md (${role}): ${[hint.sdk, hint.model].filter(Boolean).join(' ')} unavailable (${errorText(error)}); falling back to ${base.model ?? base.sdk}`);
-    return applyHint(driver, base, { ...hinted, hint: { ...hint, sdk: undefined, model: undefined } }, signal, locked);
   }
+  return undefined;
 }
 
 /**

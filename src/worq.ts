@@ -4,10 +4,11 @@ import { Block } from "./contracts.ts";
 import { EXPLORE_LIMITS, exploreRepo, repoStateKey, type ExploreSnapshot } from "./explore.ts";
 import { formatGateLines, type GateSpec } from "./gate.ts";
 import { MAIN, type Config } from "./runtime/config.ts";
-import { chains, matchHint, type RuntimeHints } from "./runtime/hints.ts";
+import { budgetChains, evaluateRouting, matchRoleBudgets, matchRoleRouting, needsUsageSnapshot, routingChains, type LoadedRouting, type RoutingContext } from "./runtime/routing.ts";
+import { ensureUsageSnapshot, type UsageTracker } from "./runtime/usage.ts";
 import type { Kind } from "./runtime/workflows.ts";
 import { one, reviewLines, reviewStatus } from "./render.ts";
-import { modelChoices, resolveRuntime, type ModelChoice, type RuntimeRequest } from './runtime/launch.ts';
+import { modelChoices, resolveRuntime, type ModelChoice, type Routed, type RuntimeRequest } from './runtime/launch.ts';
 import { createWriteScope, findScopeOverlap, UNRESTRICTED_SCOPE, type WriteScope } from "./scope.ts";
 import type { Driver, Runtime, RuntimeChange } from "./sdk/contract.ts";
 import type { SessionControl, Sessions } from "./session.ts";
@@ -29,8 +30,10 @@ export interface WorqDeps {
   warn?(text: string): void;
   /** Override Tier 1 parallel group warmup stagger (ms); 0 disables. */
   exploreStaggerMs?: number;
-  /** RUNTIMES.md loader (hot-reloaded); absent means no hints. */
-  hints?(): RuntimeHints;
+  /** routing.json loader (hot-reloaded); absent means no automated routing or per-role budgets. */
+  routing?(): LoadedRouting;
+  /** Shared subscription usage tracker for quota-based routing rules. */
+  usage?: UsageTracker;
 }
 /** One launch, from any route. Absent runtime fields inherit; see resolveRuntime. */
 export interface LaunchRequest extends RuntimeRequest {
@@ -132,16 +135,30 @@ export class Worq {
     this.hintNotices.add(text);
     this.deps.warn?.(text);
   };
-  /** Current RUNTIMES.md (re-read when modified); its problems are warned once per file version. */
-  private hints(): RuntimeHints | undefined {
-    const hints = this.deps.hints?.();
-    if (hints?.problems.length) this.hintWarn(hints.problems.join("\n"));
-    return hints;
+  /** Current routing.json (re-read when modified); its problems are warned once per file version. */
+  private routing(): LoadedRouting | undefined {
+    const loaded = this.deps.routing?.();
+    if (loaded?.problems.length) this.hintWarn(loaded.problems.join("\n"));
+    return loaded;
   }
-  /** The runtime a launch with no explicit fields would use, for the /worq picker (hinted for `kind`). */
-  defaults(signal: AbortSignal = this.admissions.signal, kind?: string): Promise<Runtime> {
-    const hint = kind ? matchHint(this.hints(), chains.agent(kind)) : undefined;
-    return resolveRuntime(this.deps.driver, {}, signal, hint ? { hint, role: kind!, warn: this.hintWarn } : undefined);
+  /** Evaluate routing.json for `chain`, awaiting a bounded cold-start usage poll when quota rules apply. */
+  private async routedFor(chain: readonly string[], role: string, context: RoutingContext, signal: AbortSignal, thinking?: string): Promise<Routed | undefined> {
+    const matched = matchRoleRouting(this.routing(), chain);
+    if (!matched) return thinking !== undefined ? { thinking, role, warn: this.hintWarn } : undefined;
+    const snapshot = needsUsageSnapshot(matched.routing, matched.defaults)
+      ? await ensureUsageSnapshot(this.deps.usage, matched.defaults.refreshTimeoutMs, signal)
+      : this.deps.usage?.current();
+    const candidates = evaluateRouting(matched.routing, matched.defaults, snapshot, context);
+    if (!candidates.length && thinking === undefined) return undefined;
+    return { ...(candidates.length ? { candidates } : {}), ...(thinking !== undefined ? { thinking } : {}), role, warn: this.hintWarn };
+  }
+  /** The runtime a launch with no explicit fields would use, for the /worq picker (routing.json applied). */
+  async defaults(signal: AbortSignal = this.admissions.signal, kind?: string): Promise<Runtime> {
+    const budgets = kind ? matchRoleBudgets(this.routing(), budgetChains.agent(kind)) : undefined;
+    const routed = kind
+      ? await this.routedFor(routingChains.agent(kind), kind, { access: this.kinds.get(kind)?.access }, signal, budgets?.thinking)
+      : undefined;
+    return resolveRuntime(this.deps.driver, {}, signal, routed);
   }
   /** Picker information; never needed for a launch. `extra` adds hinted defaults missing from the catalog. */
   async launchChoices(initial: Runtime, extra: readonly Runtime[] = []): Promise<ModelChoice[]> {
@@ -206,9 +223,16 @@ export class Worq {
 
     try {
       signal.throwIfAborted();
-      const hint = matchHint(this.hints(), chains.agent(kind.name));
-      const runtime = await resolveRuntime(this.deps.driver, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal,
-        hint ? { hint, role: kind.name, warn: this.hintWarn } : undefined);
+      const budgets = matchRoleBudgets(this.routing(), budgetChains.agent(kind.name));
+      const allLocked = request.sdk !== undefined && request.model !== undefined && request.thinking !== undefined;
+      const routed = allLocked ? undefined : await this.routedFor(
+        routingChains.agent(kind.name),
+        kind.name,
+        { access: kind.access, inGroup: Boolean(request.group), hasAttachments: Boolean(request.attach?.length), task },
+        signal,
+        budgets?.thinking,
+      );
+      const runtime = await resolveRuntime(this.deps.driver, { sdk: request.sdk, model: request.model, thinking: request.thinking }, signal, routed);
       this.capacity(kind);
       if (kind.access === "write") this.assertDisjointScope(scope, request.group);
       const inline = kind.access === "read" && kind.output === "inline";
@@ -235,10 +259,11 @@ export class Worq {
         const agent = new Agent({
           runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root,
           semaphore: this.semaphore, notify: agentNotify, sessions: this.sessions,
-          ...(this.deps.hints ? { hints: { get: () => this.hints() ?? { path: "", rows: new Map(), problems: [] }, warn: this.hintWarn } } : {}),
+          ...(this.deps.routing ? { routing: { get: () => this.routing() ?? { path: "", problems: [] }, warn: this.hintWarn } } : {}),
+          ...(this.deps.usage ? { usage: this.deps.usage } : {}),
           onCancelled: this.deps.onAgentsChanged,
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
-        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, hint, startDelay, onWarm });
+        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, budgets, startDelay, onWarm });
         this.agents.set(ref, agent);
         if (group) {
           group.members.push(ref);

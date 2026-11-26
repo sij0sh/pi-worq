@@ -9,14 +9,15 @@ import { exists, outsideCheckout } from "./skills.ts";
  * Operator resource files that ship as inert templates and are installed once per profile:
  *
  *   <agentDir>/worq/AGENTS.md           appended to every system prompt
- *   <agentDir>/worq/RUNTIMES.md         per-role runtime hints
  *   <agentDir>/worq/SPAWN-GUIDANCE.md   the shortlist Main may choose a worker runtime from
+ *   <agentDir>/worq/routing.json        automated quota/condition-based runtime routing rules and per-role budgets
+ *   <agentDir>/worq/ROUTING.md          agent-facing schema and editing guide for routing.json
  *
  * These are operator-owned data, not shipped assets: a file is written only when it is missing, so updates and
  * re-installs never touch an existing copy. There is no marker file, so a deleted file comes back on the next load.
  */
 export const TEMPLATE_SEEDS = fileURLToPath(new URL("../../templates/worq/", import.meta.url));
-export const TEMPLATES = ["AGENTS.md", "RUNTIMES.md", "SPAWN-GUIDANCE.md"] as const;
+export const TEMPLATES = ["AGENTS.md", "SPAWN-GUIDANCE.md", "routing.json", "ROUTING.md"] as const;
 export interface TemplateProblem { path: string; message: string }
 
 /** The deepest existing ancestor, so a Git checkout is detected before anything is created in it. */

@@ -5,7 +5,7 @@ import { getNativeClipboard, Editor, type Component, type TuiMouseEvent, matches
 import { Block } from './contracts.ts';
 import { clean } from './render.ts';
 import type { ModelChoice } from './runtime/launch.ts';
-import { formatUsageTui, hasQuotaInfo, providerForRuntime, usageTone, type UsageView } from './runtime/usage.ts';
+import { formatUsageTui, hasQuotaInfo, poolForRuntime, providerForRuntime, usageTone, type UsageView } from './runtime/usage.ts';
 import { supportedThinking, type Runtime, type RuntimeChange } from './sdk/contract.ts';
 
 function boxed(theme: { fg(color: string, s: string): string }, width: number, lines: string[]) {
@@ -64,7 +64,7 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallba
           body = lines.map(line => theme.bg('customMessageBg', line));
         } else {
           const model = selected.sdk === fallback.sdk && selected.model === fallback.model && fallback.model ? "Main's model" : selected.model ?? 'SDK default';
-          const hinted = initial.via.includes('RUNTIMES.md') && selected.sdk === initial.sdk && selected.model === initial.model && selected.thinking === initial.thinking ? ' · RUNTIMES.md' : '';
+          const hinted = initial.via.includes('routing.json') && selected.sdk === initial.sdk && selected.model === initial.model && selected.thinking === initial.thinking ? ' · routing.json' : '';
           const values = [selected.sdk === 'pi' ? 'Pi' : selected.sdk, `${model}${hinted && (initial.model !== fallback.model || initial.sdk !== fallback.sdk) ? hinted : ''}`, `${titleCase(selected.thinking ?? 'SDK default')}${hinted}`];
           body = values.map((value, i) => row(align(`${i === field ? '›' : ' '} ${['Harness', 'Model', 'Thinking'][i]}`, `‹ ${clean(value)} ›`), i === field));
           if (usage) {
@@ -75,11 +75,14 @@ export function launchPanel(ui: ExtensionContext['ui'], { kinds, initial: fallba
               const available = snap.providers.filter(hasQuotaInfo);
               if (available.length) {
                 const activeProvider = providerForRuntime(selected.sdk, selected.model);
+                const activePool = poolForRuntime(selected.sdk, selected.model);
                 body.push(rule, ...available.map(p => {
                   const active = p.provider === activeProvider;
                   const mark = active ? theme.fg('accent', '●') : ' ';
-                  const name = active ? theme.fg('accent', p.provider.padEnd(11)) : p.provider.padEnd(11);
-                  return `${mark} ${name} ${theme.fg(usageTone(p), clean(formatUsageTui(p)))}`;
+                  const pool = active ? activePool : undefined;
+                  const label = pool && p.pools?.[pool] ? `${p.provider}/${pool}` : p.provider;
+                  const name = active ? theme.fg('accent', label.padEnd(18)) : label.padEnd(18);
+                  return `${mark} ${name} ${theme.fg(usageTone(p), clean(formatUsageTui(p, pool)))}`;
                 }));
               }
             }
@@ -145,11 +148,13 @@ export async function runtimePicker(ui: ExtensionContext['ui'], request: Runtime
       invalidate() {},
       render(width) {
         const matched = usage ? providerForRuntime(current.sdk, choice.model) : undefined;
+        const pool = usage ? poolForRuntime(current.sdk, choice.model) : undefined;
         const quota = matched ? usage?.current()?.providers.find(p => p.provider === matched && hasQuotaInfo(p)) : undefined;
+        const quotaLabel = quota && pool && quota.pools?.[pool] ? `${quota.provider}/${pool}` : quota?.provider;
         const lines = [theme.fg('accent', `Runtime · ${clean(request.label).replace(/\s+/g, ' ')}`),
           `  Harness: ${current.sdk} (locked)`,
           ...[`Model: ‹ ${choice.model ?? 'SDK default'} ›`, `Thinking: ‹ ${thinking ?? 'SDK default'} ›`].map((s, i) => `${field === i ? '›' : ' '} ${clean(s)}`),
-          ...(quota ? [theme.fg(usageTone(quota), `  Quota (${quota.provider}): ${clean(formatUsageTui(quota))}`)] : []),
+          ...(quota ? [theme.fg(usageTone(quota), `  Quota (${quotaLabel}): ${clean(formatUsageTui(quota, pool))}`)] : []),
           theme.fg('muted', request.pending ? 'Editing a queued change.' : 'Keeps the session; applies at the next safe execution boundary.'),
           '↑↓ select · ←→ change · Enter apply · Esc dismiss'];
         return boxed(theme, width, lines);

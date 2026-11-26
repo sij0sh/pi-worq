@@ -17,7 +17,7 @@ import { createDriver, discoverAdapters } from "./src/sdk/registry.ts";
 import { loadCatalog, type Kind } from "./src/runtime/workflows.ts";
 import { clean } from "./src/render.ts";
 import type { Driver, Runtime } from "./src/sdk/contract.ts";
-import { hintLoader } from "./src/runtime/hints.ts";
+import { routingLoader } from "./src/runtime/routing.ts";
 import { loadSpawnGuidance, spawnRuntimeRule } from "./src/runtime/spawn-guidance.ts";
 import { provisionTemplates } from "./src/runtime/templates.ts";
 import { createUsageTracker, formatUsageForPrompt, type UsageTracker } from "./src/runtime/usage.ts";
@@ -145,7 +145,7 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         const host = { get model() { return ctx.model; }, get thinkingLevel() { return ctx.thinkingLevel; }, modelRegistry: ctx.modelRegistry, agentDir: dir };
         const driver = options.driver?.(ctx) ?? await createDriver({ pi: host, main: () => ({ model: host.model && `${host.model.provider}/${host.model.id}`, thinking: host.thinkingLevel }) }, resources, adapters.records);
         if (closing) throw new Error('Worq closed');
-        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify, hints: hintLoader(dir), onAgentsChanged: syncTools,
+        return instance = new Worq({ telemetry: ctx.mode === 'tui' ? telemetry : undefined, driver, kinds: catalog, config: { ...config, ignored: [...config.ignored ?? [], ...resources.ignored] }, state: statePath(), cwd: ctx.cwd, notify, routing: routingLoader(dir), usage, onAgentsChanged: syncTools,
           warn: (text) => { if (ui) say(ui, text, "warning"); } });
       })().finally(() => { starting = undefined; });
       return starting;
@@ -201,10 +201,10 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
         catalog.get("execute"),
         ...[...catalog.values()].filter((kind) => kind.name !== "plan" && kind.name !== "execute"),
       ].filter((kind) => kind !== undefined);
+      void usage.refresh();
       const fallback = await worq.defaults();
       const initials = new Map<string, Runtime>();
       for (const kind of kinds) initials.set(kind.name, await worq.defaults(undefined, kind.name).catch(() => fallback));
-      void usage.refresh();
       const result = await launchPanel(ctx.ui, { kinds, initial: fallback, initials, choices: await worq.launchChoices(fallback, [...initials.values()]), usage });
       if (!result || closing) return;
       const { kind, instructions: extra, runtime } = result;
@@ -290,13 +290,15 @@ export function createWorq(options: { driver?: (ctx: ExtensionContext) => Driver
       return new Text(options.expanded ? `${line}\n${theme.fg("muted", rest.join("\n"))}` : line, 1, 0);
     });
 
+    pi.on("before_agent_start", () => {
+      void usage.refresh();
+    });
     const guidance = spawnGuidance.section;
     if (guidance) {
       let runPrompt: NormalizedBuildSystemPromptOptions | undefined;
       pi.on("before_agent_start", ({ systemPromptOptions }) => {
         // Keep the shared options: Pi finalizes the selection and hidden declarations after all start hooks.
         runPrompt = systemPromptOptions;
-        void usage.refresh();
       });
       pi.on("context_with_system", ({ messages }) => {
         // Pi projects hidden tool declarations out *after* this hook, so check the run's hidden list too.
