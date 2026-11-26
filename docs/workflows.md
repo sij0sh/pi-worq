@@ -8,7 +8,7 @@ Every agent kind is an operator-installed **skill package**: own SDK session, `a
 <agentDir>/workflows/<name>/
   SKILL.md          frontmatter + body (the kind prompt)
   PQ.md             optional: enables delegate; child instructions
-  REVIEW.md         optional: mandatory first-submission review instructions
+  REVIEW.md         optional: first-submission review instructions (opt-in)
   EDIT.md           optional (write kinds only): enables delegate_edit; edit worker instructions
   gates.json        optional (write kinds only): deterministic pre-submit commands
   references/…      optional supporting files
@@ -88,7 +88,7 @@ Contract-first parallel edits inside one write agent. Main still sees one branch
 
 - Guards: slices in one wave must be disjoint (`scope-conflict`); slices must overlap the parent's own `writePaths`; `limits.edits` workers per agent (`edit-limit`); a failed slice never blocks clean siblings.
 - `fork: true` (contextFork harnesses): worker continues the parent's context with its tool definitions rebound to the worker's worktree; other handlers refuse. Else fresh session with `EDIT.md` + slice + attached plans.
-- Runtime: owner's, plus `RUNTIMES.md` roles `edit`, `<kind>.edit[.<name>]` (forks keep the parent's model). Budgets: `limits.editTurns` / `editMinutes`.
+- Runtime: owner's, plus `routing.json` roles `edit`, `<kind>.edit[.<name>]` (forks keep the parent's model). Budgets: `limits.editTurns` / `editMinutes`.
 - Delete `EDIT.md` to disable. `record.json`: `editWaves[]` (base, integrated, workers with state, sha, forked).
 - Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
 - Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.

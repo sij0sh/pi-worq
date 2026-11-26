@@ -12,7 +12,7 @@ Main can use the four Worq tools by default. Ask Main directly or launch an agen
 
 First use installs the shipped `plan`, `execute` and `scout` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace. Existing seeded profiles (`.worq-seeded`) are not modified on upgrade; copy `workflows/scout/` into `<agentDir>/workflows/scout/` once if upgrading.
 
-First load also creates `<agentDir>/worq/AGENTS.md`, `RUNTIMES.md` and `SPAWN-GUIDANCE.md` as inert templates: each holds commented example content and changes nothing until you edit it. A file is only created when nothing is at its path, so updates and re-installs never touch your copies; delete one and restart Pi to get the template back. See `docs/configuration.md`.
+First load also creates `<agentDir>/worq/AGENTS.md`, `SPAWN-GUIDANCE.md`, `routing.json` and `ROUTING.md` as inert templates: each holds commented example content and changes nothing until you edit it. A file is only created when nothing is at its path, so updates and re-installs never touch your copies; delete one and restart Pi to get the template back. See `docs/configuration.md`.
 
 ### Windows (native)
 
@@ -112,7 +112,7 @@ Select it with `worq_spawn { kind, sdk: "claude-code", model? }`, `worq spawn <k
 }
 ```
 
-Each launch defaults to the current Pi session's model and thinking level; a launch request (`sdk`/`model`/`thinking`, CLI flags or the `/worq` runtime step) overrides it. PQs and reviews inherit their agent's runtime. Optional `<agentDir>/worq/RUNTIMES.md` sets soft per-role model/thinking/turn hints (hot-reloaded; starter in `docs/examples/RUNTIMES.md`). The removed `plan`, `execute` and `review` presets block new launches (not management) until removed; `launch` is ignored with a warning. See `docs/configuration.md`.
+Each launch defaults to the current Pi session's model and thinking level; a launch request (`sdk`/`model`/`thinking`, CLI flags or the `/worq` runtime step) overrides it. PQs and reviews inherit their agent's runtime. Optional `<agentDir>/worq/routing.json` picks per-role runtimes, thinking and turn/minute budgets from ordered quota-aware rules (starter in `docs/examples/routing.json`; see `docs/routing.md`). The removed `plan`, `execute` and `review` presets block new launches (not management) until removed; `launch` is ignored with a warning. See `docs/configuration.md`.
 
 `AGENTS.md` and skills are **not** per role or per harness: install once under `<agentDir>/worq/` and every role on every SDK gets the same set. See `docs/configuration.md` for keys, resources, limits and failure codes, and `docs/sdk.md` for the adapter contract.
 
@@ -132,7 +132,7 @@ On Linux, the CLI uses a Unix socket. State defaults to `$XDG_STATE_HOME/pi-worq
 
 Planning, execution, reviewer commands/services, artifacts, and the control CLI run on Linux and Windows. `observe_terminal` (automated PTY capture) remains Linux-only; use Linux or WSL if a review needs it. On Windows, command tools run `.exe` programs directly, not `.cmd` or `.bat` shims. For npm-based checks use `node` with a CLI JavaScript entry point (e.g. `node node_modules/typescript/bin/tsc`). Repo file tools use `/`-separated relative paths on both platforms.
 
-Two SDKs ship: Pi (`pi`, the default) and Claude Code (`claude-code`, optional, loaded through `@anthropic-ai/claude-agent-sdk` only when selected). Any valid installed adapter wins its own lowercase id, including `claude-code` and `claude`; `pi` is the only reserved id. Others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). Neither SDK session is an OS sandbox; Claude isolation is a Worq tool/settings boundary. Reviewer and agent judgement quality is not proven by the test suite, which uses scripted drivers.
+Three SDKs ship: Pi (`pi`, the default), Claude Code (`claude-code`, optional, loaded through `@anthropic-ai/claude-agent-sdk` only when selected) and Antigravity (`antigravity`, optional, needs the `agy` CLI). Any valid installed adapter wins its own lowercase id, including `claude-code`, `claude` and `antigravity`; `pi` is the only reserved id. Others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). No SDK session is an OS sandbox; Claude isolation is a Worq tool/settings boundary. Reviewer and agent judgement quality is not proven by the test suite, which uses scripted drivers.
 
 ## Develop
 

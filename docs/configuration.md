@@ -41,7 +41,7 @@ Optional `<agentDir>/worq/routing.json`: automated, hot-reloaded quota- and cond
 
 To let Main choose a worker runtime for the task, put a shortlist in `<agentDir>/worq/SPAWN-GUIDANCE.md` (see [example](examples/SPAWN-GUIDANCE.md)). Use the first table with the exact columns `sdk | model | thinking | use when`. List SDK/model pairs you've already launched successfully on that profile, using `provider/model` for Pi. Enter a supported literal thinking level or leave it blank to use defaults; leave it blank for built-in `claude-code`. Give each choice a short task-fit note. The shortlist is checked for argument shape, not adapter, model or account availability.
 
-Main can copy a suitable pair and its listed thinking level into `worq_spawn`, even for different tasks using the same workflow. Explicit user preferences win, including choices outside the list. If no choice fits, Main omits runtime fields: `RUNTIMES.md` provides the same per-role defaults as before, then normal Main/adapter defaults apply. The shortlist does not change workflow permissions or route `/worq`, the CLI or child sessions.
+Main can copy a suitable pair and its listed thinking level into `worq_spawn`, even for different tasks using the same workflow. Explicit user preferences win, including choices outside the list. If no choice fits, Main omits runtime fields: `routing.json` role rules apply, then normal Main/adapter defaults. The shortlist does not change workflow permissions or route `/worq`, the CLI or child sessions.
 
 Pi reads this file once at extension load; reload Pi to apply edits. Only the table's valid rows enter Main's prompt (up to eight choices, with notes no longer than 200 characters). Put a regular UTF-8 file of at most 16 KiB in the active profile outside any Git checkout. The profile root may be a symlink, but the `worq` directory and guidance file may not. Missing or invalid guidance does not prevent launches. A file with no table row at all — including the all-commented template created on first load — is silently read as "no shortlist"; Worq warns only when a table exists but its header or separator is wrong, or when valid-table rows are skipped.
 
@@ -51,8 +51,8 @@ Worq checks subscription rolling-window quotas (5-hour and 7-day) in the backgro
 
 - **Command Code:** `COMMAND_CODE_API_KEY` / `COMMANDCODE_API_KEY` or `~/.commandcode/auth.json`
 - **OpenAI Codex:** `CODEX_ACCESS_TOKEN` (+ `CODEX_ACCOUNT_ID`) or `~/.codex/auth.json`
-- **Claude Code:** `CLAUDE_OAUTH_TOKEN`, `$CLAUDE_CONFIG_DIR/.credentials.json` / `~/.claude/.credentials.json`, or macOS Keychain `"Claude Code-credentials"`
-- **Antigravity:** `ANTIGRAVITY_ACCESS_TOKEN`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, or macOS Keychain (`gemini` / `antigravity`)
+- **Claude Code:** `CLAUDE_OAUTH_TOKEN`, `$CLAUDE_CONFIG_DIR/.credentials.json` / `~/.claude/.credentials.json`, or the macOS Keychain / Linux keyring (`secret-tool`) service `"Claude Code-credentials"`
+- **Antigravity:** `ANTIGRAVITY_ACCESS_TOKEN`, `~/.gemini/antigravity-cli/antigravity-oauth-token`, or the macOS Keychain / Linux keyring (`secret-tool`) entry service `gemini`, account `antigravity`
 
 Snapshots are cached for 5 minutes and fetched non-blockingly on `session_start`, `before_agent_start`, and when opening `/worq` or the live runtime picker. Available provider headroom is displayed in `/worq` Step 3 (and the live runtime picker), evaluated automatically by `<agentDir>/worq/routing.json` when configured, and appended to `<worq_spawn_guidance>` when `SPAWN-GUIDANCE.md` is configured. Missing credentials or network errors are ignored silently.
 
@@ -114,9 +114,9 @@ Subagents are read-only sessions answering one probing question. The delegating 
 { "question": "…", "why": "…", "name": "evidence" }
 ```
 
-The name labels the child; it runs on its agent's runtime (plus `RUNTIMES.md` hints). Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
+The name labels the child; it runs on its agent's runtime (plus `routing.json` role rules). Each child has its own `subagentTurns` / `subagentMinutes` budget. Depth is one: a subagent cannot delegate.
 
-- `fork: true`: on a `contextFork` harness (Pi) the child continues the parent's conversation (same system, tools, model; seeded history), so it skips re-reading and hits the prompt cache. Its `delegate`/`ask_main`/write handlers refuse. A `RUNTIMES.md` hint naming another model, or a harness without `contextFork`, falls back to a fresh PQ. Forked answers use the parent's `submit` schema (`summary` starting `Basis: …`).
+- `fork: true`: on a `contextFork` harness (Pi) the child continues the parent's conversation (same system, tools, model; seeded history), so it skips re-reading and hits the prompt cache. Its `delegate`/`ask_main`/write handlers refuse. A `routing.json` rule naming another model, or a harness without `contextFork`, falls back to a fresh PQ. Forked answers use the parent's `submit` schema (`summary` starting `Basis: …`).
 - Coalesced wake: while PQs are open, their answers queue and wake the parent once, together (`---`-separated). Main messages still wake it at once.
 - `record.json`: `delegations[].forked`, `delegations[].cache` (first response), `delegationPeak` (most concurrent).
 
@@ -161,7 +161,7 @@ Budgets are per invocation and hard. Exhausting one parks the agent unreviewed w
 ## Verifying a configuration
 
 - `worq list <ref>` shows review policy and each session's resolved runtime (`name` `main` or `launch`, `sdk`, `model`, `thinking`).
-- The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>, turn unit <unit>; via <source>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
+- The agent log has `Role <role>: runtime <name> (<sdk>, <model>), thinking <level>; via <source>` at session open, then the SDK's native resolution (`Pi model <provider>/<id>`).
 - `Phase:` shows initial work, reviewed (awaiting acceptance or feedback), final revision, or done.
 
 ## Failures and fixes

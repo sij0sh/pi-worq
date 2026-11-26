@@ -35,7 +35,7 @@ Each role has an ordered `rules` array. Rules are evaluated in order from index 
    - `antigravity` tracks separate quota pools per model family (`"gemini"`, `"claude"`, `"gpt"`), inferred automatically from the candidate model name or targeted explicitly via `when.pool`.
    - If the provider's quota is unavailable/errored, `unknownQuota: "skip"` (default) excludes the candidate; `unknownQuota: "allow"` keeps it.
    - Unconditional rules (no `when`, such as a fallback rule) are never skipped by `unknownQuota: "skip"`.
-3. Eligible candidates in the rule are ordered by `strategy`:
+3. Eligible candidates in the rule are ordered by `strategy` (per rule, else `defaults.strategy`; built-in default `"first-match"`):
    - `"highest-remaining"`: descending by the selected window's `remainingPercent` (ties keep listed order; unknown quota sorts last).
    - `"first-match"`: listed order.
 4. Candidates from earlier rules are tried before later rules. The first candidate that passes local adapter preflight wins, recording `via: routing.json (<role>: <ruleName>)`.
