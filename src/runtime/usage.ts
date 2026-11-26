@@ -6,7 +6,7 @@ import { join } from "node:path";
 export const USAGE_PROVIDERS = ["commandcode", "codex", "claude", "antigravity"] as const;
 export type UsageProvider = (typeof USAGE_PROVIDERS)[number];
 
-export interface NormalizedWindow {
+interface NormalizedWindow {
   /** 0-100 percentage used */
   usedPercent: number;
   /** 0-100 percentage remaining */
@@ -49,7 +49,7 @@ export interface UsageTracker extends UsageView {
   dispose(): void;
 }
 
-export interface PollOptions {
+interface PollOptions {
   fetch?: typeof globalThis.fetch;
   env?: NodeJS.ProcessEnv;
   home?: string;
@@ -60,7 +60,7 @@ export interface PollOptions {
   now?: () => number;
 }
 
-export const DEFAULT_USAGE_TTL_MS = 5 * 60_000;
+const DEFAULT_USAGE_TTL_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
@@ -514,7 +514,7 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
   };
 }
 
-export async function pollAllProviders(options: PollOptions = {}): Promise<ProviderSnapshot[]> {
+async function pollAllProviders(options: PollOptions = {}): Promise<ProviderSnapshot[]> {
   return Promise.all([pollCommandCode(options), pollCodex(options), pollClaude(options), pollAntigravity(options)]);
 }
 
@@ -627,7 +627,7 @@ export function formatUsageForPrompt(snapshot: UsageSnapshot | undefined): strin
 // Cached Non-Blocking Tracker
 // ---------------------------------------------------------------------------
 
-export interface UsageTrackerOptions {
+interface UsageTrackerOptions {
   ttlMs?: number;
   now?: () => number;
   poll?: (signal: AbortSignal) => Promise<readonly ProviderSnapshot[]>;

@@ -200,8 +200,7 @@ export class Worq {
     if (direction.length > MAX_TASK) throw new Block("invalid-payload", `Task exceeds ${MAX_TASK} characters`);
     const task = direction || `Run the ${kind.name} workflow on this repository and submit its result.`;
     const title = request.title?.trim() || generatedTitle(kind.name, direction);
-    let base = nameFrom(title);
-    if (!REF.test(base)) base = `${base}-run`;
+    const base = nameFrom(title);
 
     if (kind.access === "write") this.assertDisjointScope(scope, request.group);
     this.capacity(kind);
@@ -217,7 +216,6 @@ export class Worq {
       }
       group.pending++;
     }
-    const notifyMode: NotifyMode = group?.notify ?? request.notify ?? "each";
     const signals = [callerSignal, this.admissions.signal, group?.admissions.signal].filter((s): s is AbortSignal => s !== undefined);
     const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 
@@ -263,7 +261,7 @@ export class Worq {
           ...(this.deps.usage ? { usage: this.deps.usage } : {}),
           onCancelled: this.deps.onAgentsChanged,
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
-        }, { ref, title, dir, kind, task, attachments, group: group?.id, notifyMode, scope, gates: request.gates, explore, budgets, startDelay, onWarm });
+        }, { ref, title, dir, kind, task, attachments, group: group?.id, scope, gates: request.gates, explore, budgets, startDelay, onWarm });
         this.agents.set(ref, agent);
         if (group) {
           group.members.push(ref);
@@ -512,7 +510,7 @@ export class Worq {
   private detail(a: Agent): string {
     return [
       `${a.headline} · ${a.state}`,
-      a.group && `Group: ${a.group} (${a.notifyMode})`,
+      a.group && `Group: ${a.group} (${this.groups.get(a.group)?.notify ?? "each"})`,
       `Task: ${a.task}`,
       timingLine(a.timings.snapshot()),
       `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "submission complete") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,

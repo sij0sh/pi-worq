@@ -65,7 +65,6 @@ export function mainClaudeModel(main: MainSelection | undefined): string | undef
   const ref = main?.model?.replace(/^anthropic\//, "");
   return ref && REF.test(ref) ? ref : undefined;
 }
-export function claudeThinking(_model: string | undefined): readonly string[] { return []; }
 
 /** Keep native identity/login; never inherit provider, model or harness controls. */
 export function workerEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -215,8 +214,8 @@ export function claudeAdapter(host: HostServices = {}, injected?: ClaudeSdk): SD
       return catalog.values;
     },
     defaultModel,
-    capabilities(runtime): Capabilities {
-      return { switchModel: true, thinking: claudeThinking(runtime.model), turnUnit: "request", requestAdmission: "awaited", context: { system: "replace", ambientInstructions: false } };
+    capabilities(): Capabilities {
+      return { switchModel: true, thinking: [], turnUnit: "request", requestAdmission: "awaited", context: { system: "replace", ambientInstructions: false } };
     },
     async validateRuntime(runtime, signal) {
       signal.throwIfAborted();

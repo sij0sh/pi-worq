@@ -11,11 +11,11 @@ import {
   type UsageSnapshot,
 } from "./usage.ts";
 
-export type QuotaWindow = "5h" | "7d";
-export type RoutingStrategy = "first-match" | "highest-remaining";
-export type UnknownQuotaPolicy = "skip" | "allow";
+type QuotaWindow = "5h" | "7d";
+type RoutingStrategy = "first-match" | "highest-remaining";
+type UnknownQuotaPolicy = "skip" | "allow";
 
-export interface RoutingCondition {
+interface RoutingCondition {
   provider?: UsageProvider;
   /** Optional provider-specific quota pool (e.g. Antigravity "gemini", "claude", "gpt"). */
   pool?: string;
@@ -33,7 +33,7 @@ export interface RoutingCondition {
   any?: readonly RoutingCondition[];
 }
 
-export interface RoutingCandidate {
+interface RoutingCandidate {
   sdk: string;
   model: string;
   thinking?: string;
@@ -43,7 +43,7 @@ export interface RoutingCandidate {
   when?: RoutingCondition;
 }
 
-export interface RoutingRule {
+interface RoutingRule {
   name?: string;
   strategy?: RoutingStrategy;
   unknownQuota?: UnknownQuotaPolicy;
@@ -58,18 +58,18 @@ export interface RoleBudgets {
   maxMinutes?: number;
 }
 
-export interface RoleRouting extends RoleBudgets {
+interface RoleRouting extends RoleBudgets {
   rules?: readonly RoutingRule[];
 }
 
-export interface RoutingDefaults {
+interface RoutingDefaults {
   strategy: RoutingStrategy;
   window: QuotaWindow;
   unknownQuota: UnknownQuotaPolicy;
   refreshTimeoutMs: number;
 }
 
-export interface RoutingConfig {
+interface RoutingConfig {
   version: 1;
   defaults: RoutingDefaults;
   roles: Readonly<Record<string, RoleRouting>>;
@@ -102,7 +102,7 @@ export interface RoutedCandidate {
   remainingPercent?: number;
 }
 
-export const DEFAULT_ROUTING_DEFAULTS: RoutingDefaults = {
+const DEFAULT_ROUTING_DEFAULTS: RoutingDefaults = {
   strategy: "first-match",
   window: "5h",
   unknownQuota: "skip",
@@ -110,7 +110,7 @@ export const DEFAULT_ROUTING_DEFAULTS: RoutingDefaults = {
 };
 
 /** Canonical thinking rank order (matches sdk/pi.ts). Levels outside it only match exactly. */
-export const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 const ROLE = /^(?:\*|[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*)$/;
 const SDK = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -126,7 +126,7 @@ const MAX_CONDITION_DEPTH = 8;
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-export const routingPath = (agentDir: string) => join(agentDir, "worq", "routing.json");
+const routingPath = (agentDir: string) => join(agentDir, "worq", "routing.json");
 
 const empty = (path: string, problems: string[] = [], stamp?: string): LoadedRouting => ({
   path,

@@ -104,7 +104,6 @@ export class Agent {
   readonly title: string;
   readonly branch?: string;
   readonly group?: string;
-  readonly notifyMode: NotifyMode;
   readonly scope?: WriteScope;
   readonly gates: readonly GateSpec[];
   readonly explore?: ExploreSnapshot;
@@ -157,14 +156,13 @@ export class Agent {
     this.deps.notify({ type: "warning", ref: this.ref, text: `${this.headline} ${message}` });
   };
 
-  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; group?: string; notifyMode?: NotifyMode; scope?: WriteScope; gates?: readonly GateSpec[]; explore?: ExploreSnapshot; budgets?: RoleBudgets; startDelay?: Promise<void>; onWarm?(): void }) {
+  constructor(deps: AgentDeps, input: { ref: string; title?: string; dir?: string; kind: Kind; task: string; attachments: Attachment[]; group?: string; scope?: WriteScope; gates?: readonly GateSpec[]; explore?: ExploreSnapshot; budgets?: RoleBudgets; startDelay?: Promise<void>; onWarm?(): void }) {
     this.deps = deps;
     this.ref = input.ref;
     this.title = input.title ?? input.ref;
     this.dir = input.dir;
     this.kind = input.kind;
     this.group = input.group;
-    this.notifyMode = input.notifyMode ?? "each";
     this.scope = input.scope;
     this.gates = input.gates ?? [];
     this.explore = input.explore;

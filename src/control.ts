@@ -77,7 +77,6 @@ export async function dispatch(worq: Worq, table: Ops, op: string, raw: unknown,
       return { text: entries.map((e) => e.line).join("\n") || "(no activity)", data: entries };
     }
   }
-  throw new Block("op", `Unhandled operation ${op}`);
 }
 
 /** Unix socket or authenticated Windows named pipe, discovered in the state directory. */
