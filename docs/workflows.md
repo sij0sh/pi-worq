@@ -25,7 +25,7 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 
 ## Shipped packages
 
-`plan` (read, reviewed), `execute` (write, reviewed) and `scout` (read, inline, unreviewed, `asks: 0`) ship in this package's `workflows/` and are copied into `<agentDir>/workflows/` on first use, then marked done (`.worq-seeded`). Worq never seeds that profile again or overwrites anything: edit, delete or replace them freely; deleting the whole `workflows/` folder reseeds. Existing seeded installs can copy `workflows/scout/` into `<agentDir>/workflows/scout/` once manually.
+`plan` (read, reviewed), `execute` (write, reviewed), `scout` (read, inline, unreviewed, `asks: 0`) and `brainstorm` (read, bundle, conversational, web-enabled, unreviewed, with modular rubrics in `references/frameworks/`) ship in this package's `workflows/` and are copied into `<agentDir>/workflows/` on first use, then marked done (`.worq-seeded`). Worq never seeds that profile again or overwrites anything: edit, delete or replace them freely; deleting the whole `workflows/` folder reseeds. Existing seeded installs can copy `workflows/scout/` and `workflows/brainstorm/` into `<agentDir>/workflows/` once manually.
 
 - A pre-existing **different** `plan`/`execute` folder at first use is withheld (warning) and the profile is not marked done. Move it aside and restart Pi to install the shipped one, then replace that folder deliberately if you want yours.
 - Unwritable profile: warning; copy `workflows/<name>/` by hand. Controls keep working.
@@ -40,9 +40,11 @@ Example: `docs/examples/foundation/` (read-only audit; capability table in `refe
 | `name` | no | Must equal the folder name if present. |
 | `description` | yes | Shown in the `/worq` menu and the `worq_spawn` kind list. |
 | `disable-model-invocation` | no | `true`: user-only (`/worq`); refused from `worq_spawn`, socket and CLI. `false`/absent: also launchable by Main and the CLI. |
-| `access` | no | `read`: no worktree or write/process tools, result saved as a plan file (or returned inline). Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
-| `output` | no | Read kinds only. `plan` (default): writes `.agents/plans/plan-<ref>.md`. `inline`: returns cited summary directly without touching the repo; attachable by `ref` in the same session. |
-| `explore` | no | Deterministic baseline snapshot placed right after the authority preamble (before the skill body and writePaths) so every kind shares one cached prefix per repo state. `map` (default): Tier 2 symbol map or Tier 3 skeleton (never full inline). `auto` (read kinds only): Tier 1 inline source (`<= 40 KB` & `<= 40` source files), Tier 2 symbol map (`<= 1.5 MB` & `<= 600` source files), or Tier 3 structural skeleton. `none`: off. Shipped: `scout` uses `auto`; `plan`, `execute` use the default. |
+| `access` | no | `read`: no worktree or write/process tools, result saved as a plan file, brief bundle, or returned inline. Absent or `write`: own clean-baseline worktree, pins `worq/<ref>`. |
+| `output` | no | Read kinds only. `plan` (default): writes `.agents/plans/plan-<ref>.md`. `inline`: returns cited summary directly without touching the repo; attachable by `ref` in the same session. `bundle`: writes 1–16 validated files (≤60,000 chars each, ≤256 KiB total) to `.agents/briefs/<ref>/`, upserting across rounds; attachable by `ref` or explicit `.agents/briefs/<ref>/<file>` path. |
+| `conversational` | no | Read kinds only, `false` (default) or `true`. When `true`, the agent parks after every `submit` (releasing its slot while keeping its session warm until `limits.idleMinutes`) so Main can continue with `worq_send` or close with `worq_cancel`. Mutually exclusive with `REVIEW.md`. |
+| `web` | no | `false` (default) or `true`. Exposes in-process `web_search` (keyed provider via env vars) and `web_fetch` (zero-key, SSRF-pinned) tools on the agent. Forked PQs fence web tools to stay repo-local. |
+| `explore` | no | Deterministic baseline snapshot placed right after the authority preamble (before the skill body and writePaths) so every kind shares one cached prefix per repo state. `map` (default): Tier 2 symbol map or Tier 3 skeleton (never full inline). `auto` (read kinds only): Tier 1 inline source (`<= 40 KB` & `<= 40` source files), Tier 2 symbol map (`<= 1.5 MB` & `<= 600` source files), or Tier 3 structural skeleton. `none`: off. Shipped: `scout` uses `auto`; `plan`, `execute` and `brainstorm` use the default. |
 | `max-turns` | no | Optional integer (`1..400`) clamping `limits.agentTurns` downward only. |
 | `max-minutes` | no | Optional integer (`1..600`) clamping `limits.agentMinutes` downward only. |
 | `asks` | no | Optional integer (`0..20`) clamping `limits.asks` downward only. `0` removes `ask_main` from the agent's tool list. |
@@ -82,7 +84,8 @@ All configured executables are checked before any gate launches. Package gates p
 
 - **One review.** With `REVIEW.md`, the first submission gets one independent review, then the agent parks (session and worktree kept, slot released).
 - Main accepts with `worq_cancel`, or sends filtered feedback once with `worq_send`. The agent revises, submits its final result without another review, and ends as `done` (worktree removed, branch/plan kept).
-- Remove `REVIEW.md` from a provisioned package to opt out of review. The submission ends as `done`, with no substitute reviewer needed.
+- **Conversational (`conversational: true`).** No `REVIEW.md`. Every `submit` parks the agent (releasing its active slot while keeping its session warm up to `limits.idleMinutes`) and wakes Main with the round summary. `worq_send` starts the next round; `worq_cancel` or idle expiry closes it cleanly. If a follow-up round exhausts its budget, earlier submitted rounds remain intact on disk.
+- Remove `REVIEW.md` from a non-conversational provisioned package to opt out of review. The submission ends as `done`, with no substitute reviewer needed.
 
 ## Edit waves (`EDIT.md`)
 
@@ -99,7 +102,7 @@ Contract-first parallel edits inside one write agent. Main still sees one branch
 - Runtime: owner's, plus `routing.json` roles `edit`, `<kind>.edit[.<name>]` (forks keep the parent's model). Budgets: `limits.editTurns` / `editMinutes`.
 - Delete `EDIT.md` to disable. `record.json`: `editWaves[]` (base, integrated, workers with state, sha, forked).
 - Out of budget: parks unreviewed; `worq_send` resumes the same phase with a fresh budget.
-- Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md`, headed `# Plan: <title>`.
+- Read: `Submission` (`summary`, Markdown `report`) saved to `.agents/plans/plan-<ref>.md` (headed `# Plan: <title>`), returned inline (`output: inline`), or saved as multi-file briefs under `.agents/briefs/<ref>/` (`output: bundle`; untracked `.agents/briefs/` never blocks `execute` baselines).
 - Write: commit pinned on `worq/<ref>`; the review checks a fresh clone of that exact SHA. The final revision's commit is not re-reviewed. Worq never merges; verify before merging by hand.
 
 ## Run timings
@@ -118,6 +121,12 @@ Measured work excludes requester waits, review, parked time, and unmeasured over
 | `description is required` | Add `description`. |
 | `disable-model-invocation must be true or false` | Fix the value. |
 | `access must be read or write` | Fix the value. |
+| `output is only valid when access is read` | Remove `output` on write kinds. |
+| `output must be plan, inline or bundle` | Fix the `output` value. |
+| `conversational must be true or false` | Fix the `conversational` value. |
+| `conversational is only valid when access is read` | Remove `conversational: true` on write kinds. |
+| `REVIEW.md is not supported when conversational is true` | Remove `REVIEW.md` or set `conversational: false`. |
+| `web must be true or false` | Fix the `web` value. |
 | `explore must be auto, map or none` | Fix the value. |
 | `explore: auto is only valid when access is read (use map or none)` | Use `map` or `none` on write kinds. |
 | `SKILL.md body is blank` | Add instructions. |

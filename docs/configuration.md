@@ -6,11 +6,12 @@ Invalid JSON fails as `invalid-json`; a schema violation fails as `invalid-paylo
 
 ```json
 {
-  "limits": { "agents": 4, "idleMinutes": 60 }
+  "limits": { "agents": 4, "idleMinutes": 60 },
+  "web": { "provider": "brave" }
 }
 ```
 
-Top-level key: `limits`.
+Top-level keys: `limits`, `web`.
 
 ## Runtime
 
@@ -122,9 +123,22 @@ The name labels the child; it runs on its agent's runtime (plus `routing.json` r
 
 A workflow with `REVIEW.md` gets exactly one review subagent, on its first submission and on the agent's runtime. Main's feedback then opens one final, unreviewed revision; the agent ends as `done`. `verify:false` is refused. `worq list <ref>` prints each session's resolved runtime.
 
+## Web grounding
+
+Packages with `web: true` in `SKILL.md` frontmatter (such as the shipped `brainstorm` package) receive in-process `web_search` and `web_fetch` tools through Worq's normal tool surface (preserving SDK isolation across Pi, Claude Code and Antigravity).
+
+- **`web_fetch`:** Works immediately with zero API keys. Only `http:`/`https:` public hosts are allowed; DNS resolution is validated inside the socket connector's `lookup` callback on initial connect and every redirect hop (up to 5 hops), blocking loopback, RFC1918, link-local/metadata, CGNAT, ULA, multicast, zone-scoped, and IPv4-mapped private addresses. Enforces a 15s timeout, 512 KiB raw download cap, and text-MIME allowlist.
+- **`web_search`:** Auto-selects the first configured search provider from process environment variables (API keys stay in environment variables, never in `pi-worq.json`):
+  - `BRAVE_API_KEY` → Brave Web Search API (default preference when multiple keys are set)
+  - `TAVILY_API_KEY` → Tavily Search API
+  - `EXA_API_KEY` → Exa Search API
+- **Provider override:** Set `"web": { "provider": "brave" | "tavily" | "exa" }` in `<agentDir>/pi-worq.json` to pin a specific provider when multiple keys are set.
+- **No search key set:** `web_search` returns a non-fatal `web-unconfigured` error naming the supported environment variables, while `web_fetch` and repo read tools remain usable.
+- **Direct connections only:** `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` environment variables are intentionally ignored by `safeFetch` so connections cannot bypass IP validation through a proxy. Corporate HTTP proxies are not supported.
+
 ## Workflows
 
-The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `plan` and `execute` are seeded on first use. `disable-model-invocation: true` keeps one user-only (`/worq`). See `docs/workflows.md`.
+The agent catalog: `<agentDir>/workflows/<name>/SKILL.md`, read once at extension load (not part of `pi-worq.json`). `plan`, `execute`, `scout` and `brainstorm` are seeded on first use. `disable-model-invocation: true` keeps one user-only (`/worq`). See `docs/workflows.md`.
 
 ## Adapters
 

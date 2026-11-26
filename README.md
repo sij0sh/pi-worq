@@ -10,7 +10,7 @@ pi install /path/to/pi-worq
 
 Main can use the four Worq tools by default. Ask Main directly or launch an agent yourself.
 
-First use installs the shipped `plan`, `execute` and `scout` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace. Existing seeded profiles (`.worq-seeded`) are not modified on upgrade; copy `workflows/scout/` into `<agentDir>/workflows/scout/` once if upgrading.
+First use installs the shipped `plan`, `execute`, `scout` and `brainstorm` packages into `<agentDir>/workflows/` once, never over existing folders. They are then yours to edit, remove or replace. Existing seeded profiles (`.worq-seeded`) are not modified on upgrade; copy `workflows/scout/` and `workflows/brainstorm/` into `<agentDir>/workflows/` once if upgrading.
 
 First load also creates `<agentDir>/worq/AGENTS.md`, `SPAWN-GUIDANCE.md`, `routing.json` and `ROUTING.md` as inert templates: each holds commented example content and changes nothing until you edit it. A file is only created when nothing is at its path, so updates and re-installs never touch your copies; delete one and restart Pi to get the template back. See `docs/configuration.md`.
 
@@ -41,13 +41,14 @@ Main answers bounded factual lookups with primary-source citations unless delega
 
 ## Agent packages
 
-Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/SKILL.md` (frontmatter `name`, `description`, optional `disable-model-invocation`, `access`) plus any supporting folders (`references/`, `scripts/`, …). Read once when Pi loads Worq; restart to pick up changes. No Worq code registers a name.
+Every agent kind, shipped or yours, is one folder: `<agentDir>/workflows/<name>/SKILL.md` (frontmatter `name`, `description`, optional `disable-model-invocation`, `access`, `output`, `conversational`, `web`, `explore`) plus any supporting folders (`references/`, `scripts/`, …). Read once when Pi loads Worq; restart to pick up changes. No Worq code registers a name.
 
 - `disable-model-invocation: true` → user-only: launched by `/worq` alone, refused from `worq_spawn` and the CLI.
 - absent/`false` → also a `worq_spawn` kind (and control socket/CLI).
-- `access: read` → no worktree, no write/process tools; result saved to `.agents/plans/plan-<ref>.md`. Absent → write: own clean-baseline worktree, pins `worq/<ref>`, never merges.
-- Package-root `REVIEW.md` opts into one independent review. Remove it from a provisioned package to opt out; `done` then needs no substitute review. `PQ.md` enables delegation (shipped Plan only). `EDIT.md` (write kinds; shipped Execute) enables `delegate_edit` contract-first parallel edit waves. Before upgrading existing profiles, see the manual migration in docs/workflows.md.
-- Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed.
+- `access: read` → no worktree, no write/process tools; result saved to `.agents/plans/plan-<ref>.md` (`output: plan`), returned inline (`output: inline`), or written as a multi-file brief under `.agents/briefs/<ref>/` (`output: bundle`). Absent → write: own clean-baseline worktree, pins `worq/<ref>`, never merges.
+- `conversational: true` (read kinds, no `REVIEW.md`) → parks after every `submit` for multi-round `worq_send` follow-ups until `worq_cancel` or idle expiry. `web: true` → enables in-process `web_search` and `web_fetch` tools (`docs/configuration.md`).
+- Package-root `REVIEW.md` opts into one independent review. Remove it from a provisioned package to opt out; `done` then needs no substitute review. `PQ.md` enables delegation (`plan`, `brainstorm`). `EDIT.md` (write kinds; shipped `execute`) enables `delegate_edit` contract-first parallel edit waves. Before upgrading existing profiles, see the manual migration in docs/workflows.md.
+- Supporting files are listed in the prompt and read with `skill` (`name`, `path`); never executed (used by `brainstorm` for on-demand rubrics under `references/frameworks/`).
 
 See `docs/workflows.md`.
 
@@ -57,11 +58,11 @@ See `docs/workflows.md`.
 |---|---|
 | Main | your Pi session |
 | Agent | SDK session launched by Main, the CLI or you (`/worq`); has a kind |
-| Kind | installed package `<agentDir>/workflows/<name>/SKILL.md`; frontmatter `access`, `disable-model-invocation`; the body is the workflow. `plan` and `execute` ship as packages |
+| Kind | installed package `<agentDir>/workflows/<name>/SKILL.md`; frontmatter `access`, `output`, `conversational`, `web`, `disable-model-invocation`; the body is the workflow. `plan`, `execute`, `scout` and `brainstorm` ship as packages |
 | PQ | probing question: one scoped question for a fresh read-only session |
 | Subagent | answers one PQ for an agent (`delegate`), fire and forget, depth 1 |
 | Review | one subagent on first submission when the workflow has `REVIEW.md`; read tools, plus process tools on a clone of the exact commit for write kinds |
-| Lifecycle | without `REVIEW.md`: submit → `done`; otherwise run → submit → review → parked → Main accepts (close) or sends feedback once → final revision → `done` |
+| Lifecycle | without `REVIEW.md`: submit → `done` (or `parked` each round when `conversational: true`, continuing on `worq_send` until `worq_cancel`); with `REVIEW.md`: run → submit → review → parked → Main accepts (close) or sends feedback once → final revision → `done` |
 
 ## Tools
 
@@ -69,9 +70,9 @@ Only `worq_spawn` is active before launch. The three management tools become act
 
 | Tool | Params | Effect |
 |---|---|---|
-| `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `group?`, `notify?`, `expect?`, `writePaths?`, `gates?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan names, inline agent refs, or repo-relative plan paths; `group`/`notify: "barrier"`/`expect` coalesce multi-agent waves into one wake-up; `writePaths` and `gates` enforce disjoint write scopes and pre-submit checks for write kinds; runtime defaults to Main's (`sdk` pi) |
-| `worq_list` | `ref?` or `group?` | all agents, one group (with `git merge-tree` check for write branches), or one agent in full (gates, PQs, reviews, activity) |
-| `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked after review → feedback for the one final revision (no further review; ends as `done`) · parked out of budget → resume with a fresh budget |
+| `worq_spawn` | `kind`, `task?`, `title?`, `attach?`, `group?`, `notify?`, `expect?`, `writePaths?`, `gates?`, `sdk?`, `model?`, `thinking?` | start an agent; `task` omitted runs the package as written; `title` (2–4 words) generated when omitted; `attach` lists exact plan/brief names, inline agent refs, or repo-relative paths under `.agents/plans/` or `.agents/briefs/`; `group`/`notify: "barrier"`/`expect` coalesce multi-agent waves into one wake-up; `writePaths` and `gates` enforce disjoint write scopes and pre-submit checks for write kinds; runtime defaults to Main's (`sdk` pi) |
+| `worq_list` | `ref?` or `group?` | all agents, one group (with `git merge-tree` check for write branches), or one agent in full (plan/brief path, gates, PQs, reviews, activity) |
+| `worq_send` | `ref`, `text` | running → steer · waiting → answer · parked on conversational workflow → next round (parks again on submit) · parked after review → feedback for the one final revision (no further review; ends as `done`) · parked out of budget → resume with a fresh budget |
 | `worq_cancel` | `ref`, `group:<id>`, or `all` | parked → close · live → cancel; kills subagents, review, processes; removes worktree; keeps branch |
 
 States: `starting · running · waiting · reviewing · parked · done · closed · cancelled · failed`. `done` = final revision after review or first submission without review: inspect the exact feedback delta and gates directly if needed. A clean review applies only to its reviewed submission. Merging still requires explicit authority and verification of the candidate.
@@ -133,7 +134,7 @@ On Linux, the CLI uses a Unix socket. State defaults to `$XDG_STATE_HOME/pi-worq
 
 Planning, execution, reviewer commands/services, artifacts, and the control CLI run on Linux and Windows. `observe_terminal` (automated PTY capture) remains Linux-only; use Linux or WSL if a review needs it. On Windows, command tools run `.exe` programs directly, not `.cmd` or `.bat` shims. For npm-based checks use `node` with a CLI JavaScript entry point (e.g. `node node_modules/typescript/bin/tsc`). Repo file tools use `/`-separated relative paths on both platforms.
 
-Three SDKs ship: Pi (`pi`, the default), Claude Code (`claude-code`, optional, loaded through `@anthropic-ai/claude-agent-sdk` only when selected) and Antigravity (`antigravity`, optional, needs the `agy` CLI). Any valid installed adapter wins its own lowercase id, including `claude-code`, `claude` and `antigravity`; `pi` is the only reserved id. Others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` is allowed). No SDK session is an OS sandbox; Claude isolation is a Worq tool/settings boundary. Reviewer and agent judgement quality is not proven by the test suite, which uses scripted drivers.
+Three SDKs ship: Pi (`pi`, the default), Claude Code (`claude-code`, optional, loaded through `@anthropic-ai/claude-agent-sdk` only when selected) and Antigravity (`antigravity`, optional, needs the `agy` CLI). Any valid installed adapter wins its own lowercase id, including `claude-code`, `claude` and `antigravity`; `pi` is the only reserved id. Others install as `<agentDir>/worq/adapters/<id>/adapter.mjs` (`docs/sdk.md`). Execute agents need a clean, committed baseline (untracked `.agents/plans/` and `.agents/briefs/` are allowed). No SDK session is an OS sandbox; Claude isolation is a Worq tool/settings boundary. Reviewer and agent judgement quality is not proven by the test suite, which uses scripted drivers.
 
 ## Develop
 

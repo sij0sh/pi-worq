@@ -73,8 +73,8 @@ test("config: defaults, removed keys become migration findings, invalid keys nam
   assert.throws(() => loadConfig(dir), /pi-worq\.json/);
 });
 
-test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role files", () => {
-  assert.deepEqual([...KINDS.keys()].sort(), ["execute", "plan", "scout"]);
+test("shipped Plan, Execute, Scout and Brainstorm are ordinary packages; workflow-owned role files", () => {
+  assert.deepEqual([...KINDS.keys()].sort(), ["brainstorm", "execute", "plan", "scout"]);
   assert.equal(KINDS.get("plan")!.access, "read");
   assert.equal(KINDS.get("plan")!.output, "plan");
   assert.equal(KINDS.get("plan")!.explore, "map");
@@ -84,6 +84,20 @@ test("shipped Plan, Execute and Scout are ordinary packages; workflow-owned role
   assert.equal(KINDS.get("scout")!.output, "inline");
   assert.equal(KINDS.get("scout")!.explore, "auto");
   assert.deepEqual(KINDS.get("scout")!.limits, { turns: 16, minutes: 5, asks: 0 });
+  const brainstorm = KINDS.get("brainstorm")!;
+  assert.equal(brainstorm.access, "read");
+  assert.equal(brainstorm.output, "bundle");
+  assert.equal(brainstorm.explore, "map");
+  assert.equal(brainstorm.conversational, true);
+  assert.equal(brainstorm.web, true);
+  assert.equal(brainstorm.review, undefined);
+  assert.ok(brainstorm.pq);
+  assert.deepEqual(brainstorm.skill.files, [
+    "references/frameworks/open-questions.md",
+    "references/frameworks/option-matrix.md",
+    "references/frameworks/pre-mortem.md",
+    "references/frameworks/steelman.md",
+  ]);
   assert.ok([...KINDS.values()].every((kind) => !kind.userOnly && kind.skill));
   assert.match(KINDS.get("execute")!.review!, /What consequential reason is there not to accept this result as-is\?/);
 });
@@ -256,7 +270,7 @@ test("/worq launches a user-only package", async (t) => {
       setWidget(key: string, factory?: Function) {
         if (!factory || key !== 'worq-launch') return;
         const panel = factory({terminal:{rows:24},requestRender(){},getFocusedComponent(){return null;},setFocus(){}},{});
-        for (const key of ['\x1b[B','\x1b[B','\r','\r','\r']) panel.handleInput(key);
+        for (const key of ['\x1b[B','\x1b[B','\x1b[B','\r','\r','\r']) panel.handleInput(key);
       },
     },
   };

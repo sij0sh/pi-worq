@@ -15,6 +15,7 @@ import type { SessionControl, Sessions } from "./session.ts";
 import { Semaphore } from "./subagent.ts";
 import { checkSwarm, type SwarmCandidate, type SwarmCheckResult } from "./swarm-check.ts";
 import { baselineProject, listBriefFiles, MAX_BUNDLE_BYTES, readBriefFile, readPlan, repository, reserveName } from "./workspace.ts";
+import type { WebToolOptions } from "./web.ts";
 
 export interface WorqDeps {
   telemetry?: import('./telemetry.ts').Telemetry;
@@ -34,6 +35,8 @@ export interface WorqDeps {
   routing?(): LoadedRouting;
   /** Shared subscription usage tracker for quota-based routing rules. */
   usage?: UsageTracker;
+  /** Optional web tool overrides (test seam; defaults to config.web). */
+  web?: WebToolOptions;
 }
 /** One launch, from any route. Absent runtime fields inherit; see resolveRuntime. */
 export interface LaunchRequest extends RuntimeRequest {
@@ -254,11 +257,13 @@ export class Worq {
           this.deps.notify(tagged);
         };
         const { startDelay, onWarm } = this.tier1Schedule(group?.id, kind.name, explore);
+        const web = this.deps.web ?? (config.web ? { provider: config.web.provider } : undefined);
         const agent = new Agent({
           runtime, telemetry: this.deps.telemetry, driver: this.deps.driver, limits: config.limits, state: this.deps.state, root,
           semaphore: this.semaphore, notify: agentNotify, sessions: this.sessions,
           ...(this.deps.routing ? { routing: { get: () => this.routing() ?? { path: "", problems: [] }, warn: this.hintWarn } } : {}),
           ...(this.deps.usage ? { usage: this.deps.usage } : {}),
+          ...(web ? { web } : {}),
           onCancelled: this.deps.onAgentsChanged,
           onSettled: (a) => { if (a.group) this.maybeSettle(this.groups.get(a.group)); },
         }, { ref, title, dir, kind, task, attachments, group: group?.id, scope, gates: request.gates, explore, budgets, startDelay, onWarm });

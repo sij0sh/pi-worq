@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
-import { Block, json, obj, parse } from "../contracts.ts";
+import { Block, json, literals, obj, parse } from "../contracts.ts";
 import type { Runtime } from "../sdk/contract.ts";
+import type { WebProviderName } from "../web.ts";
 
 const int = (minimum: number, maximum: number) => Type.Optional(Type.Integer({ minimum, maximum }));
 /** Every budget. Absent keys use DEFAULT_LIMITS. */
@@ -13,7 +14,10 @@ const Limits = obj({
   idleMinutes: int(1, 1440), services: int(0, 8),
   edits: int(0, 32), editTurns: int(1, 200), editMinutes: int(1, 120),
 });
-const ConfigSchema = obj({ limits: Type.Optional(Limits) });
+const WebConfig = obj({
+  provider: Type.Optional(literals(["brave", "tavily", "exa"] as const)),
+});
+const ConfigSchema = obj({ limits: Type.Optional(Limits), web: Type.Optional(WebConfig) });
 export const DEFAULT_LIMITS = {
   agents: 4, inlineAgents: 12, subagents: 6, parallel: 4, asks: 3,
   agentTurns: 80, subagentTurns: 16, reviewerTurns: 40,
@@ -28,6 +32,7 @@ export const MAIN: Runtime = { name: "main", sdk: "pi", path: "", via: "" };
 export interface Config {
   path: string;
   limits: Limits;
+  web?: { provider?: WebProviderName };
   /** Removed settings that must be migrated before any new launch. Management keeps working. */
   migration?: string;
   /** Removed settings (and resource layouts) that are ignored; warned once on first launch use. */
@@ -76,6 +81,7 @@ export function loadConfig(agentDir: string): Config {
   return {
     path,
     limits: { ...DEFAULT_LIMITS, ...config.limits },
+    ...(config.web ? { web: config.web as { provider?: WebProviderName } } : {}),
     ...(migration ? { migration } : {}),
     ...(ignored.length ? { ignored } : {}),
   };

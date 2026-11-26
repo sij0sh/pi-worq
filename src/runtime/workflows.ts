@@ -10,15 +10,15 @@ import { contained, readBounded, type Skill, exists, loadSkill, outsideCheckout 
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
  * `access` (`read` explicit; absent = write), `output` (`plan`, `inline`, or `bundle`, read-only), `explore`
  * (`auto`, `map`, or `none`), `conversational` (`true` or `false`, read-only, forbids REVIEW.md),
- * optional caps (`max-turns`, `max-minutes`, `asks`). Role files enable
+ * `web` (`true` or `false`), optional caps (`max-turns`, `max-minutes`, `asks`). Role files enable
  * delegation, review, and pre-submit gates.
- * Plan, Execute and Scout ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
+ * Plan, Execute, Scout and Brainstorm ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
 export type OutputMode = "plan" | "inline" | "bundle";
 export type ExploreMode = "auto" | "map" | "none";
 export interface KindLimits { turns?: number; minutes?: number; asks?: number }
 export interface Kind {
-  name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; conversational: boolean; description: string; userOnly: boolean; skill: Skill;
+  name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; conversational: boolean; web: boolean; description: string; userOnly: boolean; skill: Skill;
   pq?: string; review?: string; limits?: KindLimits; gates?: readonly GateSpec[];
   /** EDIT.md (write kinds only): enables `delegate_edit` workers with these instructions. */
   edit?: string;
@@ -65,6 +65,9 @@ function load(root: string, path: string, name: string): Kind | string {
   if (conversationalRaw !== "true" && conversationalRaw !== "false") return "conversational must be true or false";
   const conversational = conversationalRaw === "true";
   if (conversational && access !== "read") return "conversational is only valid when access is read";
+  const webRaw = meta.web ?? "false";
+  if (webRaw !== "true" && webRaw !== "false") return "web must be true or false";
+  const web = webRaw === "true";
   const disable = meta["disable-model-invocation"] ?? "false";
   if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
   const turns = optionalInt(meta, "max-turns", 1, 400);
@@ -84,7 +87,7 @@ function load(root: string, path: string, name: string): Kind | string {
   if (edit !== undefined && access !== "write") return "EDIT.md is only valid when access is write";
   const review = optional(path, "REVIEW.md");
   if (conversational && review !== undefined) return "REVIEW.md is not supported when conversational is true";
-  return { name, skill, access, output, explore, conversational, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review, limits, gates, ...(edit !== undefined ? { edit } : {}) };
+  return { name, skill, access, output, explore, conversational, web, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review, limits, gates, ...(edit !== undefined ? { edit } : {}) };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */
