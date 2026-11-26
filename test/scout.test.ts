@@ -197,7 +197,7 @@ test("workflow loader: fail-closed validation for output, frontmatter caps and g
   assert.ok(!kinds.get("good-write-gates")!.skill.files.includes("gates.json"));
   const msg = (name: string) => problems.find((p) => p.path.endsWith(`/${name}`) || p.path.endsWith(`\\${name}`))?.message ?? "";
   assert.match(msg("write-inline"), /output is only valid when access is read/);
-  assert.match(msg("bad-output"), /output must be plan or inline/);
+  assert.match(msg("bad-output"), /output must be plan, inline or bundle/);
   assert.match(msg("bad-turns"), /max-turns must be between 1 and 400/);
   assert.match(msg("read-gates"), /gates\.json is only valid when access is write/);
 });

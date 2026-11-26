@@ -8,16 +8,17 @@ import { contained, readBounded, type Skill, exists, loadSkill, outsideCheckout 
 /**
  * The one agent catalog: skill packages under `<agentDir>/workflows/<name>/SKILL.md`, read once per extension load.
  * Frontmatter: `name` (= folder), `description` (required), `disable-model-invocation` (true = user-only),
- * `access` (`read` explicit; absent = write), `output` (`plan` or `inline`, read-only), `explore`
- * (`auto`, `map`, or `none`), optional caps (`max-turns`, `max-minutes`, `asks`). Role files enable
+ * `access` (`read` explicit; absent = write), `output` (`plan`, `inline`, or `bundle`, read-only), `explore`
+ * (`auto`, `map`, or `none`), `conversational` (`true` or `false`, read-only, forbids REVIEW.md),
+ * optional caps (`max-turns`, `max-minutes`, `asks`). Role files enable
  * delegation, review, and pre-submit gates.
  * Plan, Execute and Scout ship as ordinary packages (`SEEDS`), provisioned once per profile and then owned by the operator.
  */
-export type OutputMode = "plan" | "inline";
+export type OutputMode = "plan" | "inline" | "bundle";
 export type ExploreMode = "auto" | "map" | "none";
 export interface KindLimits { turns?: number; minutes?: number; asks?: number }
 export interface Kind {
-  name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; description: string; userOnly: boolean; skill: Skill;
+  name: string; access: "read" | "write"; output: OutputMode; explore: ExploreMode; conversational: boolean; description: string; userOnly: boolean; skill: Skill;
   pq?: string; review?: string; limits?: KindLimits; gates?: readonly GateSpec[];
   /** EDIT.md (write kinds only): enables `delegate_edit` workers with these instructions. */
   edit?: string;
@@ -56,10 +57,14 @@ function load(root: string, path: string, name: string): Kind | string {
   if (access !== "read" && access !== "write") return "access must be read or write";
   if (access === "write" && meta.output !== undefined) return "output is only valid when access is read";
   const output = (meta.output ?? "plan") as OutputMode;
-  if (output !== "plan" && output !== "inline") return "output must be plan or inline";
+  if (output !== "plan" && output !== "inline" && output !== "bundle") return "output must be plan, inline or bundle";
   const explore = (meta.explore ?? "map") as ExploreMode;
   if (explore !== "auto" && explore !== "map" && explore !== "none") return "explore must be auto, map or none";
   if (access === "write" && explore === "auto") return "explore: auto is only valid when access is read (use map or none)";
+  const conversationalRaw = meta.conversational ?? "false";
+  if (conversationalRaw !== "true" && conversationalRaw !== "false") return "conversational must be true or false";
+  const conversational = conversationalRaw === "true";
+  if (conversational && access !== "read") return "conversational is only valid when access is read";
   const disable = meta["disable-model-invocation"] ?? "false";
   if (disable !== "true" && disable !== "false") return "disable-model-invocation must be true or false";
   const turns = optionalInt(meta, "max-turns", 1, 400);
@@ -77,7 +82,9 @@ function load(root: string, path: string, name: string): Kind | string {
   }
   const edit = optional(path, "EDIT.md");
   if (edit !== undefined && access !== "write") return "EDIT.md is only valid when access is write";
-  return { name, skill, access, output, explore, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review: optional(path, "REVIEW.md"), limits, gates, ...(edit !== undefined ? { edit } : {}) };
+  const review = optional(path, "REVIEW.md");
+  if (conversational && review !== undefined) return "REVIEW.md is not supported when conversational is true";
+  return { name, skill, access, output, explore, conversational, description: meta.description.trim(), userOnly: disable === "true", pq: optional(path, "PQ.md"), review, limits, gates, ...(edit !== undefined ? { edit } : {}) };
 }
 
 /** Regular files and folders only, byte-identical. A symlink anywhere is never "the same". */

@@ -29,6 +29,13 @@ const basis = literals(["observed", "documented", "assumed"] as const);
 export const Submission = obj({ summary: text(2400), report: Type.Optional(text(60_000)) });
 export type Submission = Static<typeof Submission>;
 
+/** One file in a multi-file brief bundle (`output: bundle`). */
+export const BundleFile = obj({ path: text(128), content: text(60_000) });
+export type BundleFile = Static<typeof BundleFile>;
+/** Submission for `output: bundle` kinds (`files` is optional in the schema for forked-PQ parity; required by parent validation). */
+export const BundleSubmission = obj({ summary: text(2400), report: Type.Optional(text(60_000)), files: Type.Optional(array(BundleFile, 16)) });
+export type BundleSubmission = Static<typeof BundleSubmission>;
+
 /** Probing-question subagent answer. */
 export const PqAnswer = obj({ answer: text(1400), basis, unresolved: notes(4), newQuestions: notes(4) });
 export type PqAnswer = Static<typeof PqAnswer>;

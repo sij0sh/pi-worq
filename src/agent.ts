@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { array, Block, errorText, obj, PqAnswer, ReviewReport, Submission, text, type Verdict } from "./contracts.ts";
+import { array, Block, BundleSubmission, errorText, obj, PqAnswer, ReviewReport, Submission, text, type Verdict } from "./contracts.ts";
 import type { ExploreSnapshot } from "./explore.ts";
 import { runGates, type GateResult, type GateSpec } from "./gate.ts";
 import type { Limits } from "./runtime/config.ts";
@@ -13,14 +13,14 @@ import { ensureUsageSnapshot, type UsageTracker } from "./runtime/usage.ts";
 import { git } from "./process.ts";
 import type { Kind } from "./runtime/workflows.ts";
 import type { Skill } from "./runtime/skills.ts";
-import { clean, DIGEST, editWaveMessage, one, planMarkdown, pqMessage, reportText, reviewLines, reviewStatus, type EditWave, type EditWorker, type ReviewRecord } from "./render.ts";
+import { bundleSummaryLines, clean, DIGEST, editWaveMessage, one, planMarkdown, pqMessage, reportText, reviewLines, reviewStatus, type EditWave, type EditWorker, type ReviewRecord } from "./render.ts";
 import { auditWriteScope, createWriteScope, findScopeOverlap, type WriteScope } from "./scope.ts";
 import { checkSwarm } from "./swarm-check.ts";
 import { Conversation, type Sessions } from "./session.ts";
 import { tool, type Driver, type Runtime, type Tool } from "./sdk/contract.ts";
 import { runSubagent, type Semaphore, type SubagentDeps, type Workspace } from "./subagent.ts";
 import { processTools, readTools, writeTools } from "./tools.ts";
-import { agentDirectory, baselineProject, detachedWorktree, integrateTree, intact, pin, removeWorktree, snapshot, worktree, writeScoped, type Project } from "./workspace.ts";
+import { agentDirectory, baselineProject, detachedWorktree, integrateTree, intact, pin, readBriefFile, removeWorktree, snapshot, validateBundleFiles, worktree, writeScoped, type Project } from "./workspace.ts";
 import { RunTimings } from "./timings.ts";
 import type { Observation, Revision, Telemetry } from "./telemetry.ts";
 
@@ -46,7 +46,7 @@ export interface Delegation {
   cache?: { read?: number; write?: number; input?: number };
 }
 /** The exact prompt prefix of the owner session, which a forked child must reproduce to hit the cache. */
-interface Prefix { system: string; tools: Tool[]; finish: string; skills: Skill[] }
+interface Prefix { system: string; tools: Tool[]; finish: string; schema: typeof Submission | typeof BundleSubmission; skills: Skill[] }
 const READ_TOOLS = new Set(["list_files", "read_file", "search"]);
 /** Same name, description and schema; the handler refuses. Keeps a forked child's tool prefix byte-identical. */
 const fenced = (t: Tool, why: string): Tool => ({ ...t, run: () => { throw new Block("fenced", why); } });
@@ -129,6 +129,8 @@ export class Agent {
   exhausted?: string;
   diffstat?: string;
   plan?: { path: string; text: string };
+  bundle?: { dir: string; files: string[]; updated: string[] };
+  rounds = 0;
   work?: string;
   summary?: string;
   submission?: string;
@@ -141,7 +143,7 @@ export class Agent {
   private seq = 0;
   private dir?: string;
   private project?: Project;
-  private conversation?: Conversation<typeof Submission>;
+  private conversation?: Conversation<typeof Submission | typeof BundleSubmission>;
   private asks = 0;
   private wakeParked?: (message: string | undefined) => void;
   /** A fatal runtime invalidation: the agent can never run another request, child or review. */
@@ -242,7 +244,10 @@ export class Agent {
   view() {
     return {
       ref: this.ref, title: this.title, owner: this.owner, kind: this.kind.name, group: this.group, state: this.state, final: this.final, task: this.task,
-      worktree: this.work, branch: this.branch, baseline: this.baseline, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path, error: this.error, ask: this.ask?.question,
+      worktree: this.work, branch: this.branch, baseline: this.baseline, candidate: this.candidate, recoverySha: this.recoverySha, exhausted: this.exhausted, plan: this.plan?.path,
+      ...(this.bundle ? { bundle: this.bundle } : {}),
+      ...(this.kind.conversational ? { rounds: this.rounds } : {}),
+      error: this.error, ask: this.ask?.question,
       writePaths: this.scope?.patterns, gates: this.gateResults.length ? this.gateResults : undefined,
       explore: this.explore ? { tier: this.explore.tier, bytes: this.explore.bytes, sourceFiles: this.explore.stats.sourceFiles } : undefined,
       attachments: this.attachments.map((a) => a.path), delegations: this.delegations.map(({ question, state, error, forked, cache }) => ({ question, state, error, ...(forked ? { forked } : {}), ...(cache ? { cache } : {}) })),
@@ -269,6 +274,9 @@ export class Agent {
       case "parked":
         this.log(`← main: ${message}`);
         this.wakeParked?.(`Main: ${message}`);
+        if (this.kind.conversational && !this.exhausted) {
+          return `Sent follow-up to ${this.ref} (round ${this.rounds + 1}); it will park again after submitting`;
+        }
         return this.review && !this.final && !this.exhausted
           ? `Sent feedback to ${this.ref}: final revision, no further review; it ends on submit`
           : `Resumed ${this.ref} with a fresh budget`;
@@ -368,22 +376,26 @@ export class Agent {
       }
       const exploreBlock = this.explore ? `\n\n${this.explore.text}` : "";
       const system = `${AUTHORITY}${exploreBlock}\n\n${this.kind.skill.body}`;
-      const finishDescription = `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : " Worq saves it to .agents/plans/."}`;
-      this.prefix = { system, tools, finish: finishDescription, skills: [this.kind.skill] };
+      const finishDescription = `Submit your result.${write ? "" : this.kind.output === "inline" ? " Worq returns it inline." : this.kind.output === "bundle" ? ` Worq saves your files to .agents/briefs/${this.ref}/.` : " Worq saves it to .agents/plans/."}`;
+      const finishSchema = this.kind.output === "bundle" ? BundleSubmission : Submission;
+      this.prefix = { system, tools, finish: finishDescription, schema: finishSchema, skills: [this.kind.skill] };
       if (this.explore) {
         this.log(`explore tier ${this.explore.tier} (${this.explore.stats.sourceFiles} src, ${(this.explore.bytes / 1024).toFixed(1)}KB)`);
       }
-      this.conversation = new Conversation({
+      this.conversation = new Conversation<typeof Submission | typeof BundleSubmission>({
         driver, signal, warning: this.warning, turns: maxTurns, minutes: maxMinutes, pending: () => this.openPqs + this.openEdits, onFirstResponse: this.onWarm,
         onEvent: (event) => this.timings.event(event), onTool: () => this.timings.tool(), onIdle: () => this.timings.endModel(),
         invalidated: (error) => { this.fatal = error; this.ask?.resolve(UNANSWERED); this.wakeParked?.(undefined); },
         spec: { runtime: this.deps.runtime, observe: this.deps.telemetry?.sink(this.id), name: `agent.${this.kind.name}`, cwd, tools, skills: [this.kind.skill], system, log: (line) => this.log(line) },
         finish: {
-          schema: Submission,
+          schema: finishSchema,
           description: finishDescription,
-          validate: async (_value, validateSignal) => {
+          validate: async (value, validateSignal) => {
             if (this.openEdits) throw new Block("edit-open", "Edit workers are still open: end your turn to wait for the [EDIT WAVE] report, then submit.");
             if (this.openPqs) throw new Block("pq-open", `PQs ${this.delegations.filter((d) => d.state === "queued" || d.state === "running").map((d) => JSON.stringify(d.question)).join(", ")} are still open: end your turn to wait for their answers, then submit.`);
+            if (this.kind.output === "bundle") {
+              validateBundleFiles((value as BundleSubmission).files);
+            }
             if (write && this.scope && this.work && this.project) {
               await auditWriteScope(this.work, this.project.baseline, this.scope, validateSignal);
             }
@@ -432,7 +444,7 @@ export class Agent {
           this.set("running");
           const submitted = await this.conversation.run(message);
           await this.submit(submitted);
-          if (this.final || !this.kind.review) { done = true; break; }
+          if (this.final || (!this.kind.review && !this.kind.conversational)) { done = true; break; }
         } catch (error) {
           if (this.fatal) throw this.fatal;
           // Budget exhaustion keeps the last response and partial work; Main may resume with a fresh budget.
@@ -556,7 +568,7 @@ export class Agent {
     const result = fork ? await runSubagent(this.children, {
       key: `${this.id}:${d.id}`, parent: this.id, ref: this.ref, role: d.role, row: "PQ", question: clean(d.question).replace(/\s+/g, " ").trim(),
       label: `PQ ${d.question}`, title: `${this.title} · ${d.question}`, consequence: "Cancels this question; the parent is told it went unanswered.",
-      system: prefix.system, skills: prefix.skills, seed: fork, schema: Submission, description: prefix.finish,
+      system: prefix.system, skills: prefix.skills, seed: fork, schema: prefix.schema, description: prefix.finish,
       tools: prefix.tools.map((t) => READ_TOOLS.has(t.name) ? t : fenced(t, "Disabled in a forked PQ: use the read tools, then call submit.")),
       payload: forkBrief(this.kind.pq!, { question: d.question, why: d.why, context }),
       turns: Math.min(limits.subagentTurns, budgets?.maxTurns ?? limits.subagentTurns), minutes: Math.min(limits.subagentMinutes, budgets?.maxMinutes ?? limits.subagentMinutes),
@@ -719,16 +731,43 @@ export class Agent {
   }
 
   /** Record the submission before starting any required review. */
-  private async submit(report: Submission) {
+  private async submit(report: Submission | BundleSubmission) {
     const signal = this.signal;
     let identity: Revision["identity"];
     this.summary = report.summary;
+    this.rounds++;
     if (this.kind.access === "read") {
       if (this.kind.output === "inline") {
         const text = reportText(report);
         identity = { digest: createHash("sha256").update(text, "utf8").digest("hex") };
         this.submission = text;
         this.log("inline submission recorded");
+      } else if (this.kind.output === "bundle") {
+        const files = validateBundleFiles((report as BundleSubmission).files);
+        const dir = `.agents/briefs/${this.ref}`;
+        for (const file of files) {
+          await writeScoped(this.deps.root, `${dir}/${file.path}`, file.content, { create: false });
+        }
+        const merged = new Map<string, string>();
+        for (const prev of this.bundle?.files ?? []) merged.set(prev.toLowerCase(), prev);
+        for (const file of files) merged.set(file.path.toLowerCase(), file.path);
+        const sortedFiles = [...merged.values()].sort();
+        const updated = files.map((file) => file.path).sort();
+        this.bundle = { dir, files: sortedFiles, updated };
+        const hash = createHash("sha256").update(report.summary, "utf8").update("\0");
+        if (report.report) hash.update(report.report, "utf8");
+        hash.update("\0");
+        for (const rel of sortedFiles) {
+          const content = await readBriefFile(this.deps.root, `${dir}/${rel}`);
+          hash.update(`${dir}/${rel}\0`, "utf8").update(content, "utf8").update("\0");
+        }
+        identity = { digest: hash.digest("hex") };
+        this.submission = [
+          report.summary,
+          report.report,
+          `Files:\n${sortedFiles.map((file) => `- ${dir}/${file}`).join("\n")}`,
+        ].filter(Boolean).join("\n\n");
+        this.log(`bundle saved to ${dir}/ (${updated.length} updated, ${sortedFiles.length} total)`);
       } else {
         const path = `.agents/plans/plan-${this.ref}.md`;
         const markdown = planMarkdown({ ref: this.ref, title: this.title, kind: this.kind.name, final: this.final, reviewRequired: !!this.kind.review, task: this.task, report });
@@ -796,17 +835,21 @@ export class Agent {
   /** Display-only notice; `worq_list` holds the full findings. */
   digest() {
     const close = "worq_cancel accepts and closes it; worq_send sends your filtered feedback once (final revision, no further review). This notice does not authorize further action.";
+    const where = this.kind.access === "write"
+      ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}`
+      : this.bundle
+        ? `Brief: ${this.bundle.dir}/ (${this.bundle.files.length} file${this.bundle.files.length === 1 ? "" : "s"})`
+        : this.plan
+          ? `Plan: ${this.plan.path}`
+          : "Output: inline";
     if (this.exhausted) return [
-      `${this.headline} parked: ${this.exhausted}. Nothing was submitted${this.final ? "" : " or reviewed"}.`,
+      this.rounds > 0
+        ? `${this.headline} parked: ${this.exhausted}. Round ${this.rounds + 1} did not submit; ${this.kind.output === "inline" ? "earlier inline submission is retained" : `earlier rounds are on disk at ${where}`}.`
+        : `${this.headline} parked: ${this.exhausted}. Nothing was submitted${!this.final && this.kind.review ? " or reviewed" : ""}.`,
       `Last response: ${one(this.conversation?.last || "none", 1500)}`,
       ...(this.recoverySha ? [`Partial commit ${this.recoverySha}: UNVERIFIED / not merge-ready`] : []),
       `worq_send resumes with a fresh budget; worq_cancel closes it.`,
     ].join("\n");
-    const where = this.kind.access === "write"
-      ? `Branch ${this.branch} @ ${this.candidate}\n${this.diffstat}`
-      : this.plan
-        ? `Plan: ${this.plan.path}`
-        : "Output: inline";
     if (this.state === "done" && !this.review) {
       if (this.kind.output === "inline") {
         return [
@@ -819,7 +862,16 @@ export class Agent {
     }
     if (this.state === "done") return [`${this.headline} done · final revision submitted`, where,
       `${this.reviewDelta ? `Post-review delta: ${this.reviewDelta}. ` : ""}See the first review and any gate results in worq_list(${this.ref}).`].join("\n");
-    return [`${this.headline} parked · ${reviewStatus(this.review)}`, where,
+    if (this.kind.conversational) {
+      return [
+        `${this.headline} parked · round ${this.rounds}`,
+        ...(this.bundle ? bundleSummaryLines(this.bundle) : [where]),
+        one(this.summary ?? "(no summary)", 1200),
+        `Reply with worq_send(${this.ref}, ...) to continue, or worq_cancel(${this.ref}) to close (auto-closes after ${this.deps.limits.idleMinutes}m idle). Details: worq_list(${this.ref}).`,
+      ].join("\n");
+    }
+    return [`${this.headline} parked · ${reviewStatus(this.review)}`,
+      ...(this.bundle ? bundleSummaryLines(this.bundle) : [where]),
       ...reviewLines(this.review, { ...DIGEST, label: `worq_list(${this.ref})` }),
       `Full findings: worq_list(${this.ref}). ${close}`,
     ].join("\n");

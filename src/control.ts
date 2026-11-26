@@ -19,7 +19,7 @@ export function ops() {
       kind: Type.String({ minLength: 1, maxLength: 64, pattern: KIND_PATTERN, description: "Installed agent package name" }),
       task: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "What the agent should deliver; omit to run the package as written. At-sign mentions are literal." })),
       title: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "Optional 2–4 word title; generated when omitted" })),
-      attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan names, inline agent refs, or repo-relative paths under .agents/plans/" })),
+      attach: Type.Optional(Type.Array(text(256), { maxItems: 16, description: "Exact plan/brief names, inline agent refs, or repo-relative paths under .agents/plans/ or .agents/briefs/" })),
       group: Type.Optional(group),
       notify: Type.Optional(Type.Union([Type.Literal("each"), Type.Literal("barrier")])),
       expect: Type.Optional(Type.Integer({ minimum: 1, maximum: 16, description: "Expected member count for a barrier group" })),

@@ -41,23 +41,23 @@ const descriptions: Record<(typeof TOOLS)[number], { op: Op; description: string
       "DEFAULT TO DELEGATION: Use `worq_spawn` for planning, code changes, refactors, audits, and multi-file investigation. Only skip spawning for trivial single-turn factual lookups (answer with primary-source citations) or when the user explicitly tells you to work directly in Main.",
       "ROUTE BY WORK TYPE: Match the task to the right installed `kind` — `plan` for design/architecture/ambiguous work, `execute` for code changes (never infer write permission from a read/plan request), `scout` for recon, or any other installed package whose description fits. Pass a concise 2-4 word `title` and the user's full original request in `task`.",
       spawnRuntimeRule,
-      "SWARMS, ATTACHMENTS & PARALLEL WRITES: When a request spans 2+ areas of the repo, start with a 2-4 `scout` barrier wave in one turn (`group`, `notify: \"barrier\"`, `expect: <exact count>`) before launching `plan` or `execute`. Pass scout refs and plans via `attach` (exact plan names, inline refs, or `.agents/plans/...` paths), never inline mentions. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`. Stay free after spawning; wait for Worq notices instead of polling.",
+      "SWARMS, ATTACHMENTS & PARALLEL WRITES: When a request spans 2+ areas of the repo, start with a 2-4 `scout` barrier wave in one turn (`group`, `notify: \"barrier\"`, `expect: <exact count>`) before launching `plan` or `execute`. Pass scout refs, plans, and briefs via `attach` (exact plan/brief names, inline refs, or `.agents/plans/...` / `.agents/briefs/...` paths), never inline mentions. For parallel write agents, assign disjoint `writePaths` globs and deterministic pre-submit `gates`. Stay free after spawning; wait for Worq notices instead of polling.",
     ],
   },
   worq_list: {
     op: "list",
-    description: "List Worq agents (no args), inspect one group (group, including merge-tree verification for write branches), or show one agent in full: plan path, branch, gates, PQs, reviews and recent activity.",
+    description: "List Worq agents (no args), inspect one group (group, including merge-tree verification for write branches), or show one agent in full: plan/brief path, branch, gates, PQs, reviews and recent activity.",
     guidelines: [
       "Drive asks and parked agents without polling. Surface unresolved user choices with the plan.",
       "Even for ‘plan and execute’, present the plan and its review status before execution. Offer execute only (no merge) or execute and merge (verify before landing). Await direction; revisions stay in planning. Execute for that presented plan suffices without another confirmation.",
-      "A clean automatic review pass applies to the exact reviewed submission: accept and close with worq_cancel. For a reviewless workflow, done is ready to continue. Address findings or inconclusive reviews explicitly. After feedback, inspect the incremental diff and gate results directly if needed. Do not spawn an additional agent solely to re-review. Main merges manually only with explicit merge authority.",
+      "A clean automatic review pass applies to the exact reviewed submission: accept and close with worq_cancel. For a reviewless non-conversational workflow, done is ready to continue. For a conversational workflow, each submission parks for follow-up rounds via worq_send until you close it with worq_cancel. Address findings or inconclusive reviews explicitly. After feedback, inspect the incremental diff and gate results directly if needed. Do not spawn an additional agent solely to re-review. Main merges manually only with explicit merge authority.",
     ],
   },
   worq_send: {
     op: "send",
-    description: "Send text to an agent: steers it while running, answers its open question while waiting; while parked after its review, delivers your feedback for its one final revision (no further review; it ends as done on submit), or resumes an out-of-budget agent with a fresh budget.",
+    description: "Send text to an agent: steers it while running, answers its open question while waiting; while parked on a conversational workflow, starts the next round (it parks again on submit); while parked after its review, delivers your feedback for its one final revision (no further review; it ends as done on submit); or resumes an out-of-budget agent with a fresh budget.",
     guidelines: [
-      "A parked agent keeps its session (and worktree) until closed. Main alone decides what follows its review: accept and close (worq_cancel); send filtered feedback once (worq_send) — the agent makes one final revision without another review and ends as done; spawn a fresh agent for a fundamentally different approach; or ask the user to settle a decision. After an out-of-budget park, worq_send only resumes with a fresh budget.",
+      "A parked agent keeps its session (and worktree) until closed. For a conversational workflow, worq_send continues the dialogue for another round (it parks again after submitting) and worq_cancel closes it (or it auto-closes after idle expiry). For a reviewed workflow, Main alone decides what follows its review: accept and close (worq_cancel); send filtered feedback once (worq_send) — the agent makes one final revision without another review and ends as done; spawn a fresh agent for a fundamentally different approach; or ask the user to settle a decision. After an out-of-budget park, worq_send only resumes with a fresh budget.",
     ],
   },
   worq_cancel: {

@@ -102,6 +102,9 @@ export async function reserveName(root: string, state: string, base: string) {
     const path = await scoped(root, `.agents/plans/plan-${ref}.md`, { missing: true });
     const existing = await lstat(path).catch((error) => { if (error.code !== "ENOENT") throw error; });
     if (existing) continue;
+    const briefDir = await scoped(root, `.agents/briefs/${ref}`, { missing: true });
+    const existingBrief = await lstat(briefDir).catch((error) => { if (error.code !== "ENOENT") throw error; });
+    if (existingBrief) continue;
     const claim = join(ledger, ref);
     try { await mkdir(claim, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") continue; throw error; }
@@ -140,12 +143,124 @@ export async function readPlan(root: string, path: string) {
   }
 }
 
+export const MAX_BUNDLE_FILES = 16;
+export const MAX_BUNDLE_FILE_CHARS = 60_000;
+export const MAX_BUNDLE_BYTES = 256 * 1024;
+const BUNDLE_MAX_DEPTH = 3;
+const BUNDLE_SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+const BRIEF_REF = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
+const WINDOWS_RESERVED = /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[0-9\u00B9\u00B2\u00B3]|LPT[0-9\u00B9\u00B2\u00B3])(?: |\.|$)|^git~[0-9]+$/i;
+
+/** Validate a bundle-relative file path (under `.agents/briefs/<ref>/`). */
+export function validateBundlePath(relPath: string): string {
+  if (!relPath || relPath.length > 128 || isAbsolute(relPath) || relPath.includes("\\") || relPath.includes("\0")) {
+    throw new Block("bundle-path", `Invalid bundle file path: ${relPath}`);
+  }
+  const segments = relPath.split("/");
+  if (segments.length > BUNDLE_MAX_DEPTH) {
+    throw new Block("bundle-path", `Bundle file path exceeds max depth (${BUNDLE_MAX_DEPTH}): ${relPath}`);
+  }
+  for (const seg of segments) {
+    if (!seg || seg === "." || seg === ".." || seg.startsWith(".") || seg.endsWith(".") || !BUNDLE_SEGMENT.test(seg) || WINDOWS_RESERVED.test(seg)) {
+      throw new Block("bundle-path", `Invalid bundle file path: ${relPath}`);
+    }
+  }
+  return relPath;
+}
+
+/** Validate `files` for an `output: bundle` submission before writing to disk. */
+export function validateBundleFiles(files: readonly { path: string; content: string }[] | undefined): readonly { path: string; content: string }[] {
+  if (!files || !files.length) throw new Block("bundle", "Bundle submission requires at least one file in files");
+  if (files.length > MAX_BUNDLE_FILES) throw new Block("bundle", `Bundle submission exceeds ${MAX_BUNDLE_FILES} files`);
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  for (const file of files) {
+    validateBundlePath(file.path);
+    if (file.content.length > MAX_BUNDLE_FILE_CHARS) {
+      throw new Block("bundle", `Bundle file ${file.path} exceeds ${MAX_BUNDLE_FILE_CHARS} characters`);
+    }
+    const key = file.path.toLowerCase();
+    if (seen.has(key)) throw new Block("bundle", `Duplicate bundle file path: ${file.path}`);
+    seen.add(key);
+    totalBytes += Buffer.byteLength(file.content, "utf8");
+    if (totalBytes > MAX_BUNDLE_BYTES) {
+      throw new Block("bundle", `Bundle files exceed ${MAX_BUNDLE_BYTES} bytes total`);
+    }
+  }
+  return files;
+}
+
+export async function readBriefFile(root: string, path: string) {
+  const prefix = ".agents/briefs/";
+  if (!path.startsWith(prefix)) throw new Block("brief", "Expected a repo-relative .agents/briefs/<ref>/<file> path");
+  const rest = path.slice(prefix.length);
+  const slash = rest.indexOf("/");
+  const ref = slash > 0 ? rest.slice(0, slash) : "";
+  const relPath = slash > 0 ? rest.slice(slash + 1) : "";
+  if (!BRIEF_REF.test(ref)) throw new Block("brief", "Expected a repo-relative .agents/briefs/<ref>/<file> path");
+  validateBundlePath(relPath);
+  try {
+    const target = await scoped(root, path);
+    const file = await open(target, constants.O_RDONLY | (windows ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK));
+    try {
+      const info = await file.stat();
+      const current = await lstat(await scoped(root, path));
+      const resolved = await realpath(target);
+      if (!inside(root, resolved) || info.dev !== current.dev || info.ino !== current.ino || !info.isFile() || info.size > MAX_BUNDLE_BYTES) {
+        throw new Block("brief", `Expected a regular local brief file of at most ${MAX_BUNDLE_BYTES} bytes: ${path}`);
+      }
+      return await file.readFile("utf8");
+    } finally { await file.close(); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Block("brief", `No brief file at ${path}`);
+    throw error;
+  }
+}
+
+/** Enumerate regular, non-dotfile, non-symlink files up to depth 3 under `.agents/briefs/<ref>/`. */
+export async function listBriefFiles(root: string, ref: string): Promise<string[]> {
+  if (!BRIEF_REF.test(ref)) return [];
+  const baseRel = `.agents/briefs/${ref}`;
+  let baseDir: string;
+  try {
+    baseDir = await scoped(root, baseRel);
+    const info = await lstat(baseDir);
+    if (!info.isDirectory()) return [];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const out: string[] = [];
+  const walk = async (relPrefix: string, depth: number) => {
+    const dir = relPrefix ? await scoped(root, `${baseRel}/${relPrefix}`) : baseDir;
+    const entries = (await readdir(dir)).sort();
+    for (const entry of entries) {
+      if (entry.startsWith(".")) continue;
+      const rel = relPrefix ? `${relPrefix}/${entry}` : entry;
+      const full = join(dir, entry);
+      const info = await lstat(full);
+      if (info.isSymbolicLink()) continue;
+      if (info.isDirectory()) {
+        if (depth < BUNDLE_MAX_DEPTH) await walk(rel, depth + 1);
+        continue;
+      }
+      if (!info.isFile()) continue;
+      try {
+        validateBundlePath(rel);
+        out.push(rel);
+      } catch { /* skip non-conforming files */ }
+    }
+  };
+  await walk("", 1);
+  return out.sort();
+}
+
 export interface Project { root: string; baseline: string }
 /** Execute agents start from a clean, committed baseline. */
 export async function baselineProject(root: string, signal: AbortSignal): Promise<Project> {
   const dirty = await git(root, signal, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none");
-  // Plans written by read agents live in .agents/plans and do not block execution.
-  if (dirty.split("\n").some((line) => line && !/^\?\? \.agents\/plans\//.test(line))) {
+  // Plans and briefs written by read agents live in .agents/plans and .agents/briefs and do not block execution.
+  if (dirty.split("\n").some((line) => line && !/^\?\? \.agents\/(?:plans|briefs)\//.test(line))) {
     throw new Block("dirty-baseline", "Commit or stash local changes before spawning an execute agent");
   }
   if (await git(root, signal, "ls-files", "--", ".gitmodules")) throw new Block("submodules", "Worq does not stage projects with submodules");

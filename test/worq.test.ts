@@ -345,7 +345,7 @@ for (const reviewed of [true, false]) test(`budget exhaustion and resume, review
   }, { agentTurns: 1 }, undefined, reviewed ? KINDS : new Map([["execute", { ...KINDS.get("execute")!, review: undefined }]]));
   const agent = await worq.spawn("execute", "Edit greeting", { title: "Edit greeting" });
   const notice = await next("parked", agent.ref);
-  assert.match(notice.text, /turn limit[\s\S]*Nothing was submitted or reviewed/);
+  assert.match(notice.text, reviewed ? /turn limit[\s\S]*Nothing was submitted or reviewed\./ : /turn limit[\s\S]*Nothing was submitted\./);
   assert.match(notice.text, /Last response: Observed greeting; halfway/);
   assert.equal(agent.candidate, undefined);
   assert.ok(agent.recoverySha);

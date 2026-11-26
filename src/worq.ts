@@ -7,14 +7,14 @@ import { MAIN, type Config } from "./runtime/config.ts";
 import { budgetChains, evaluateRouting, matchRoleBudgets, matchRoleRouting, needsUsageSnapshot, routingChains, type LoadedRouting, type RoutingContext } from "./runtime/routing.ts";
 import { ensureUsageSnapshot, type UsageTracker } from "./runtime/usage.ts";
 import type { Kind } from "./runtime/workflows.ts";
-import { one, reviewLines, reviewStatus } from "./render.ts";
+import { bundleSummaryLines, one, reviewLines, reviewStatus } from "./render.ts";
 import { modelChoices, resolveRuntime, type ModelChoice, type Routed, type RuntimeRequest } from './runtime/launch.ts';
 import { createWriteScope, findScopeOverlap, UNRESTRICTED_SCOPE, type WriteScope } from "./scope.ts";
 import type { Driver, Runtime, RuntimeChange } from "./sdk/contract.ts";
 import type { SessionControl, Sessions } from "./session.ts";
 import { Semaphore } from "./subagent.ts";
 import { checkSwarm, type SwarmCandidate, type SwarmCheckResult } from "./swarm-check.ts";
-import { baselineProject, reserveName, readPlan, repository } from "./workspace.ts";
+import { baselineProject, listBriefFiles, MAX_BUNDLE_BYTES, readBriefFile, readPlan, repository, reserveName } from "./workspace.ts";
 
 export interface WorqDeps {
   telemetry?: import('./telemetry.ts').Telemetry;
@@ -428,18 +428,22 @@ export class Worq {
       const body = a.state === "failed"
         ? `failed: ${one(a.error ?? "unknown error", perItem)}`
         : a.state === "parked"
-          ? (a.exhausted ? `parked (budget): ${one(a.exhausted, perItem)}` : `parked · ${reviewStatus(a.review)}${a.review?.summary ? ` — ${one(a.review.summary, perItem)}` : ""}`)
+          ? (a.exhausted
+            ? `parked (budget): ${one(a.exhausted, perItem)}`
+            : a.kind.conversational
+              ? `parked · round ${a.rounds}${a.summary ? ` — ${one(a.summary, perItem)}` : ""}`
+              : `parked · ${reviewStatus(a.review)}${a.review?.summary ? ` — ${one(a.review.summary, perItem)}` : ""}`)
           : a.state === "done"
-            ? one(a.summary ?? a.diffstat ?? a.plan?.path ?? "done", perItem)
+            ? one(a.summary ?? a.diffstat ?? a.bundle?.dir ?? a.plan?.path ?? "done", perItem)
             : a.state;
-      const where = a.branch ? ` [${a.branch}]` : a.plan ? ` [${a.plan.path}]` : "";
+      const where = a.branch ? ` [${a.branch}]` : a.bundle ? ` [${a.bundle.dir}/]` : a.plan ? ` [${a.plan.path}]` : "";
       return `- [${a.state}] ${a.ref} (${a.kind.name})${where}: ${body}`;
     });
     const expected = group.expect > 0 ? ` (expect ${group.expect})` : "";
     return [
       `Group ${group.id} settled · ${agents.length} member${agents.length === 1 ? "" : "s"}${expected} (${tally})`,
       ...lines,
-      `Inspect full details: worq_list(ref) or worq_list(group: "${group.id}"). Attach inline outputs or plans by ref.`,
+      `Inspect full details: worq_list(ref) or worq_list(group: "${group.id}"). Attach inline outputs, plans, or briefs by ref.`,
     ].join("\n");
   }
   private async attachments(root: string, sources: string[]): Promise<Attachment[]> {
@@ -447,15 +451,50 @@ export class Worq {
     for (const source of new Set(sources)) {
       const live = this.agents.get(source);
       if (live?.plan) { out.set(live.plan.path, { path: live.plan.path, text: live.plan.text }); continue; }
+      if (live?.bundle) {
+        for (const file of live.bundle.files) {
+          const path = `.agents/briefs/${live.ref}/${file}`;
+          if (!out.has(path)) out.set(path, { path, text: await readBriefFile(root, path) });
+        }
+        continue;
+      }
       if (live?.kind.output === "inline" && live.submission) {
         const path = `inline/${live.ref}.md`;
         out.set(path, { path, text: `# ${live.title} (${live.ref})\n\n${live.submission}` });
         continue;
       }
-      if (!source.startsWith(".agents/plans/") && !isRef(source)) throw new Block("plan", "Attach an exact plan name or a repo-relative .agents/plans/*.md path");
-      const path = source.startsWith(".agents/plans/") ? source : `.agents/plans/plan-${source}.md`;
-      const text = await readPlan(root, path);
-      if (!out.has(path)) out.set(path, { path, text });
+      if (source.startsWith(".agents/briefs/")) {
+        if (!out.has(source)) out.set(source, { path: source, text: await readBriefFile(root, source) });
+        continue;
+      }
+      if (source.startsWith(".agents/plans/")) {
+        if (!out.has(source)) out.set(source, { path: source, text: await readPlan(root, source) });
+        continue;
+      }
+      if (!isRef(source)) throw new Block("plan", "Attach an exact plan name, brief ref, inline agent ref, or a repo-relative path under .agents/plans/ or .agents/briefs/");
+      const path = `.agents/plans/plan-${source}.md`;
+      try {
+        if (!out.has(path)) out.set(path, { path, text: await readPlan(root, path) });
+      } catch (error) {
+        if (error instanceof Block && error.code === "plan" && error.message.startsWith("No plan at ")) {
+          const briefFiles = await listBriefFiles(root, source);
+          if (briefFiles.length) {
+            for (const file of briefFiles) {
+              const briefPath = `.agents/briefs/${source}/${file}`;
+              if (!out.has(briefPath)) out.set(briefPath, { path: briefPath, text: await readBriefFile(root, briefPath) });
+            }
+            continue;
+          }
+        }
+        throw error;
+      }
+    }
+    let totalBytes = 0;
+    for (const item of out.values()) {
+      totalBytes += Buffer.byteLength(item.text, "utf8");
+      if (totalBytes > MAX_BUNDLE_BYTES) {
+        throw new Block("attachment", `Attachments exceed ${MAX_BUNDLE_BYTES} bytes total`);
+      }
     }
     return [...out.values()];
   }
@@ -477,9 +516,10 @@ export class Worq {
     return pending.concat(agents.map((a) => {
       const groupTag = a.group ? ` [${a.group}]` : "";
       const pqs = a.delegations.length ? ` · PQs ${a.delegations.length - a.openPqs}/${a.delegations.length}` : "";
+      const rounds = a.kind.conversational && a.rounds > 0 ? ` · round ${a.rounds}` : "";
       const verdicts = a.review ? ` · ${a.final ? "first submission: " : ""}${reviewStatus(a.review)}` : "";
       const extra = a.ask ? ` · asks: ${one(a.ask.question, 160)}` : a.error ? ` · ${one(a.error, 160)}` : "";
-      return `${a.headline}${groupTag} · ${a.state}${a.final && !a.ended ? " · final revision" : ""}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
+      return `${a.headline}${groupTag} · ${a.state}${a.final && !a.ended ? " · final revision" : ""}${rounds}${pqs}${verdicts}${extra}\n    ${one(a.task, 140)}`;
     })).join("\n");
   }
   hasGroupWriters(groupId: string): boolean {
@@ -513,7 +553,7 @@ export class Worq {
       a.group && `Group: ${a.group} (${this.groups.get(a.group)?.notify ?? "each"})`,
       `Task: ${a.task}`,
       timingLine(a.timings.snapshot()),
-      `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "submission complete") : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : "initial work"}`,
+      `Phase: ${a.state === "reviewing" ? "independent review in progress" : a.state === "done" ? (a.review ? "final revision submitted (not re-reviewed)" : "submission complete") : a.kind.conversational && a.state === "parked" && !a.exhausted ? `conversational round ${a.rounds}; awaiting worq_send or worq_cancel` : a.final ? "final revision after feedback" : a.review ? "reviewed; awaiting acceptance or feedback" : a.kind.conversational && a.rounds > 0 ? `conversational round ${a.rounds + 1}` : "initial work"}`,
       ...a.launches.map(l => `${l.role}: ${JSON.stringify(l.runtime)}${l.label ? ` · ${l.label}` : ''}`),
       a.work && `Worktree: ${a.work}`,
       a.explore && `Explore: tier ${a.explore.tier} (${a.explore.stats.sourceFiles} source file${a.explore.stats.sourceFiles === 1 ? "" : "s"}, ${(a.explore.bytes / 1024).toFixed(1)} KB)`,
@@ -521,12 +561,14 @@ export class Worq {
       a.attachments.length && `Attached: ${a.attachments.map((x) => x.path).join(", ")}`,
       a.exhausted && `Parked without submission: ${a.exhausted}`,
       a.plan && `Plan: ${a.plan.path}`,
+      a.bundle && bundleSummaryLines(a.bundle).join("\n"),
       a.branch && `Branch: ${a.branch}${a.candidate ? ` @ ${a.candidate}` : ""}`,
       a.recoverySha && `Recovery SHA ${a.recoverySha}: UNVERIFIED / not merge-ready`,
       a.diffstat && a.diffstat,
       a.gateResults.length && ["Gates:", ...formatGateLines(a.gateResults)].join("\n"),
       a.kind.access === "write" && a.submission && `Writer submission:\n${a.submission}`,
       a.kind.output === "inline" && a.submission && `Submission:\n${a.submission}`,
+      a.kind.output === "bundle" && a.summary && `Submission:\n${a.summary}`,
       a.ask && `Open ask: ${a.ask.question}`,
       a.error && `Error: ${a.error}`,
       a.editWaves.length && ["Edit waves:", ...a.editWaves.map((w) => `  ${w.n}: ${w.base.slice(0, 10)} → ${w.integrated?.slice(0, 10) ?? "not integrated"} · ${w.workers.map((x) => `${x.name ?? x.id} ${x.state}${x.forked ? " (fork)" : ""}`).join(", ")}${w.error ? ` · ${one(w.error, 160)}` : ""}`)].join("\n"),

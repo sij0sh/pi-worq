@@ -12,6 +12,13 @@ export function planMarkdown(input: { ref: string; title?: string; kind: string;
   ].join("\n");
 }
 export const reportText = (report: Submission) => [report.summary, report.report].filter(Boolean).join("\n\n");
+export function bundleSummaryLines(bundle: { dir: string; files: string[]; updated: string[] }) {
+  const updated = new Set(bundle.updated);
+  return [
+    `Brief: ${bundle.dir}/ (${bundle.files.length} file${bundle.files.length === 1 ? "" : "s"})`,
+    ...bundle.files.map((file) => `  - ${file}${updated.has(file) ? " (updated)" : ""}`),
+  ];
+}
 export function pqMessage(question: string, answer?: PqAnswer, error?: string, cancelled = false) {
   if (!answer) return `[PQ ${cancelled ? "cancelled" : "failed"}] ${question}\n${error ?? "no answer"}\nInvestigate it yourself or proceed without it.`;
   return [`[PQ] ${question}`, `Answer (${answer.basis}): ${answer.answer}`,
