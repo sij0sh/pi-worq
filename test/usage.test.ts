@@ -173,6 +173,47 @@ test("pollAntigravity merges prod and daily hosts, handles proto3 zero omission,
   assert.equal(usageTone(snap), "error");
 });
 
+test("pollAntigravity uses Linux keyring, sends User-Agent, and falls back to fetchAvailableModels for Gemini pool", async () => {
+  let seenUa = "";
+  const fakeFetch: typeof fetch = async (url, init) => {
+    seenUa = new Headers(init?.headers).get("user-agent") ?? "";
+    const href = String(url);
+    if (href.includes("retrieveUserQuotaSummary")) {
+      return jsonResponse(200, {
+        groups: [
+          {
+            displayName: "Claude and GPT models",
+            buckets: [
+              { bucketId: "3p-5h", window: "5h", remainingFraction: 1, resetTime: "2026-11-26T06:00:00Z" },
+              { bucketId: "3p-weekly", window: "weekly", remainingFraction: 0.8, resetTime: "2026-12-03T01:00:00Z" },
+            ],
+          },
+        ],
+      });
+    }
+    return jsonResponse(200, {
+      models: {
+        "gemini-4-hydrogen-sonar": { modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfo: { remainingFraction: 0.94, resetTime: "2026-11-26T06:00:00Z" } },
+        "tab_flash_lite_preview": { modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfo: { remainingFraction: 1 } },
+      },
+    });
+  };
+
+  const snap = await pollAntigravity({
+    env: {},
+    home: "/nonexistent",
+    platform: "linux",
+    readKeychain: (service, account) => (service === "gemini" && account === "antigravity" ? JSON.stringify({ access_token: "ag-linux-tok" }) : null),
+    fetch: fakeFetch,
+  });
+  assert.equal(seenUa, "antigravity");
+  assert.equal(snap.available, true);
+  assert.equal(snap.pools?.claude?.fiveHour?.remainingPercent, 100);
+  assert.equal(snap.pools?.claude?.weekly?.remainingPercent, 80);
+  assert.equal(snap.pools?.gemini?.fiveHour?.remainingPercent, 94);
+  assert.equal(snap.fiveHour?.remainingPercent, 94);
+});
+
 test("providerForRuntime and poolForRuntime map SDKs, Pi model prefixes, and Antigravity model pools", () => {
   assert.equal(providerForRuntime("claude-code", "sonnet"), "claude");
   assert.equal(providerForRuntime("pi", "anthropic/claude-sonnet-4-5"), "claude");

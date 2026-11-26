@@ -85,18 +85,30 @@ function readTextFile(filePath: string): string | null {
   }
 }
 
-function defaultReadMacKeychain(service: string, account?: string): string | null {
-  if (process.platform !== "darwin") return null;
+function defaultReadKeychain(service: string, account?: string): string | null {
   try {
-    const args = ["find-generic-password", "-s", service];
-    if (account) args.push("-a", account);
-    args.push("-w");
-    const out = execFileSync("security", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3_000,
-    }).trim();
-    return out || null;
+    if (process.platform === "darwin") {
+      const args = ["find-generic-password", "-s", service];
+      if (account) args.push("-a", account);
+      args.push("-w");
+      const out = execFileSync("security", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 3_000,
+      }).trim();
+      return out || null;
+    }
+    if (process.platform === "linux") {
+      const args = ["lookup", "service", service];
+      if (account) args.push("username", account);
+      const out = execFileSync("secret-tool", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 3_000,
+      }).trim();
+      return out || null;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -336,7 +348,7 @@ export async function pollClaude(options: PollOptions = {}): Promise<ProviderSna
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
   const platform = options.platform ?? process.platform;
-  const readKeychain = options.readKeychain ?? defaultReadMacKeychain;
+  const readKeychain = options.readKeychain ?? defaultReadKeychain;
   const now = options.now ?? Date.now;
   const fetchedAt = new Date(now()).toISOString();
   const token = getClaudeToken(env, home, platform, readKeychain);
@@ -395,7 +407,7 @@ function getAntigravityToken(
     const token = extractAntigravityToken(fileText);
     if (token) return token;
   }
-  if (platform === "darwin") {
+  if (platform === "darwin" || platform === "linux") {
     const keychainText = readKeychain("gemini", "antigravity");
     if (keychainText) return extractAntigravityToken(keychainText);
   }
@@ -419,15 +431,21 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
   const platform = options.platform ?? process.platform;
-  const readKeychain = options.readKeychain ?? defaultReadMacKeychain;
+  const readKeychain = options.readKeychain ?? defaultReadKeychain;
   const now = options.now ?? Date.now;
   const fetchedAt = new Date(now()).toISOString();
   const token = getAntigravityToken(env, home, platform, readKeychain);
   if (!token) {
-    return unavailable("antigravity", "No ANTIGRAVITY_ACCESS_TOKEN or ~/.gemini/antigravity-cli/antigravity-oauth-token found", fetchedAt);
+    return unavailable("antigravity", "No ANTIGRAVITY_ACCESS_TOKEN, ~/.gemini/antigravity-cli/antigravity-oauth-token, or keyring entry found", fetchedAt);
   }
 
   const hosts = ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com"];
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "User-Agent": "antigravity",
+  };
+  const fetchOpts = { fetch: options.fetch ?? globalThis.fetch, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: options.signal };
   const allGroups: Record<string, unknown>[] = [];
   const errors: string[] = [];
   const seenGroupNames = new Set<string>();
@@ -436,15 +454,8 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
     try {
       const { status, data } = await fetchJson(
         `${host}/v1internal:retrieveUserQuotaSummary`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({}),
-        },
-        { fetch: options.fetch ?? globalThis.fetch, timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: options.signal },
+        { method: "POST", headers, body: JSON.stringify({}) },
+        fetchOpts,
       );
       if (status !== 200) {
         errors.push(`${host}: HTTP ${status}`);
@@ -464,10 +475,6 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
     } catch (error) {
       errors.push(`${host}: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }
-
-  if (allGroups.length === 0) {
-    return unavailable("antigravity", errors.join("; ") || "Empty quota summary", fetchedAt);
   }
 
   let fiveHour: NormalizedWindow | null = null;
@@ -502,6 +509,54 @@ export async function pollAntigravity(options: PollOptions = {}): Promise<Provid
         pool.fiveHour = pickMostConstrained(pool.fiveHour, normalized);
       }
     }
+  }
+
+  // retrieveUserQuotaSummary may return only 3P ("Claude and GPT models") without a Gemini group.
+  // Fall back to fetchAvailableModels to populate any missing model-family 5h pool.
+  if (!pools.gemini?.fiveHour) {
+    for (const host of [...hosts].reverse()) {
+      try {
+        const { status, data } = await fetchJson(
+          `${host}/v1internal:fetchAvailableModels`,
+          { method: "POST", headers, body: JSON.stringify({}) },
+          fetchOpts,
+        );
+        if (status !== 200) {
+          errors.push(`${host} models: HTTP ${status}`);
+          continue;
+        }
+        const models = record(record(data)?.models);
+        if (!models) continue;
+        const modelPools: Record<string, NormalizedWindow | null> = {};
+        for (const [id, entry] of Object.entries(models)) {
+          if (id.startsWith("tab_")) continue;
+          const m = record(entry);
+          const qi = record(m?.quotaInfo);
+          if (!qi) continue;
+          const resetTime = qi.resetTime ?? null;
+          const rawFraction = qi.remainingFraction;
+          const fraction = typeof rawFraction === "number" ? rawFraction : resetTime ? 0 : null;
+          if (fraction === null) continue;
+          const poolKey = classifyAntigravityPool(str(m?.modelProvider) ?? "", id);
+          if (pools[poolKey]?.fiveHour) continue;
+          const normalized = fromRemainingFraction(fraction, resetTime, `${poolKey} (${id})`);
+          modelPools[poolKey] = pickMostConstrained(modelPools[poolKey] ?? null, normalized);
+        }
+        for (const [poolKey, win] of Object.entries(modelPools)) {
+          if (!win) continue;
+          const pool = pools[poolKey] ?? (pools[poolKey] = { fiveHour: null, weekly: null });
+          pool.fiveHour = win;
+          fiveHour = pickMostConstrained(fiveHour, win);
+        }
+        if (pools.gemini?.fiveHour) break;
+      } catch (error) {
+        errors.push(`${host} models: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  if (allGroups.length === 0 && Object.keys(pools).length === 0) {
+    return unavailable("antigravity", errors.join("; ") || "Empty quota summary", fetchedAt);
   }
 
   return {
