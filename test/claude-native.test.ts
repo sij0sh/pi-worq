@@ -9,11 +9,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { Block, obj, text } from "../src/contracts.ts";
-import { AGENT_IDENTITY, BILLING_HEADER, claudeAdapter, loadRealSdk, managedFilesProblem } from "../src/sdk/claude.ts";
+import { claudeAdapter, loadRealSdk, managedFilesProblem } from "../src/sdk/claude.ts";
 import type { Driver, Runtime, SessionSpec, Tool } from "../src/sdk/contract.ts";
 import { Conversation } from "../src/session.ts";
 import { Telemetry } from "../src/telemetry.ts";
 
+const BILLING_HEADER = /^x-anthropic-billing-header:/;
+const AGENT_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const runtime: Runtime = { name: "launch", sdk: "claude-code", model: "claude-sonnet-4-5", via: "fixture", path: "" };
 const system = "This is the exact Worq system prompt.";
 const key = "sk-ant-test-worq-not-a-real-key";

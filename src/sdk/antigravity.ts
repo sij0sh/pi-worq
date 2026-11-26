@@ -149,7 +149,6 @@ export function antigravityAdapter(host: HostServices = {}, injected?: Antigravi
       return {
         switchModel: true,
         thinking: THINKING_LEVELS,
-        turnUnit: "request",
         context: { system: "append", ambientInstructions: false },
       };
     },

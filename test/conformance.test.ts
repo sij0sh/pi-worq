@@ -134,7 +134,6 @@ test("registry: createDriver routes by runtime and prepares the shared environme
   const review: Runtime = { name: "launch", sdk: "test", model: "m/a", path: "", via: "launch request" };
   const resources: Resources = { root: "/r", agents: "Shared rule", skills: [{ name: "lint", description: "How to lint", body: "Run lint", files: [] }], ignored: [] };
   const driver = await createDriver({}, resources, sdks);
-  assert.deepEqual(driver.sdks?.(), ["pi", "test"]);
   for (const role of ["agent.plan", "subagent", "review"]) {
     const handle = await driver.open(role === "review" ? { ...roleSpec(role), runtime: review } : roleSpec(role));
     const spec = seen.at(-1)!;
@@ -163,7 +162,6 @@ test("pi: capability snapshot derives thinking from the runtime's model", () => 
   const adapter = piAdapter({ model: undefined, modelRegistry: registry } as never);
   const caps = adapter.capabilities({ ...MAIN, model: "p/m", path: "/plan" });
   assert.equal(caps.switchModel, true);
-  assert.equal(caps.turnUnit, "request");
   assert.deepEqual(caps.thinking, ["off", "minimal", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(caps.context, { system: "replace", ambientInstructions: false });
   assert.deepEqual(piAdapter({ model, modelRegistry: registry } as never).capabilities(MAIN).thinking, caps.thinking, "no runtime model: Main's model");

@@ -109,7 +109,6 @@ export async function createDriver(host: HostServices, resources: Resources = EM
   };
 
   return {
-    sdks: installed,
     async load(sdk) { await load(sdk); },
     async catalog(only) {
       const entries = await Promise.all(installed().filter((sdk) => only === undefined || sdk === only).map(async (sdk) => {
@@ -144,7 +143,7 @@ export async function createDriver(host: HostServices, resources: Resources = EM
       const skills = packages.map((s) => s.name);
       const emit = (event: SessionEvent) => spec.emit(event.type === "telemetry" && "setup" in event.value
         ? { type: "telemetry", value: { setup: { ...event.value.setup, sdk: runtime.sdk, skills } } } : event);
-      spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}, turn unit ${caps.turnUnit}; via ${runtime.via || "Main's defaults"}` });
+      spec.emit({ type: "log", text: `Role ${spec.name}: runtime ${runtime.name} (${runtime.sdk}, ${runtime.model ?? "Main's model"}), thinking ${thinking ?? "uncontrolled"}; via ${runtime.via || "Main's defaults"}` });
       const handle = await sdk.open({
         ...rest, emit, runtime, thinking,
         system: compose(spec.system, resources, packages),

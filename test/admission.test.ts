@@ -11,7 +11,7 @@ import { Worq } from "../src/worq.ts";
 import { KINDS } from "./fake.ts";
 
 const ADMITTED: Capabilities = {
-  switchModel: true, thinking: ["low", "high"], turnUnit: "request", requestAdmission: "awaited",
+  switchModel: true, thinking: ["low", "high"], requestAdmission: "awaited",
   context: { system: "replace", ambientInstructions: false },
 };
 const finish = { description: "Submit.", schema: obj({ value: text(200) }) };

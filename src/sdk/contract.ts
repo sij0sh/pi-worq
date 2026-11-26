@@ -39,8 +39,6 @@ export interface Capabilities {
   /** Levels the runtime's model accepts; [] means no level control at all. */
   thinking: readonly string[];
   context: { system: "replace" | "append"; ambientInstructions: boolean };
-  /** What one `turn` event counts: a model request, or a whole prompt when requests are invisible. */
-  turnUnit: "request" | "prompt";
   /**
    * "awaited": the adapter calls `SessionSpec.admitRequest` once immediately before every actual outgoing
    * model request and releases nothing until allowed. `turn` events are observational only for core charging.
@@ -148,8 +146,6 @@ export interface SDKAdapter {
 }
 /** Role router the core drives (see sdk/registry.ts). */
 export interface Driver {
-  /** Installed SDK ids (Pi first). */
-  sdks?(): readonly string[];
   /** Import one SDK's adapter by id; required before its sync methods. Rejects unknown ids. */
   load?(sdk: string): Promise<void>;
   /** Picker information: each loadable SDK's models. A failing SDK is skipped. */

@@ -32,7 +32,7 @@ export default {
       async models() { calls.models++; return ["e/listed"]; },
       defaultModel() { return "e/default"; },
       defaultThinking() { return "low"; },
-      capabilities() { return { switchModel: false, thinking: ["low", "high"], context: { system: "replace", ambientInstructions: false }, turnUnit: "prompt" }; },
+      capabilities() { return { switchModel: false, thinking: ["low", "high"], context: { system: "replace", ambientInstructions: false } }; },
       validateRuntime(runtime) {
         calls.validate.push(runtime.model);
         if (!/^e\\/[a-z-]+$/.test(runtime.model ?? "")) throw new Error("echo: unknown model " + runtime.model);

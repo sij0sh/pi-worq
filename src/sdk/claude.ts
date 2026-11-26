@@ -48,8 +48,6 @@ const SUMMARY = { detail: "summary" } as const;
 const STARTUP_MS = 12_000;
 const CATALOG_MS = 3_000;
 const CONTROL_MS = 2_000;
-export const BILLING_HEADER = /^x-anthropic-billing-header:/;
-export const AGENT_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -215,7 +213,7 @@ export function claudeAdapter(host: HostServices = {}, injected?: ClaudeSdk): SD
     },
     defaultModel,
     capabilities(): Capabilities {
-      return { switchModel: true, thinking: [], turnUnit: "request", requestAdmission: "awaited", context: { system: "replace", ambientInstructions: false } };
+      return { switchModel: true, thinking: [], requestAdmission: "awaited", context: { system: "replace", ambientInstructions: false } };
     },
     async validateRuntime(runtime, signal) {
       signal.throwIfAborted();

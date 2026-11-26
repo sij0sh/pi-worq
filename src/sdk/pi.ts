@@ -94,7 +94,7 @@ export function piAdapter(host: PiHost | undefined): SDKAdapter {
     defaultThinking() { return host.thinkingLevel; },
     capabilities(runtime): Capabilities {
       return {
-        switchModel: true, thinking: thinkingLevels(primary(runtime)), turnUnit: "request",
+        switchModel: true, thinking: thinkingLevels(primary(runtime)),
         context: { system: "replace", ambientInstructions: false }, contextFork: true,
       };
     },

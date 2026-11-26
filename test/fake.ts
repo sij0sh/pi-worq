@@ -53,13 +53,11 @@ export const FULL_CAPS: Capabilities = {
   switchModel: true,
   thinking: ["off", "minimal", "low", "medium", "high"],
   context: { system: "replace", ambientInstructions: false },
-  turnUnit: "request",
 };
 export const MINIMAL_CAPS: Capabilities = {
   switchModel: false,
   thinking: [],
   context: { system: "append", ambientInstructions: true },
-  turnUnit: "prompt",
 };
 
 /** Scripts keyed by spec.name (agent.plan, subagent, review …); the first matching prefix wins. */

@@ -115,7 +115,6 @@ Pure data; `assertRuntime(runtime, caps)` judges the resolved runtime. Not a sub
 | `switchModel` | `Handle.configure` can change the model | Manual model switch when `false` → `capability` |
 | `thinking` | Levels the runtime's model accepts; `[]` = no level control | Explicit level outside the list → `capability` |
 | `context` | `replace` or `append` with no ambient instructions required | Ambient instructions refuse the session |
-| `turnUnit` | `request` (one `turn` per model request) or `prompt` | Informational; logged at open |
 | `requestAdmission` | `"awaited"` opts into the pre-request gate; `turn` events are observational only | None; the adapter must call it |
 | `contextFork` | `Handle.snapshot()` / `SessionSpec.seed` work: a new session can continue another's history | Absent/`false`: `fork: true` children start fresh with a brief |
 
@@ -123,7 +122,7 @@ Forked children reuse the parent's exact `system`, tool definitions (disallowed 
 
 ## Turn accounting
 
-`turn` events charge the same budgets, but units differ: Pi emits one per model request; a CLI adapter that only sees prompts emits one per `prompt()` and must report `turnUnit: "prompt"`. An adapter with `requestAdmission: "awaited"` is charged by the awaited admission decision instead (first attempt prepaid, each continuation one turn); its `turn` events are observational. `limits.*Turns` defaults (80/16/40) are Pi-calibrated — lower them for prompt-unit SDKs. Unobservable measures (requests, tokens) are omitted, never reported as zero.
+`turn` events charge the same budgets, but units differ: Pi emits one per model request; a CLI adapter that only sees prompts emits one per `prompt()`. An adapter with `requestAdmission: "awaited"` is charged by the awaited admission decision instead (first attempt prepaid, each continuation one turn); its `turn` events are observational. `limits.*Turns` defaults (80/16/40) are Pi-calibrated — lower them for prompt-unit SDKs. Unobservable measures (requests, tokens) are omitted, never reported as zero.
 
 ## Shared resources
 
@@ -146,7 +145,7 @@ Claude uses the SDK's native in-process MCP server (`createSdkMcpServer`) scoped
 - `src/sdk/pi.ts` → `piAdapter(host)`.
 - Refs `<provider>/<model>`; malformed or not in Main's model registry → `model`, at preflight; no Main model and none requested → `model`.
 - Sessions: in-memory session + settings managers (compaction/retry off), fixed resource loader, explicit `agentDir`, and Main's model runtime when the host exposes it, so auth and providers match Main. No extensions are loaded.
-- Capabilities: `switchModel: true`, thinking from the model, `turnUnit: "request"`, isolated context, `contextFork: true`.
+- Capabilities: `switchModel: true`, thinking from the model, isolated context, `contextFork: true`.
 - Fork: `snapshot()` copies `session.messages` (user/assistant/toolResult only) up to the last point where every tool call has its result, excluding the in-flight turn; `seed` is appended to a fresh in-memory `SessionManager` before `createAgentSession`.
 - `configure` uses `session.setModel` / `setThinkingLevel`. Pi clamps an incompatible level on a model-only switch; the adapter reports the effective level.
 - Live changes apply at once when idle, or before the next request, even inside the same prompt. The adapter awaits `beforeRequest` before resolving provider inputs, never interrupting a running tool. For adapters without that hook, the core applies queued changes when the prompt settles.
@@ -170,4 +169,4 @@ Claude uses the SDK's native in-process MCP server (`createSdkMcpServer`) scoped
 - Uses your existing Google Account OAuth login (`agy` Pro/Enterprise subscription), `GEMINI_API_KEY`, or Vertex ADC through a curated `workerEnv()`; unrelated provider keys do not reach the worker.
 - Isolation: passes `--include-default-customizations=false` (`ambientInstructions: false`), appends `spec.system` via ACP `_meta.antigravity.systemPrompt.append` (`context.system: "append"`), and handles ACP `session/request_permission` by auto-allowing only Worq's session-scoped tools and denying built-in `agy` tools.
 - Tools are served over a per-session `127.0.0.1` bearer-authenticated Streamable HTTP MCP server passed to `session/new`, supporting long-blocking tools, `{ text, image }` outputs, `tool-error` reporting, and terminal `submit` cancellation.
-- Capabilities: `switchModel: true` (live `configure({ model, thinking })` via ACP `session/set_config_option`), `thinking: ["low", "medium", "high", "xhigh"]`, `turnUnit: "request"`, `context: { system: "append", ambientInstructions: false }`. Default model inherits a compatible Main reference, else `gemini-4-neon`.
+- Capabilities: `switchModel: true` (live `configure({ model, thinking })` via ACP `session/set_config_option`), `thinking: ["low", "medium", "high", "xhigh"]`, `context: { system: "append", ambientInstructions: false }`. Default model inherits a compatible Main reference, else `gemini-4-neon`.
