@@ -121,6 +121,7 @@ Each launch defaults to the current Pi session's model and thinking level; a lau
 ```sh
 worq sessions | list [ref | --group <id>] | log <ref> [-f] | send <ref> <text> | cancel <ref|group:<id>|all>   [--pid N]
 worq spawn <kind> [--title "Short title"] [--attach <plan>]... [--group <id>] [--notify each|barrier] [--expect N] [--sdk id] [--model ref] [--thinking level] [--] [task]
+worq configure <ref> [--model provider/id] [--thinking level]
 node bin/worq-check-swarm.mjs [--base HEAD] [--group <id>] [--json] [branch-or-ref ...]
 ```
 
